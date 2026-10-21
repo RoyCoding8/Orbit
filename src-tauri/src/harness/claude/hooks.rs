@@ -536,14 +536,16 @@ fn commit_settings(
     }
     let action = format!("config-{}", layer.label());
     let backup = crate::ledger::backup_path(harness.config_root(), HOOKS_KEY, &action);
-    let receipt = atomic::commit(path, patches, Some(&backup)).map_err(HarnessError::from)?;
-    crate::ledger::record(
+    crate::ledger::commit(
         harness.config_root(),
         ResourceKind::Settings,
         HOOKS_KEY,
         &action,
-        &receipt,
+        path,
+        patches,
+        Some(&backup),
     )
+    .map(|_| ())
     .map_err(|error| HarnessError::Write {
         path: path.to_path_buf(),
         source: std::io::Error::other(error.to_string()),

@@ -155,36 +155,25 @@ impl ServerState {
         };
         let path = harness.claude_json_path();
         let backup = crate::ledger::backup_path(harness.config_root(), name, action);
-        let receipt = atomic::commit(&path, vec![patch], Some(&backup))?;
-        record_receipt(harness, name, action, &receipt)?;
+        crate::ledger::commit(
+            harness.config_root(),
+            ResourceKind::McpServer,
+            name,
+            action,
+            &path,
+            vec![patch],
+            Some(&backup),
+        )
+        .map_err(|error| HarnessError::Write {
+            path: path.clone(),
+            source: std::io::Error::other(error.to_string()),
+        })?;
         if self.sidecar_dirty {
             write_disabled(&self.sidecar, &self.disabled)
                 .map_err(|error| partial(action, &path, error))?;
         }
         Ok(())
     }
-}
-
-fn record_receipt(
-    harness: &ClaudeCodeHarness,
-    name: &str,
-    action: &str,
-    receipt: &atomic::Receipt,
-) -> Result<()> {
-    crate::ledger::record(
-        harness.config_root(),
-        ResourceKind::McpServer,
-        name,
-        action,
-        receipt,
-    )
-    .map_err(|error| HarnessError::Write {
-        path: harness
-            .config_root()
-            .join(".harness-agent")
-            .join("ledger.json"),
-        source: std::io::Error::other(error.to_string()),
-    })
 }
 
 /// A failed second-leg write after the config already landed. The message
@@ -1058,7 +1047,7 @@ mod tests {
     }
 
     #[test]
-    fn disable_keeps_a_recoverable_copy_when_recording_the_mutation_fails() {
+    fn failed_disable_reservation_preserves_the_active_entry_and_can_be_retried() {
         let (dir, harness) = fixture();
         let app_data = dir.path().join("app-data");
         let entry = json!({"command":"fixture-server","env":{"SERVICE_TOKEN":"fixture-secret"}});
@@ -1067,11 +1056,10 @@ mod tests {
         fs::create_dir_all(&ledger).unwrap();
 
         let error = harness.mcp_disable("alpha", &app_data).unwrap_err();
-        assert!(error.to_string().contains("mutation landed"));
-        assert!(
-            atomic::read_json(&harness.claude_json_path()).unwrap()["mcpServers"]
-                .get("alpha")
-                .is_none()
+        assert!(error.to_string().contains("reservation failed"));
+        assert_eq!(
+            atomic::read_json(&harness.claude_json_path()).unwrap()["mcpServers"]["alpha"],
+            entry
         );
         let sidecar = atomic::read_json(&app_data.join("mcp-disabled.json")).unwrap();
         assert_eq!(
@@ -1080,6 +1068,12 @@ mod tests {
         );
 
         fs::remove_dir(&ledger).unwrap();
+        harness.mcp_disable("alpha", &app_data).unwrap();
+        assert!(
+            atomic::read_json(&harness.claude_json_path()).unwrap()["mcpServers"]
+                .get("alpha")
+                .is_none()
+        );
         harness.mcp_enable("alpha", &app_data).unwrap();
         assert_eq!(
             atomic::read_json(&harness.claude_json_path()).unwrap()["mcpServers"]["alpha"],

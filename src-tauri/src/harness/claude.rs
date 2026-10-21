@@ -13,7 +13,9 @@ use super::{
 };
 
 pub mod config;
+mod credentials;
 pub mod hooks;
+mod process_lifetime;
 pub mod skills;
 
 /// Environment variable Claude Code honors to relocate its config directory.

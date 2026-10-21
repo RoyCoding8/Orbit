@@ -208,14 +208,14 @@ pub fn apply_value(
             value,
         },
     };
-    let receipt = atomic::commit(&path, vec![patch], Some(&backup))
-        .map_err(|error| ConfigError::Storage(error.to_string()))?;
-    crate::ledger::record(
+    crate::ledger::commit(
         harness.config_root(),
         crate::harness::ResourceKind::Settings,
         key,
         &action,
-        &receipt,
+        &path,
+        vec![patch],
+        Some(&backup),
     )
     .map_err(|error| ConfigError::Storage(error.to_string()))?;
     Ok(())
