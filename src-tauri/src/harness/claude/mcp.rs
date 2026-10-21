@@ -502,11 +502,8 @@ fn test_stdio(config: &StdioEntry) -> std::result::Result<BenchResult, String> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    process_lifetime::isolate_process_group(&mut command);
-    let child = command
-        .spawn()
+    let mut child = ChildTree::spawn(&mut command)
         .map_err(|error| format!("Could not start MCP server: {error}"))?;
-    let mut child = ChildTree::new(child);
     let stderr_log = child
         .child_mut()
         .stderr

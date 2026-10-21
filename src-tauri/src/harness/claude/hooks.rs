@@ -307,7 +307,6 @@ pub fn test_command(
         .map_err(|error| format!("Could not create hook test workspace: {error}"))?;
     let mut process = shell_command(command)?;
     process.current_dir(&sandbox).env_clear();
-    process_lifetime::isolate_process_group(&mut process);
     if let Some(path) = std::env::var_os("PATH") {
         process.env("PATH", path);
     }
@@ -321,11 +320,10 @@ pub fn test_command(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let child = process.spawn().map_err(|error| {
+    let mut child = ChildTree::spawn(&mut process).map_err(|error| {
         let _ = std::fs::remove_dir_all(&sandbox);
         format!("Could not start hook command: {error}")
     })?;
-    let mut child = ChildTree::new(child);
     let mut stdin = child
         .child_mut()
         .stdin
@@ -1130,6 +1128,36 @@ mod tests {
         let after_cleanup = std::fs::read(&log).unwrap_or_default();
         thread::sleep(Duration::from_millis(150));
         assert_eq!(std::fs::read(&log).unwrap_or_default(), after_cleanup);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn command_runner_kills_descendants_after_successful_parent_exit() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = directory.path().join("child.log");
+        let script = directory.path().join("child.cmd");
+        let log_text = log.to_string_lossy().into_owned();
+        std::fs::write(
+            &script,
+            format!(
+                "@echo off\r\n:loop\r\necho x>>\"{log_text}\"\r\nping -n 2 127.0.0.1 >NUL\r\ngoto loop\r\n"
+            ),
+        )
+        .unwrap();
+        let script_text = script.to_string_lossy().into_owned();
+        let command =
+            format!("start \"\" /B cmd /D /C call \"{script_text}\" & ping -n 3 127.0.0.1 >NUL");
+        let result = test_command(&command, &json!({}), Duration::from_secs(5)).unwrap();
+        assert_eq!(result.exit_code, Some(0));
+        assert!(log.exists(), "the child must have created its output file");
+        let after_cleanup = std::fs::read(&log).unwrap();
+        assert!(!after_cleanup.is_empty(), "the descendant must have run");
+        thread::sleep(Duration::from_millis(1_500));
+        assert_eq!(
+            std::fs::read(&log).unwrap(),
+            after_cleanup,
+            "the descendant must stop writing after its successful parent exits"
+        );
     }
 
     #[test]

@@ -1,13 +1,17 @@
 use std::{
     collections::VecDeque,
     io::{self, Read},
-    process::{Child, Command, ExitStatus, Stdio},
+    process::{Child, Command, ExitStatus},
     sync::mpsc::{self, Receiver},
     thread,
 };
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(unix)]
+use std::process::Stdio;
 
 pub(super) const OUTPUT_BYTE_LIMIT: usize = 64 * 1024;
 
@@ -72,13 +76,6 @@ pub(super) fn spawn_capture<R: Read + Send + 'static>(
     receiver
 }
 
-pub(super) fn isolate_process_group(command: &mut Command) {
-    #[cfg(unix)]
-    command.process_group(0);
-    #[cfg(windows)]
-    let _ = command;
-}
-
 /// Owns a spawned child and its descendants until protocol handling finishes.
 /// Dropping the guard tears down the process tree even when a caller returns
 /// early through an error path.
@@ -86,18 +83,31 @@ pub(super) struct ChildTree {
     child: Child,
     cleaned: bool,
     #[cfg(windows)]
-    job: Option<WindowsJob>,
+    job: WindowsJob,
 }
 
 impl ChildTree {
-    pub(super) fn new(child: Child) -> Self {
+    pub(super) fn spawn(command: &mut Command) -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            command.process_group(0);
+            return Ok(Self {
+                child: command.spawn()?,
+                cleaned: false,
+            });
+        }
+
         #[cfg(windows)]
-        let job = WindowsJob::assign(&child);
-        Self {
-            child,
-            cleaned: false,
-            #[cfg(windows)]
-            job,
+        {
+            return Self::spawn_windows(command);
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            Ok(Self {
+                child: command.spawn()?,
+                cleaned: false,
+            })
         }
     }
 
@@ -117,7 +127,7 @@ impl ChildTree {
         {
             let group = format!("-{}", self.child.id());
             let _ = Command::new("kill")
-                .args(["-9", &group])
+                .args(["-9", "--", &group])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
@@ -125,12 +135,7 @@ impl ChildTree {
 
         #[cfg(windows)]
         {
-            if let Some(job) = self.job.take() {
-                job.terminate();
-                drop(job);
-            } else {
-                kill_windows_tree(&self.child);
-            }
+            self.job.terminate();
         }
 
         let _ = self.child.kill();
@@ -145,29 +150,45 @@ impl Drop for ChildTree {
 }
 
 #[cfg(windows)]
-fn kill_windows_tree(child: &Child) {
-    let pid = child.id().to_string();
-    let _ = Command::new("taskkill")
-        .args(["/PID", &pid, "/T", "/F"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+impl ChildTree {
+    fn spawn_windows(command: &mut Command) -> io::Result<Self> {
+        let job = WindowsJob::create()?;
+        command.creation_flags(windows_job::CREATE_SUSPENDED | windows_job::CREATE_NO_WINDOW);
+        let mut child = command.spawn()?;
+        if let Err(error) = job.assign(&child) {
+            terminate_child(&mut child);
+            return Err(error);
+        }
+        if let Err(error) = windows_job::resume_primary_thread(child.id()) {
+            job.terminate();
+            terminate_child(&mut child);
+            return Err(error);
+        }
+        Ok(Self {
+            child,
+            cleaned: false,
+            job,
+        })
+    }
 }
 
 #[cfg(windows)]
-struct WindowsJob(std::ptr::NonNull<std::ffi::c_void>);
+fn terminate_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(windows)]
+struct WindowsJob(windows_job::Handle);
 
 #[cfg(windows)]
 impl WindowsJob {
-    fn assign(child: &Child) -> Option<Self> {
-        use std::{
-            os::windows::io::AsRawHandle,
-            ptr::{null, null_mut},
-        };
+    fn create() -> io::Result<Self> {
+        use std::ptr::{null, null_mut};
 
-        let job =
-            std::ptr::NonNull::new(unsafe { windows_job::CreateJobObjectW(null_mut(), null()) })?;
-        let job = Self(job);
+        let job = Self(windows_job::Handle::from_raw(unsafe {
+            windows_job::CreateJobObjectW(null_mut(), null())
+        })?);
         let mut limits = windows_job::ExtendedLimitInformation::default();
         limits.basic.limit_flags = windows_job::KILL_ON_JOB_CLOSE;
         let configured = unsafe {
@@ -179,12 +200,22 @@ impl WindowsJob {
             )
         };
         if configured == 0 {
-            return None;
+            return Err(io::Error::last_os_error());
         }
+        Ok(job)
+    }
+
+    fn assign(&self, child: &Child) -> io::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+
         let assigned = unsafe {
-            windows_job::AssignProcessToJobObject(job.0.as_ptr(), child.as_raw_handle().cast())
+            windows_job::AssignProcessToJobObject(self.0.as_ptr(), child.as_raw_handle().cast())
         };
-        (assigned != 0).then_some(job)
+        if assigned == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
     }
 
     fn terminate(&self) {
@@ -195,20 +226,89 @@ impl WindowsJob {
 }
 
 #[cfg(windows)]
-impl Drop for WindowsJob {
-    fn drop(&mut self) {
-        unsafe {
-            windows_job::CloseHandle(self.0.as_ptr());
-        }
-    }
-}
-
-#[cfg(windows)]
 mod windows_job {
-    use std::ffi::c_void;
+    use std::{ffi::c_void, io, ptr::NonNull};
 
+    pub(super) const CREATE_SUSPENDED: u32 = 0x0000_0004;
+    pub(super) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const THREAD_SUSPEND_RESUME: u32 = 0x0002;
+    const TH32CS_SNAPTHREAD: u32 = 0x0000_0004;
+    const INVALID_HANDLE_VALUE: isize = -1;
     pub(super) const EXTENDED_LIMIT_INFORMATION: i32 = 9;
     pub(super) const KILL_ON_JOB_CLOSE: u32 = 0x2000;
+
+    pub(super) struct Handle(NonNull<c_void>);
+
+    impl Handle {
+        pub(super) fn from_raw(raw: *mut c_void) -> io::Result<Self> {
+            NonNull::new(raw)
+                .map(Self)
+                .ok_or_else(io::Error::last_os_error)
+        }
+
+        pub(super) fn as_ptr(&self) -> *mut c_void {
+            self.0.as_ptr()
+        }
+    }
+
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.as_ptr());
+            }
+        }
+    }
+
+    // Layout matches Win32 THREADENTRY32: four DWORDs, two LONGs, then DWORD.
+    #[repr(C)]
+    #[derive(Default)]
+    struct ThreadEntry32 {
+        size: u32,
+        usage_count: u32,
+        thread_id: u32,
+        owner_process_id: u32,
+        base_priority: i32,
+        delta_priority: i32,
+        flags: u32,
+    }
+
+    pub(super) fn resume_primary_thread(process_id: u32) -> io::Result<()> {
+        let raw_snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if raw_snapshot as isize == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let snapshot = Handle::from_raw(raw_snapshot)?;
+        let mut entry = ThreadEntry32 {
+            size: std::mem::size_of::<ThreadEntry32>() as u32,
+            ..ThreadEntry32::default()
+        };
+        let mut found = None;
+        let mut has_entry = unsafe { Thread32First(snapshot.as_ptr(), &mut entry) } != 0;
+        while has_entry {
+            if entry.owner_process_id == process_id {
+                found = Some(entry.thread_id);
+                break;
+            }
+            has_entry = unsafe { Thread32Next(snapshot.as_ptr(), &mut entry) } != 0;
+        }
+        let thread_id = found.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "suspended process thread was not found",
+            )
+        })?;
+        let thread = Handle::from_raw(unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, thread_id) })?;
+        let previous_suspend_count = unsafe { ResumeThread(thread.as_ptr()) };
+        if previous_suspend_count == u32::MAX {
+            return Err(io::Error::last_os_error());
+        }
+        if previous_suspend_count != 1 {
+            return Err(io::Error::other(
+                "suspended process thread had an unexpected suspend count",
+            ));
+        }
+        Ok(())
+    }
 
     #[repr(C)]
     #[derive(Default)]
@@ -258,5 +358,10 @@ mod windows_job {
         pub(super) fn AssignProcessToJobObject(job: *mut c_void, process: *mut c_void) -> i32;
         pub(super) fn TerminateJobObject(job: *mut c_void, exit_code: u32) -> i32;
         pub(super) fn CloseHandle(handle: *mut c_void) -> i32;
+        fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> *mut c_void;
+        fn Thread32First(snapshot: *mut c_void, entry: *mut ThreadEntry32) -> i32;
+        fn Thread32Next(snapshot: *mut c_void, entry: *mut ThreadEntry32) -> i32;
+        fn OpenThread(access: u32, inherit: i32, thread_id: u32) -> *mut c_void;
+        fn ResumeThread(thread: *mut c_void) -> u32;
     }
 }
