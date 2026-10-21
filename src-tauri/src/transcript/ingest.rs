@@ -14,11 +14,10 @@ pub struct IngestReport {
     pub skipped_state_lines: usize,
 }
 
-/// Derived-cache schema version. Version 2 stores project-qualified session
-/// keys (`{project}/{file stem}`) so the same filename in two projects keeps
-/// two identities. Version 1 rows cannot carry that key, so the derived
-/// tables are dropped and rebuilt from source files on the next ingest.
-const SCHEMA_VERSION: i64 = 2;
+/// Version 3 uses project-qualified full source filenames for session keys.
+/// Version 2 used only the file stem, which collided for case-sensitive
+/// `.jsonl`/`.JSONL` pairs, so the derived cache is rebuilt on next ingest.
+const SCHEMA_VERSION: i64 = 3;
 
 pub fn open_database(app_data_dir: &Path) -> Result<Connection, TranscriptError> {
     fs::create_dir_all(app_data_dir)?;
@@ -105,16 +104,15 @@ pub fn ingest_projects(
     Ok(report)
 }
 
-/// The database identity of a transcript. Project names cannot contain a
-/// path separator, so `project/` prefixes a unique key across projects
-/// and rides through the single `session_id` IPC parameter unchanged.
+/// The database identity includes the complete source name so files differing
+/// only by extension case remain distinct on case-sensitive filesystems.
 fn qualified_session_id(project: &str, path: &Path) -> String {
-    let stem = path
-        .file_stem()
+    let file_name = path
+        .file_name()
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
-    format!("{project}/{stem}")
+    format!("{project}/{file_name}")
 }
 
 /// Sessions whose source file is gone are stale cache entries. Runs only
@@ -671,7 +669,7 @@ mod tests {
         assert_eq!(count, 2);
         let alpha: String = connection
             .query_row(
-                "SELECT text FROM messages WHERE session_id = 'alpha/dup'",
+                "SELECT text FROM messages WHERE session_id = 'alpha/dup.jsonl'",
                 [],
                 |row| row.get(0),
             )
@@ -679,12 +677,64 @@ mod tests {
         assert_eq!(alpha, "alpha message");
         let beta: String = connection
             .query_row(
-                "SELECT text FROM messages WHERE session_id = 'beta/dup'",
+                "SELECT text FROM messages WHERE session_id = 'beta/dup.jsonl'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
         assert_eq!(beta, "beta message");
+    }
+
+    #[test]
+    fn same_stem_with_case_distinct_extensions_keeps_two_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("projects").join("munged");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join("session.jsonl"),
+            "{\"uuid\":\"lower\",\"type\":\"user\",\"message\":{\"content\":\"lower extension\"}}\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("session.JSONL"),
+            "{\"uuid\":\"upper\",\"type\":\"user\",\"message\":{\"content\":\"upper extension\"}}\n",
+        )
+        .unwrap();
+        if fs::read_dir(&project).unwrap().count() < 2 {
+            return; // The filesystem treats extension case as the same name.
+        }
+
+        let report = ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        assert_eq!(report.sessions, 2);
+        let connection = open_database(&temp.path().join("db")).unwrap();
+        let mut statement = connection
+            .prepare("SELECT session_id FROM sessions ORDER BY session_id")
+            .unwrap();
+        let session_ids = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            session_ids,
+            ["munged/session.JSONL", "munged/session.jsonl"]
+        );
+        let lower: String = connection
+            .query_row(
+                "SELECT text FROM messages WHERE uuid = 'lower'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let upper: String = connection
+            .query_row(
+                "SELECT text FROM messages WHERE uuid = 'upper'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(lower, "lower extension");
+        assert_eq!(upper, "upper extension");
     }
 
     #[test]
@@ -741,7 +791,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_uuid_leaves_one_fts_row_with_current_text() {
+    fn duplicate_uuid_indexes_only_the_last_record_and_fts_text() {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("projects").join("munged");
         fs::create_dir_all(&project).unwrap();
@@ -756,9 +806,22 @@ mod tests {
             "{{\"uuid\":\"dup\",\"type\":\"user\",\"message\":{{\"content\":\"later wording\"}}}}"
         )
         .unwrap();
+        writeln!(
+            file,
+            "{{\"uuid\":\"solo\",\"type\":\"user\",\"message\":{{\"content\":\"independent wording\"}}}}"
+        )
+        .unwrap();
         let report = ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
-        assert_eq!(report.messages_indexed, 1);
+        assert_eq!(report.messages_indexed, 2);
         let connection = open_database(&temp.path().join("db")).unwrap();
+        let message_count: i64 = connection
+            .query_row(
+                "SELECT message_count FROM sessions WHERE session_id = 'munged/session-1.jsonl'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(message_count, 2);
         let fts_rows: i64 = connection
             .query_row(
                 "SELECT count(*) FROM messages_fts WHERE uuid = 'dup'",
@@ -770,6 +833,11 @@ mod tests {
         let hits = super::super::spine::search_connection(&connection, "later", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].text.contains("later wording"));
+        assert!(
+            super::super::spine::search_connection(&connection, "first wording", 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -796,30 +864,32 @@ mod tests {
     }
 
     #[test]
-    fn existing_v1_database_is_rebuilt_to_the_qualified_schema() {
-        let temp = tempfile::tempdir().unwrap();
-        let data_dir = temp.path().join("db");
-        fs::create_dir_all(&data_dir).unwrap();
-        let legacy = format!(
-            "PRAGMA foreign_keys = ON;\n\
-             CREATE TABLE sessions (session_id TEXT PRIMARY KEY, project TEXT NOT NULL, source_path TEXT NOT NULL, updated_at TEXT, message_count INTEGER NOT NULL DEFAULT 0);\n\
-             INSERT INTO sessions VALUES ('old', 'p', 'old.jsonl', NULL, 1);\n\
-             PRAGMA user_version = 1;\n"
-        );
-        {
+    fn previous_cache_versions_rebuild_to_the_full_filename_schema() {
+        for previous_version in [1, 2] {
+            let temp = tempfile::tempdir().unwrap();
+            let data_dir = temp.path().join("db");
+            fs::create_dir_all(&data_dir).unwrap();
+            let legacy = format!(
+                "PRAGMA foreign_keys = ON;\n\
+                 CREATE TABLE sessions (session_id TEXT PRIMARY KEY, project TEXT NOT NULL, source_path TEXT NOT NULL, updated_at TEXT, message_count INTEGER NOT NULL DEFAULT 0);\n\
+                 INSERT INTO sessions VALUES ('old', 'p', 'old.jsonl', NULL, 1);\n\
+                 PRAGMA user_version = {previous_version};\n"
+            );
             let connection =
                 rusqlite::Connection::open(data_dir.join("transcripts.sqlite3")).unwrap();
             connection.execute_batch(&legacy).unwrap();
+            drop(connection);
+
+            let connection = open_database(&data_dir).unwrap();
+            let version: i64 = connection
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, super::SCHEMA_VERSION);
+            let rows: i64 = connection
+                .query_row("SELECT count(*) FROM sessions", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(rows, 0);
         }
-        let connection = open_database(&data_dir).unwrap();
-        let version: i64 = connection
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, super::SCHEMA_VERSION);
-        let rows: i64 = connection
-            .query_row("SELECT count(*) FROM sessions", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(rows, 0);
     }
 
     #[cfg(windows)]
@@ -852,9 +922,9 @@ mod tests {
         assert_eq!(report.skipped_files, 1);
         let cached = list_sessions(&temp.path().join("db")).unwrap();
         assert_eq!(cached.len(), 2);
-        assert!(cached
-            .iter()
-            .any(|session| session.session_id == "munged/locked" && session.message_count == 1));
+        assert!(cached.iter().any(
+            |session| session.session_id == "munged/locked.jsonl" && session.message_count == 1
+        ));
         drop(guard);
         let report = ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
         assert_eq!(report.sessions, 2);
@@ -888,40 +958,6 @@ mod tests {
             .query_row("SELECT count(*) FROM sessions", [], |row| row.get(0))
             .unwrap();
         assert_eq!(rows, 1);
-    }
-
-    #[test]
-    fn duplicate_uuid_counts_only_surviving_rows() {
-        let temp = tempfile::tempdir().unwrap();
-        let project = temp.path().join("projects").join("munged");
-        fs::create_dir_all(&project).unwrap();
-        let mut file = fs::File::create(project.join("session-1.jsonl")).unwrap();
-        writeln!(
-            file,
-            "{{\"uuid\":\"dup\",\"type\":\"user\",\"message\":{{\"content\":\"first\"}}}}"
-        )
-        .unwrap();
-        writeln!(
-            file,
-            "{{\"uuid\":\"dup\",\"type\":\"user\",\"message\":{{\"content\":\"second\"}}}}"
-        )
-        .unwrap();
-        writeln!(
-            file,
-            "{{\"uuid\":\"solo\",\"type\":\"user\",\"message\":{{\"content\":\"third\"}}}}"
-        )
-        .unwrap();
-        let report = ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
-        assert_eq!(report.messages_indexed, 2);
-        let connection = open_database(&temp.path().join("db")).unwrap();
-        let count: i64 = connection
-            .query_row(
-                "SELECT message_count FROM sessions WHERE session_id = 'munged/session-1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 2);
     }
 
     #[test]

@@ -158,15 +158,16 @@ pub fn set_override(
         },
     };
     let backup = ledger::backup_path(harness.config_root(), id, "override");
-    let receipt = atomic::commit(&harness.settings_path(), vec![patch], Some(&backup))
-        .map_err(|e| e.to_string())?;
-    ledger::record(
+    ledger::commit(
         harness.config_root(),
         ResourceKind::Skill,
         id,
         "override",
-        &receipt,
+        &harness.settings_path(),
+        vec![patch],
+        Some(&backup),
     )
+    .map(|_| ())
     .map_err(|error| error.to_string())
 }
 
@@ -191,65 +192,90 @@ pub fn edit_skill(
     ensure_plain_file_if_present(&path)?;
     let backup = ledger::backup_path(harness.config_root(), id, "edit");
     let expected = Sha256::digest(expected_content.as_bytes()).into();
-    let receipt = atomic::restore(&path, expected, content.as_bytes(), Some(&backup)).map_err(
-        |error| match error {
-            atomic::CommitError::Drift { .. } => format!(
-                "Skill {id} changed since this editor opened. Close the editor, refresh skills, and try again."
-            ),
-            other => other.to_string(),
-        },
-    )?;
-    ledger::record(
+    ledger::restore_file(
         harness.config_root(),
         ResourceKind::Skill,
         id,
         "edit",
-        &receipt,
+        &path,
+        expected,
+        content.as_bytes(),
+        Some(&backup),
     )
-    .map_err(|error| error.to_string())
+    .map(|_| ())
+    .map_err(|error| {
+        let message = error.to_string();
+        if message.contains("did not hold the expected state") {
+            format!(
+                "Skill {id} changed since this editor opened. Close the editor, refresh skills, and try again."
+            )
+        } else {
+            message
+        }
+    })
 }
 
 pub fn uninstall(harness: &ClaudeCodeHarness, id: &str) -> Result<(), String> {
     validate_id(id)?;
     let source = harness.config_root().join("skills").join(id);
     ensure_plain_directory(&source)?;
-    let before = safe_directory_checksum(&source)?;
     let backup = ledger::backup_path(harness.config_root(), id, "uninstall");
     ensure_plain_parent(&backup)?;
     if path_exists_no_follow(&backup)? {
         return Err("skill uninstall backup already exists".into());
     }
     std::fs::create_dir_all(backup.parent().unwrap()).map_err(|e| e.to_string())?;
-    std::fs::rename(&source, &backup).map_err(|e| e.to_string())?;
-    let after = safe_directory_checksum(&backup).map_err(|error| {
-        format!("skill was uninstalled, but its backup could not be verified: {error}")
-    })?;
-    if after != before {
-        return Err(
-            "skill was uninstalled, but its backup checksum differs from the source".into(),
-        );
+    let guard = atomic::lock_mutations(&source).map_err(|error| error.to_string())?;
+    ensure_plain_directory(&source)?;
+    if path_exists_no_follow(&backup)? {
+        return Err("skill uninstall backup already exists".into());
     }
-    ledger::record_moved(
+    let before = safe_directory_checksum(&source)?;
+    let plan = atomic::MutationPlan {
+        target: source.clone(),
+        backup: Some(backup.clone()),
+        before_checksum: Some(before.clone()),
+        after_checksum: None,
+    };
+    let op = ledger::reserve_mutation(
         harness.config_root(),
         ResourceKind::Skill,
         id,
         "uninstall",
-        Some(&backup),
-        Some(&before),
-        None,
+        &plan,
+        &guard,
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    std::fs::rename(&source, &backup)
+        .map_err(|error| format!("reserved uninstall {op} did not complete: {error}"))?;
+    let after = safe_directory_checksum(&backup).map_err(|error| {
+        format!("reserved uninstall {op} landed, but its backup could not be verified: {error}")
+    })?;
+    if after != before {
+        return Err(format!(
+            "reserved uninstall {op} landed, but its backup checksum differs from the source"
+        ));
+    }
+    ledger::complete_mutation(harness.config_root(), &op, &guard).map_err(|error| error.to_string())
 }
 
 pub fn restore(harness: &ClaudeCodeHarness, id: &str, backup: &Path) -> Result<(), String> {
     validate_id(id)?;
-    let uninstall = ledger::latest_row(
+    let target = harness.config_root().join("skills").join(id);
+    let uninstall = ledger::latest_applied_row(
+        harness.config_root(),
+        ResourceKind::Skill,
+        id,
+        "uninstall",
+        &target,
+    )?
+    .or(ledger::latest_row(
         harness.config_root(),
         ResourceKind::Skill,
         id,
         "uninstall",
         None,
-    )?
+    )?)
     .ok_or_else(|| format!("no recorded uninstall for skill {id}"))?;
     let recorded_backup = uninstall
         .backup_path
@@ -267,54 +293,61 @@ pub fn restore(harness: &ClaudeCodeHarness, id: &str, backup: &Path) -> Result<(
             "backup is not the recorded uninstall for skill {id}"
         ));
     }
-    let prior_rows = ledger::read(harness.config_root())?;
+    let prior_rows = ledger::read_applied(harness.config_root())?;
     if prior_rows.iter().any(|row| {
         row.resource_kind == "skill"
             && row.id == id
             && row.action == "restore"
-            && row.backup_path.as_deref() == Some(recorded_backup.to_string_lossy().as_ref())
+            && (row.target.as_deref() == Some(target.to_string_lossy().as_ref())
+                || row.backup_path.as_deref() == Some(recorded_backup.to_string_lossy().as_ref()))
     }) {
         return Err(format!("backup for skill {id} has already been restored"));
     }
     let backup_checksum = safe_directory_checksum(backup)?;
-    if backup_checksum != expected_checksum {
-        return Err(format!(
-            "backup checksum does not match the uninstall record for {id}"
-        ));
-    }
-    let target = harness.config_root().join("skills").join(id);
+    ledger::verify_directory_checksum(&backup_checksum, expected_checksum)
+        .map_err(|error| format!("cannot restore skill {id}: {error}"))?;
     ensure_plain_parent(&target)?;
     if path_exists_no_follow(&target)? {
         return Err(format!("skill already exists: {id}"));
     }
     std::fs::create_dir_all(target.parent().unwrap()).map_err(|e| e.to_string())?;
+    let guard = atomic::lock_mutations(&target).map_err(|error| error.to_string())?;
+    if path_exists_no_follow(&target)? {
+        return Err(format!("skill already exists: {id}"));
+    }
+    let plan = atomic::MutationPlan {
+        target: target.clone(),
+        backup: None,
+        before_checksum: None,
+        after_checksum: Some(expected_checksum.to_owned()),
+    };
+    let op = ledger::reserve_mutation(
+        harness.config_root(),
+        ResourceKind::Skill,
+        id,
+        "restore",
+        &plan,
+        &guard,
+    )
+    .map_err(|error| error.to_string())?;
     if let Err(error) = copy_dir(backup, &target) {
         return Err(with_cleanup_error(
-            format!("skill restore copy failed: {error}"),
+            format!("reserved restore {op} copy failed: {error}"),
             &target,
         ));
     }
     let restored_checksum = safe_directory_checksum(&target).map_err(|error| {
         format!(
-            "skill restore was copied, but the restored directory could not be verified: {error}"
+            "reserved restore was copied, but the restored directory could not be verified: {error}"
         )
     })?;
-    if restored_checksum != expected_checksum {
+    if ledger::verify_directory_checksum(&restored_checksum, expected_checksum).is_err() {
         return Err(with_cleanup_error(
             format!("restored skill checksum does not match the uninstall record for {id}"),
             &target,
         ));
     }
-    ledger::record_moved(
-        harness.config_root(),
-        ResourceKind::Skill,
-        id,
-        "restore",
-        Some(&recorded_backup),
-        Some(expected_checksum),
-        Some(&restored_checksum),
-    )
-    .map_err(|error| error.to_string())
+    ledger::complete_mutation(harness.config_root(), &op, &guard).map_err(|error| error.to_string())
 }
 
 pub fn install(harness: &ClaudeCodeHarness, source: &Path) -> Result<String, String> {
@@ -336,35 +369,49 @@ pub fn install(harness: &ClaudeCodeHarness, source: &Path) -> Result<String, Str
     if path_exists_no_follow(&destination)? {
         return Err(format!("skill already exists: {id}"));
     }
+    let guard = atomic::lock_mutations(&destination).map_err(|error| error.to_string())?;
+    if path_exists_no_follow(&destination)? {
+        return Err(format!("skill already exists: {id}"));
+    }
     let checksum = safe_directory_checksum(source)?;
+    let plan = atomic::MutationPlan {
+        target: destination.clone(),
+        backup: None,
+        before_checksum: None,
+        after_checksum: Some(checksum.clone()),
+    };
+    let op = ledger::reserve_mutation(
+        harness.config_root(),
+        ResourceKind::Skill,
+        &id,
+        "install",
+        &plan,
+        &guard,
+    )
+    .map_err(|error| error.to_string())?;
     if let Err(error) = copy_dir(source, &destination) {
-        return Err(with_cleanup_error(error, &destination));
+        return Err(with_cleanup_error(
+            format!("reserved install {op} failed: {error}"),
+            &destination,
+        ));
     }
     let installed_checksum = match safe_directory_checksum(&destination) {
         Ok(checksum) => checksum,
         Err(error) => {
             return Err(with_cleanup_error(
-                format!("installed skill could not be verified: {error}"),
+                format!("reserved install {op} landed, but could not be verified: {error}"),
                 &destination,
             ))
         }
     };
     if installed_checksum != checksum {
         return Err(with_cleanup_error(
-            "installed skill checksum differs from source".into(),
+            format!("reserved install {op} checksum differs from source"),
             &destination,
         ));
     }
-    ledger::record_moved(
-        harness.config_root(),
-        ResourceKind::Skill,
-        &id,
-        "install",
-        None,
-        None,
-        Some(&checksum),
-    )
-    .map_err(|error| error.to_string())?;
+    ledger::complete_mutation(harness.config_root(), &op, &guard)
+        .map_err(|error| error.to_string())?;
     Ok(id)
 }
 
@@ -791,6 +838,45 @@ mod tests {
         assert!(restore(&harness, "alpha", &backup).is_err());
         assert!(backup.is_dir());
         assert!(!harness.config_root().join("skills/alpha").exists());
+    }
+
+    #[test]
+    fn restore_refuses_a_legacy_checksum_collision_and_preserves_the_backup() {
+        let (_dir, harness) = fixture();
+        let skill = harness.config_root().join("skills/alpha");
+        std::fs::remove_file(skill.join("SKILL.md")).unwrap();
+        std::fs::write(skill.join("a"), b"bc").unwrap();
+        let original_checksum = safe_directory_checksum(&skill).unwrap();
+        let original_stream = [b"a".as_slice(), b"bc".as_slice()].concat();
+        let legacy_checksum = atomic::hex(&Sha256::digest(original_stream));
+
+        uninstall(&harness, "alpha").unwrap();
+        let backup = PathBuf::from(
+            ledger::read(harness.config_root()).unwrap()[0]
+                .backup_path
+                .as_deref()
+                .unwrap(),
+        );
+        std::fs::remove_file(backup.join("a")).unwrap();
+        std::fs::write(backup.join("ab"), b"c").unwrap();
+        let changed_checksum = safe_directory_checksum(&backup).unwrap();
+        let changed_stream = [b"ab".as_slice(), b"c".as_slice()].concat();
+        assert_eq!(
+            legacy_checksum,
+            atomic::hex(&Sha256::digest(changed_stream))
+        );
+        assert_ne!(original_checksum, changed_checksum);
+
+        let ledger_path = harness.config_root().join(".harness-agent/ledger.json");
+        let mut value = atomic::read_json(&ledger_path).unwrap();
+        value["rows"][0]["beforeChecksum"] = serde_json::Value::String(legacy_checksum);
+        std::fs::write(&ledger_path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let error = restore(&harness, "alpha", &backup).unwrap_err();
+
+        assert!(error.contains("legacy directory checksum cannot distinguish"));
+        assert!(backup.is_dir());
+        assert!(!skill.exists());
     }
 
     #[test]

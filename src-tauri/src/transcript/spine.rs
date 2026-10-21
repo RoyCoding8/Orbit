@@ -465,6 +465,12 @@ mod tests {
         ] {
             let outcome = search_connection(&connection, query, 10);
             assert!(outcome.is_ok(), "query {query:?} errored: {outcome:?}");
+            if matches!(query, "***" | "   ") {
+                assert!(
+                    outcome.unwrap().is_empty(),
+                    "query {query:?} should have no hits"
+                );
+            }
         }
         let hits = search_connection(&connection, "error: failed", 10).unwrap();
         assert_eq!(
@@ -535,17 +541,5 @@ mod tests {
         assert!(!serialized.contains("rawJson"));
         let markdown = export_markdown(temp.path(), "s").unwrap();
         assert!(markdown.contains("Additional source fields preserved in database: future-kind."));
-    }
-
-    #[test]
-    fn all_punctuation_query_returns_no_hits_without_error() {
-        let temp = tempfile::tempdir().unwrap();
-        let connection = open_database(temp.path()).unwrap();
-        assert!(search_connection(&connection, "***", 10)
-            .unwrap()
-            .is_empty());
-        assert!(search_connection(&connection, "   ", 10)
-            .unwrap()
-            .is_empty());
     }
 }
