@@ -10,8 +10,6 @@ use std::{
 use std::os::unix::process::CommandExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
-#[cfg(unix)]
-use std::process::Stdio;
 
 pub(super) const OUTPUT_BYTE_LIMIT: usize = 64 * 1024;
 
@@ -91,15 +89,15 @@ impl ChildTree {
         #[cfg(unix)]
         {
             command.process_group(0);
-            return Ok(Self {
+            Ok(Self {
                 child: command.spawn()?,
                 cleaned: false,
-            });
+            })
         }
 
         #[cfg(windows)]
         {
-            return Self::spawn_windows(command);
+            Self::spawn_windows(command)
         }
 
         #[cfg(not(any(unix, windows)))]
@@ -124,13 +122,8 @@ impl ChildTree {
         self.cleaned = true;
 
         #[cfg(unix)]
-        {
-            let group = format!("-{}", self.child.id());
-            let _ = Command::new("kill")
-                .args(["-9", "--", &group])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+        unsafe {
+            libc::kill(-(self.child.id() as libc::pid_t), libc::SIGKILL);
         }
 
         #[cfg(windows)]

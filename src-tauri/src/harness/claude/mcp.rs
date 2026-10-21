@@ -155,13 +155,13 @@ impl ServerState {
         };
         let path = harness.claude_json_path();
         let backup = crate::ledger::backup_path(harness.config_root(), name, action);
-        crate::ledger::commit(
+        crate::ledger::write(
             harness.config_root(),
             ResourceKind::McpServer,
             name,
             action,
             &path,
-            vec![patch],
+            atomic::RecordedWrite::Patches(vec![patch]),
             Some(&backup),
         )
         .map_err(|error| HarnessError::Write {
@@ -684,11 +684,7 @@ fn write_rpc(input: &mut impl Write, value: Value) -> std::result::Result<(), St
 
 fn test_http(config: &HttpEntry) -> std::result::Result<BenchResult, String> {
     if !config.url.starts_with("https://") && !is_loopback_http(&config.url) {
-        return Err(
-            "MCP server URL sends credentials over plain HTTP outside this machine; \
-             use https:// or a loopback address"
-                .into(),
-        );
+        return Err("Remote MCP servers require HTTPS; use https:// or a loopback address".into());
     }
     let started = Instant::now();
     let client = reqwest::blocking::Client::builder()
@@ -838,7 +834,7 @@ fn decode_http_response(
         if consumed > BENCH_BYTE_BUDGET {
             return Err("MCP server response exceeded buffering budget".into());
         }
-        let line = line.trim_end_matches(|character| matches!(character, '\r' | '\n'));
+        let line = line.trim_end_matches(['\r', '\n']);
         if line.is_empty() {
             if let Some(value) = event_response(&data, expected_id) {
                 return Ok(value);

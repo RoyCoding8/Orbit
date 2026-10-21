@@ -204,9 +204,11 @@ pub(crate) fn reserve_mutation(
     plan: &atomic::MutationPlan,
     guard: &atomic::MutationGuard,
 ) -> Result<String, String> {
-    let context = MutationContext::new(config_root, kind, id, action);
-    context.reserve(plan, guard)?;
-    Ok(context.op)
+    let kind = format!("{kind:?}").to_lowercase();
+    let op = op_id(&kind, id, action);
+    let row = row_for_plan(&kind, id, action, &op, plan);
+    reserve_row_locked(config_root, &row, guard)?;
+    Ok(op)
 }
 
 /// Mark a verified reservation Applied while the caller still holds the same
@@ -245,41 +247,6 @@ pub(crate) fn complete_mutation(
     .map_err(|error| error.to_string())
 }
 
-struct MutationContext<'a> {
-    config_root: &'a Path,
-    kind: String,
-    id: &'a str,
-    action: &'a str,
-    op: String,
-}
-
-impl<'a> MutationContext<'a> {
-    fn new(config_root: &'a Path, kind: ResourceKind, id: &'a str, action: &'a str) -> Self {
-        let kind = format!("{kind:?}").to_lowercase();
-        let op = op_id(&kind, id, action);
-        Self {
-            config_root,
-            kind,
-            id,
-            action,
-            op,
-        }
-    }
-
-    fn reserve(
-        &self,
-        plan: &atomic::MutationPlan,
-        guard: &atomic::MutationGuard,
-    ) -> Result<(), String> {
-        let row = row_for_plan(&self.kind, self.id, self.action, &self.op, plan);
-        reserve_row_locked(self.config_root, &row, guard)
-    }
-
-    fn complete(&self, guard: &atomic::MutationGuard) -> Result<(), String> {
-        complete_mutation(self.config_root, &self.op, guard)
-    }
-}
-
 type MutationCallback<'a> =
     dyn Fn(&atomic::MutationPlan, &atomic::MutationGuard) -> Result<(), String> + 'a;
 
@@ -293,52 +260,29 @@ fn recorded_mutation<T>(
         &MutationCallback<'_>,
     ) -> std::result::Result<T, atomic::RecordedMutationError<String>>,
 ) -> Result<T, LedgerWriteError> {
-    let context = MutationContext::new(config_root, kind, id, action);
-    let reserve = |plan, guard| context.reserve(plan, guard);
-    let complete = |_, guard| context.complete(guard);
-    operation(&reserve, &complete).map_err(|error| write_error(&context.op, error))
+    let kind = format!("{kind:?}").to_lowercase();
+    let op = op_id(&kind, id, action);
+    let reserve = |plan: &atomic::MutationPlan, guard: &atomic::MutationGuard| {
+        let row = row_for_plan(&kind, id, action, &op, plan);
+        reserve_row_locked(config_root, &row, guard)
+    };
+    let complete = |_: &atomic::MutationPlan, guard: &atomic::MutationGuard| {
+        complete_mutation(config_root, &op, guard)
+    };
+    operation(&reserve, &complete).map_err(|error| write_error(&op, error))
 }
 
-pub fn commit(
+pub(crate) fn write(
     config_root: &Path,
     kind: ResourceKind,
     id: &str,
     action: &str,
     path: &Path,
-    patches: Vec<atomic::Patch>,
+    change: atomic::RecordedWrite<'_>,
     backup: Option<&Path>,
 ) -> Result<atomic::Receipt, LedgerWriteError> {
     recorded_mutation(config_root, kind, id, action, |reserve, complete| {
-        atomic::commit_recorded(path, patches, backup, reserve, complete)
-    })
-}
-
-pub fn write_file(
-    config_root: &Path,
-    kind: ResourceKind,
-    id: &str,
-    action: &str,
-    path: &Path,
-    bytes: &[u8],
-    backup: Option<&Path>,
-) -> Result<atomic::Receipt, LedgerWriteError> {
-    recorded_mutation(config_root, kind, id, action, |reserve, complete| {
-        atomic::write_file_recorded(path, bytes, backup, reserve, complete)
-    })
-}
-
-pub fn restore_file(
-    config_root: &Path,
-    kind: ResourceKind,
-    id: &str,
-    action: &str,
-    path: &Path,
-    expected_current: [u8; 32],
-    bytes: &[u8],
-    backup: Option<&Path>,
-) -> Result<atomic::Receipt, LedgerWriteError> {
-    recorded_mutation(config_root, kind, id, action, |reserve, complete| {
-        atomic::restore_recorded(path, expected_current, bytes, backup, reserve, complete)
+        atomic::write_recorded(path, change, backup, reserve, complete)
     })
 }
 
@@ -430,7 +374,7 @@ pub fn read_applied(config_root: &Path) -> Result<Vec<LedgerRow>, String> {
                 Err(error) => Some(Err(error)),
             }
         })
-        .map(|result| result.map(|row| row.clone()))
+        .map(|result| result.cloned())
         .collect()
 }
 
@@ -439,7 +383,7 @@ fn pending_was_superseded(rows: &[LedgerRow], index: usize, row: &LedgerRow) -> 
         && row.target.as_deref().is_some_and(|target| {
             rows[index + 1..]
                 .iter()
-                .any(|later| later.target.as_deref() == Some(target))
+                .any(|later| later.target.as_deref().map(Path::new) == Some(Path::new(target)))
         })
 }
 
@@ -449,7 +393,7 @@ fn reconcile_pending_for_target(
     guard: &atomic::MutationGuard,
 ) -> Result<(), String> {
     for row in read(config_root)? {
-        if row.target.as_deref() == Some(target)
+        if row.target.as_deref().map(Path::new) == Some(Path::new(target))
             && row.status == Some(LedgerStatus::Pending)
             && operation_state(&row)? == OperationState::Applied
         {
@@ -471,17 +415,13 @@ pub fn latest_row(
     target: Option<&Path>,
 ) -> Result<Option<LedgerRow>, String> {
     let kind_label = format!("{kind:?}").to_lowercase();
-    let target_label = target.map(|path| path.to_string_lossy().into_owned());
-    Ok(read(config_root)?
-        .into_iter()
-        .filter(|row| {
-            row.op.is_some()
-                && row.resource_kind == kind_label
-                && row.id == id
-                && row.action == action
-                && row.target == target_label
-        })
-        .max_by_key(|row| row.timestamp))
+    Ok(read(config_root)?.into_iter().rev().find(|row| {
+        row.op.is_some()
+            && row.resource_kind == kind_label
+            && row.id == id
+            && row.action == action
+            && row.target.as_deref().map(Path::new) == target
+    }))
 }
 
 pub fn latest_applied_row(
@@ -492,34 +432,20 @@ pub fn latest_applied_row(
     target: &Path,
 ) -> Result<Option<LedgerRow>, String> {
     let kind_label = format!("{kind:?}").to_lowercase();
-    let target_label = target.to_string_lossy().into_owned();
     let rows = read(config_root)?;
-    let matches = rows
-        .iter()
-        .cloned()
-        .enumerate()
-        .filter(|(_, row)| {
-            row.op.is_some()
-                && row.resource_kind == kind_label
-                && row.id == id
-                && row.action == action
-                && row.target.as_deref() == Some(target_label.as_str())
-        })
-        .filter_map(|(index, row)| {
-            if pending_was_superseded(&rows, index, &row) {
-                return None;
-            }
-            match operation_state(&row) {
-                Ok(OperationState::Applied) => Some(Ok((index, row))),
-                Ok(OperationState::NotApplied | OperationState::Drift) => None,
-                Err(error) => Some(Err(error)),
-            }
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(matches
-        .into_iter()
-        .max_by_key(|(index, row)| (row.timestamp, *index))
-        .map(|(_, row)| row))
+    for (index, row) in rows.iter().enumerate().rev() {
+        if row.op.is_some()
+            && row.resource_kind == kind_label
+            && row.id == id
+            && row.action == action
+            && row.target.as_deref().map(Path::new) == Some(target)
+            && !pending_was_superseded(&rows, index, row)
+            && operation_state(row)? == OperationState::Applied
+        {
+            return Ok(Some(row.clone()));
+        }
+    }
+    Ok(None)
 }
 
 const DIRECTORY_CHECKSUM_PREFIX: &str = "tree-v2-sha256:";
@@ -633,14 +559,13 @@ pub fn undo(
                 ));
             }
             let undo_backup = backup_path(config_root, id, "undo");
-            restore_file(
+            write(
                 config_root,
                 kind,
                 id,
                 "undo",
                 path,
-                current_digest,
-                &restore,
+                atomic::RecordedWrite::Restore(current_digest, &restore),
                 Some(&undo_backup),
             )
             .map_err(|error| format!("refusing to undo: {error}"))?;
@@ -680,13 +605,13 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"{\"v\":1}").unwrap();
         let backup = backup_path(harness.config_root(), "resource", "edit");
-        write_file(
+        write(
             harness.config_root(),
             ResourceKind::Settings,
             "resource",
             "edit",
             &path,
-            b"{\"v\":2}",
+            atomic::RecordedWrite::Bytes(b"{\"v\":2}"),
             Some(&backup),
         )
         .unwrap();
@@ -712,16 +637,16 @@ mod tests {
         let agent_dir = harness.config_root().join(".harness-agent");
         std::fs::write(&agent_dir, b"blocks ledger directory").unwrap();
 
-        let failed = commit(
+        let failed = write(
             harness.config_root(),
             ResourceKind::Settings,
             "resource",
             "edit",
             &path,
-            vec![atomic::Patch::SetPath {
+            atomic::RecordedWrite::Patches(vec![atomic::Patch::SetPath {
                 path: atomic::p!["ready"],
                 value: serde_json::json!(true),
-            }],
+            }]),
             None,
         )
         .unwrap_err();
@@ -731,16 +656,16 @@ mod tests {
         std::fs::remove_file(&agent_dir).unwrap();
         std::fs::create_dir(&agent_dir).unwrap();
         assert!(read_applied(harness.config_root()).unwrap().is_empty());
-        commit(
+        write(
             harness.config_root(),
             ResourceKind::Settings,
             "resource",
             "edit",
             &path,
-            vec![atomic::Patch::SetPath {
+            atomic::RecordedWrite::Patches(vec![atomic::Patch::SetPath {
                 path: atomic::p!["ready"],
                 value: serde_json::json!(true),
-            }],
+            }]),
             None,
         )
         .unwrap();
@@ -758,13 +683,13 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"before").unwrap();
         let original_backup = backup_path(harness.config_root(), "resource", "edit");
-        write_file(
+        write(
             harness.config_root(),
             ResourceKind::Settings,
             "resource",
             "edit",
             &path,
-            b"applied",
+            atomic::RecordedWrite::Bytes(b"applied"),
             Some(&original_backup),
         )
         .unwrap();
@@ -772,13 +697,13 @@ mod tests {
         let blocker = backup_root(harness.config_root()).join("blocker");
         std::fs::create_dir_all(blocker.parent().unwrap()).unwrap();
         std::fs::write(&blocker, b"not a directory").unwrap();
-        let failed = write_file(
+        let failed = write(
             harness.config_root(),
             ResourceKind::Settings,
             "resource",
             "edit",
             &path,
-            b"not applied",
+            atomic::RecordedWrite::Bytes(b"not applied"),
             Some(&blocker.join("backup")),
         )
         .unwrap_err();
@@ -825,9 +750,9 @@ mod tests {
         std::fs::write(&path, b"before").unwrap();
         let backup = backup_path(harness.config_root(), "resource", "edit");
         let op = "settings:resource:edit:simulated";
-        let result = atomic::write_file_recorded(
+        let result = atomic::write_recorded(
             &path,
-            b"after",
+            atomic::RecordedWrite::Bytes(b"after"),
             Some(&backup),
             |plan, guard| {
                 let row = row_for_plan("settings", "resource", "edit", op, plan);
@@ -847,13 +772,13 @@ mod tests {
         assert_eq!(read_applied(harness.config_root()).unwrap().len(), 1);
 
         let next_backup = backup_path(harness.config_root(), "resource", "edit");
-        write_file(
+        write(
             harness.config_root(),
             ResourceKind::Settings,
             "resource",
             "edit",
             &path,
-            b"next",
+            atomic::RecordedWrite::Bytes(b"next"),
             Some(&next_backup),
         )
         .unwrap();
@@ -871,23 +796,23 @@ mod tests {
         let action = "config-project";
         let project_a = write_project_file(dir.path(), "project-a.json", b"{\"before\":\"a\"}");
         let project_b = write_project_file(dir.path(), "project-b.json", b"{\"before\":\"b\"}");
-        write_file(
+        write(
             harness.config_root(),
             ResourceKind::Settings,
             id,
             action,
             &project_a,
-            b"{\"after\":\"same\"}",
+            atomic::RecordedWrite::Bytes(b"{\"after\":\"same\"}"),
             Some(&backup_path(harness.config_root(), "model-a", action)),
         )
         .unwrap();
-        write_file(
+        write(
             harness.config_root(),
             ResourceKind::Settings,
             id,
             action,
             &project_b,
-            b"{\"after\":\"same\"}",
+            atomic::RecordedWrite::Bytes(b"{\"after\":\"same\"}"),
             Some(&backup_path(harness.config_root(), "model-b", action)),
         )
         .unwrap();
@@ -921,13 +846,13 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"before").unwrap();
         let backup = backup_path(harness.config_root(), "resource", "edit");
-        write_file(
+        write(
             harness.config_root(),
             ResourceKind::Settings,
             "resource",
             "edit",
             &path,
-            b"after",
+            atomic::RecordedWrite::Bytes(b"after"),
             Some(&backup),
         )
         .unwrap();
@@ -970,13 +895,13 @@ mod tests {
         let path = harness.settings_path();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"before").unwrap();
-        write_file(
+        write(
             harness.config_root(),
             ResourceKind::Settings,
             "resource",
             "edit",
             &path,
-            b"after",
+            atomic::RecordedWrite::Bytes(b"after"),
             None,
         )
         .unwrap();
@@ -1000,13 +925,13 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"before").unwrap();
         let backup = backup_path(harness.config_root(), "resource", "edit");
-        write_file(
+        write(
             harness.config_root(),
             ResourceKind::Settings,
             "resource",
             "edit",
             &path,
-            b"after",
+            atomic::RecordedWrite::Bytes(b"after"),
             Some(&backup),
         )
         .unwrap();
@@ -1028,13 +953,13 @@ mod tests {
     fn creation_undo_removes_only_the_unchanged_created_file_and_records_the_removal() {
         let (_dir, harness) = fixture();
         let path = harness.settings_path();
-        write_file(
+        write(
             harness.config_root(),
             ResourceKind::Settings,
             "resource",
             "create",
             &path,
-            b"created",
+            atomic::RecordedWrite::Bytes(b"created"),
             None,
         )
         .unwrap();
@@ -1063,13 +988,13 @@ mod tests {
     fn undo_refuses_a_creation_that_was_drifted_instead_of_removing_it() {
         let (_dir, harness) = fixture();
         let path = harness.settings_path();
-        write_file(
+        write(
             harness.config_root(),
             ResourceKind::Settings,
             "resource",
             "create",
             &path,
-            b"created",
+            atomic::RecordedWrite::Bytes(b"created"),
             None,
         )
         .unwrap();

@@ -208,13 +208,13 @@ pub fn apply_value(
             value,
         },
     };
-    crate::ledger::commit(
+    crate::ledger::write(
         harness.config_root(),
         crate::harness::ResourceKind::Settings,
         key,
         &action,
         &path,
-        vec![patch],
+        atomic::RecordedWrite::Patches(vec![patch]),
         Some(&backup),
     )
     .map_err(|error| ConfigError::Storage(error.to_string()))?;

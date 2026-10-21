@@ -1,11 +1,9 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { act, cleanup, render, screen } from "@testing-library/react";
-import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
+import { describe, expect, it } from "vitest";
+import { act, render, screen } from "@testing-library/react";
+import { mockIPC } from "@tauri-apps/api/mocks";
 import { Hooks } from "./Hooks";
 import { McpPage } from "./Mcp";
 import { Transcripts } from "./Transcripts";
-
-afterEach(() => { cleanup(); clearMocks(); });
 
 const pages = [
   { name: "hooks", Component: Hooks, command: "hooks_list", loading: "Loading hooks…", empty: "No hooks found in the user or selected project settings." },
@@ -23,9 +21,11 @@ describe.each(pages)("$name load feedback", ({ Component, command, loading, empt
     render(<Component />);
     expect(screen.getByText(loading)).toBeInTheDocument();
     expect(screen.queryByText(empty)).not.toBeInTheDocument();
+    if (command === "transcript_list_sessions") expect(screen.getByRole("button", { name: "Index transcripts" })).toBeDisabled();
     await act(async () => { finish([]); });
     expect(await screen.findByText(empty)).toBeInTheDocument();
     expect(screen.queryByText(loading)).not.toBeInTheDocument();
+    if (command === "transcript_list_sessions") expect(screen.getByRole("button", { name: "Index transcripts" })).toBeEnabled();
   });
 
   it("reports a rejected load instead of claiming the source is empty", async () => {

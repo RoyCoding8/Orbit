@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { InvokeArgs } from "@tauri-apps/api/core";
-import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
+import { mockIPC } from "@tauri-apps/api/mocks";
 import { Hooks } from "./Hooks";
 
 const hook = {
@@ -12,12 +12,6 @@ const hook = {
   enabled: true,
   layer: "user",
 };
-
-afterEach(() => {
-  cleanup();
-  clearMocks();
-  vi.restoreAllMocks();
-});
 
 describe("hook mutation identity", () => {
   it("disables the displayed identity without converting it to an array index", async () => {

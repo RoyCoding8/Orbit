@@ -1,4 +1,15 @@
 import "@testing-library/jest-dom/vitest";
+import { afterEach, vi } from "vitest";
+import { cleanup } from "@testing-library/react";
+import { clearMocks } from "@tauri-apps/api/mocks";
+
+afterEach(() => {
+  cleanup();
+  clearMocks();
+  vi.restoreAllMocks();
+  vi.resetAllMocks();
+  vi.unstubAllGlobals();
+});
 
 class TestStyleSheet {
   replaceSync(_text: string) {}

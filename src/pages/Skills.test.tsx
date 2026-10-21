@@ -1,14 +1,9 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
+import { describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { mockIPC } from "@tauri-apps/api/mocks";
 import { Skills } from "./Skills";
 
 const SKILL = { id: "alpha", name: "Alpha", description: "Fixture skill", path: "D:/fixture/skills/alpha/SKILL.md", content: "Original skill content.", state: "on" };
-
-afterEach(() => {
-  cleanup();
-  clearMocks();
-});
 
 function inventory(command: string) {
   if (command === "skills_inventory") return [[SKILL], []];
@@ -21,6 +16,25 @@ async function edit() {
   fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
   return screen.getByRole("dialog", { name: "Edit alpha" });
 }
+
+it("restores the unconsumed backup after repeated uninstall cycles", async () => {
+  const rows = [
+    { timestamp: 1, id: "alpha", action: "uninstall", backupPath: "old-backup" },
+    { timestamp: 2, id: "alpha", action: "restore", backupPath: "old-backup" },
+    { timestamp: 3, id: "alpha", action: "uninstall", backupPath: "new-backup" },
+  ];
+  const ipc = vi.fn((command: string) => {
+    if (command === "skills_inventory") return [[], []];
+    if (command === "skills_ledger") return rows;
+    if (command === "skill_restore") return null;
+    throw new Error(command);
+  });
+  mockIPC(ipc);
+  render(<Skills />);
+  const restore = await screen.findByRole("button", { name: "Restore" });
+  fireEvent.click(restore);
+  await waitFor(() => expect(ipc).toHaveBeenCalledWith("skill_restore", { id: "alpha", backup: "new-backup" }));
+});
 
 describe("Skills loading", () => {
   it("waits for a successful inventory before offering an empty state", async () => {

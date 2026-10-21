@@ -534,13 +534,13 @@ fn commit_settings(
     }
     let action = format!("config-{}", layer.label());
     let backup = crate::ledger::backup_path(harness.config_root(), HOOKS_KEY, &action);
-    crate::ledger::commit(
+    crate::ledger::write(
         harness.config_root(),
         ResourceKind::Settings,
         HOOKS_KEY,
         &action,
         path,
-        patches,
+        atomic::RecordedWrite::Patches(patches),
         Some(&backup),
     )
     .map(|_| ())

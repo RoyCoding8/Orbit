@@ -158,13 +158,13 @@ pub fn set_override(
         },
     };
     let backup = ledger::backup_path(harness.config_root(), id, "override");
-    ledger::commit(
+    ledger::write(
         harness.config_root(),
         ResourceKind::Skill,
         id,
         "override",
         &harness.settings_path(),
-        vec![patch],
+        atomic::RecordedWrite::Patches(vec![patch]),
         Some(&backup),
     )
     .map(|_| ())
@@ -192,14 +192,13 @@ pub fn edit_skill(
     ensure_plain_file_if_present(&path)?;
     let backup = ledger::backup_path(harness.config_root(), id, "edit");
     let expected = Sha256::digest(expected_content.as_bytes()).into();
-    ledger::restore_file(
+    ledger::write(
         harness.config_root(),
         ResourceKind::Skill,
         id,
         "edit",
         &path,
-        expected,
-        content.as_bytes(),
+        atomic::RecordedWrite::Restore(expected, content.as_bytes()),
         Some(&backup),
     )
     .map(|_| ())
@@ -262,14 +261,15 @@ pub fn uninstall(harness: &ClaudeCodeHarness, id: &str) -> Result<(), String> {
 pub fn restore(harness: &ClaudeCodeHarness, id: &str, backup: &Path) -> Result<(), String> {
     validate_id(id)?;
     let target = harness.config_root().join("skills").join(id);
+    let guard = atomic::lock_mutations(&target).map_err(|error| error.to_string())?;
     let uninstall = ledger::latest_row(
         harness.config_root(),
         ResourceKind::Skill,
         id,
         "uninstall",
         Some(&target),
-    )
-    .ok_or_else(|| format!("no recorded uninstall for skill {id}"))?;
+    )?
+    .ok_or_else(|| format!("no uninstall with a verified target identity for skill {id}; legacy backups are preserved but cannot be restored automatically"))?;
     match ledger::operation_state(&uninstall)? {
         ledger::OperationState::Applied => {}
         ledger::OperationState::NotApplied => {
@@ -297,7 +297,7 @@ pub fn restore(harness: &ClaudeCodeHarness, id: &str, backup: &Path) -> Result<(
             "backup is not the recorded uninstall for skill {id}"
         ));
     }
-    let prior_rows = ledger::read(harness.config_root())?;
+    let prior_rows = ledger::read_applied(harness.config_root())?;
     if prior_rows.iter().any(|row| {
         row.resource_kind == "skill"
             && row.id == id
@@ -314,10 +314,6 @@ pub fn restore(harness: &ClaudeCodeHarness, id: &str, backup: &Path) -> Result<(
         return Err(format!("skill already exists: {id}"));
     }
     std::fs::create_dir_all(target.parent().unwrap()).map_err(|e| e.to_string())?;
-    let guard = atomic::lock_mutations(&target).map_err(|error| error.to_string())?;
-    if path_exists_no_follow(&target)? {
-        return Err(format!("skill already exists: {id}"));
-    }
     let plan = atomic::MutationPlan {
         target: target.clone(),
         // The restore row points to the uninstall backup it consumes so that
@@ -879,6 +875,42 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(skill.join("SKILL.md")).unwrap(),
             "external change"
+        );
+    }
+
+    #[test]
+    fn an_abandoned_restore_reservation_does_not_consume_its_backup() {
+        let (_dir, harness) = fixture();
+        uninstall(&harness, "alpha").unwrap();
+        let backup = PathBuf::from(
+            ledger::read(harness.config_root()).unwrap()[0]
+                .backup_path
+                .as_ref()
+                .unwrap(),
+        );
+        let target = harness.config_root().join("skills/alpha");
+        let guard = atomic::lock_mutations(&target).unwrap();
+        ledger::reserve_mutation(
+            harness.config_root(),
+            ResourceKind::Skill,
+            "alpha",
+            "restore",
+            &atomic::MutationPlan {
+                target: target.clone(),
+                backup: Some(backup.clone()),
+                before_checksum: None,
+                after_checksum: Some(safe_directory_checksum(&backup).unwrap()),
+            },
+            &guard,
+        )
+        .unwrap();
+        drop(guard);
+
+        restore(&harness, "alpha", &backup).unwrap();
+        assert!(target.join("SKILL.md").is_file());
+        assert_eq!(
+            ledger::read_applied(harness.config_root()).unwrap().len(),
+            2
         );
     }
 

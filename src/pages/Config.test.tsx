@@ -1,14 +1,8 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { InvokeArgs } from "@tauri-apps/api/core";
-import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
+import { mockIPC } from "@tauri-apps/api/mocks";
 import { Config } from "./Config";
-
-afterEach(() => {
-  cleanup();
-  clearMocks();
-  vi.restoreAllMocks();
-});
 
 const SNAPSHOT = {
   layers: [
