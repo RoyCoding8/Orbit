@@ -262,21 +262,25 @@ pub fn uninstall(harness: &ClaudeCodeHarness, id: &str) -> Result<(), String> {
 pub fn restore(harness: &ClaudeCodeHarness, id: &str, backup: &Path) -> Result<(), String> {
     validate_id(id)?;
     let target = harness.config_root().join("skills").join(id);
-    let uninstall = ledger::latest_applied_row(
+    let uninstall = ledger::latest_row(
         harness.config_root(),
         ResourceKind::Skill,
         id,
         "uninstall",
-        &target,
-    )?
-    .or(ledger::latest_row(
-        harness.config_root(),
-        ResourceKind::Skill,
-        id,
-        "uninstall",
-        None,
-    )?)
+        Some(&target),
+    )
     .ok_or_else(|| format!("no recorded uninstall for skill {id}"))?;
+    match ledger::operation_state(&uninstall)? {
+        ledger::OperationState::Applied => {}
+        ledger::OperationState::NotApplied => {
+            return Err(format!("latest uninstall for skill {id} did not complete"));
+        }
+        ledger::OperationState::Drift => {
+            return Err(format!(
+                "latest uninstall for skill {id} is not safely restorable"
+            ));
+        }
+    }
     let recorded_backup = uninstall
         .backup_path
         .as_deref()
@@ -293,13 +297,12 @@ pub fn restore(harness: &ClaudeCodeHarness, id: &str, backup: &Path) -> Result<(
             "backup is not the recorded uninstall for skill {id}"
         ));
     }
-    let prior_rows = ledger::read_applied(harness.config_root())?;
+    let prior_rows = ledger::read(harness.config_root())?;
     if prior_rows.iter().any(|row| {
         row.resource_kind == "skill"
             && row.id == id
             && row.action == "restore"
-            && (row.target.as_deref() == Some(target.to_string_lossy().as_ref())
-                || row.backup_path.as_deref() == Some(recorded_backup.to_string_lossy().as_ref()))
+            && row.backup_path.as_deref() == Some(recorded_backup.to_string_lossy().as_ref())
     }) {
         return Err(format!("backup for skill {id} has already been restored"));
     }
@@ -317,7 +320,9 @@ pub fn restore(harness: &ClaudeCodeHarness, id: &str, backup: &Path) -> Result<(
     }
     let plan = atomic::MutationPlan {
         target: target.clone(),
-        backup: None,
+        // The restore row points to the uninstall backup it consumes so that
+        // only this backup is one-shot; a later uninstall can be restored.
+        backup: Some(recorded_backup.clone()),
         before_checksum: None,
         after_checksum: Some(expected_checksum.to_owned()),
     };
@@ -331,20 +336,21 @@ pub fn restore(harness: &ClaudeCodeHarness, id: &str, backup: &Path) -> Result<(
     )
     .map_err(|error| error.to_string())?;
     if let Err(error) = copy_dir(backup, &target) {
-        return Err(with_cleanup_error(
-            format!("reserved restore {op} copy failed: {error}"),
-            &target,
+        return Err(format!(
+            "reserved restore {op} failed; inspect the partial destination at {}: {error}",
+            target.display()
         ));
     }
     let restored_checksum = safe_directory_checksum(&target).map_err(|error| {
         format!(
-            "reserved restore was copied, but the restored directory could not be verified: {error}"
+            "reserved restore was copied, but the destination at {} could not be verified: {error}",
+            target.display()
         )
     })?;
     if ledger::verify_directory_checksum(&restored_checksum, expected_checksum).is_err() {
-        return Err(with_cleanup_error(
-            format!("restored skill checksum does not match the uninstall record for {id}"),
-            &target,
+        return Err(format!(
+            "restored skill checksum does not match the uninstall record for {id}; inspect the destination at {}",
+            target.display()
         ));
     }
     ledger::complete_mutation(harness.config_root(), &op, &guard).map_err(|error| error.to_string())
@@ -390,24 +396,24 @@ pub fn install(harness: &ClaudeCodeHarness, source: &Path) -> Result<String, Str
     )
     .map_err(|error| error.to_string())?;
     if let Err(error) = copy_dir(source, &destination) {
-        return Err(with_cleanup_error(
-            format!("reserved install {op} failed: {error}"),
-            &destination,
+        return Err(format!(
+            "reserved install {op} failed; inspect the partial destination at {}: {error}",
+            destination.display()
         ));
     }
     let installed_checksum = match safe_directory_checksum(&destination) {
         Ok(checksum) => checksum,
         Err(error) => {
-            return Err(with_cleanup_error(
-                format!("reserved install {op} landed, but could not be verified: {error}"),
-                &destination,
-            ))
+            return Err(format!(
+            "reserved install {op} could not be verified; inspect the destination at {}: {error}",
+            destination.display()
+        ))
         }
     };
     if installed_checksum != checksum {
-        return Err(with_cleanup_error(
-            format!("reserved install {op} checksum differs from source"),
-            &destination,
+        return Err(format!(
+            "reserved install {op} checksum differs from source; inspect the destination at {}",
+            destination.display()
         ));
     }
     ledger::complete_mutation(harness.config_root(), &op, &guard)
@@ -416,7 +422,7 @@ pub fn install(harness: &ClaudeCodeHarness, source: &Path) -> Result<String, Str
 }
 
 fn copy_dir(source: &Path, destination: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(destination).map_err(|e| e.to_string())?;
+    std::fs::create_dir(destination).map_err(|error| error.to_string())?;
     for entry in std::fs::read_dir(source).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let from = entry.path();
@@ -431,7 +437,18 @@ fn copy_dir(source: &Path, destination: &Path) -> Result<(), String> {
         if metadata.is_dir() {
             copy_dir(&from, &to)?;
         } else if metadata.is_file() {
-            std::fs::copy(from, to).map_err(|e| e.to_string())?;
+            let mut input = std::fs::File::open(&from)
+                .map_err(|error| format!("{}: {error}", from.display()))?;
+            let mut output = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&to)
+                .map_err(|error| format!("{}: {error}", to.display()))?;
+            std::io::copy(&mut input, &mut output)
+                .map_err(|error| format!("{}: {error}", to.display()))?;
+            drop(output);
+            std::fs::set_permissions(&to, metadata.permissions())
+                .map_err(|error| format!("{}: {error}", to.display()))?;
         } else {
             return Err(format!(
                 "skill tree contains a non-file entry: {}",
@@ -568,23 +585,6 @@ fn ensure_backup_path(config_root: &Path, backup: &Path) -> Result<(), String> {
         return Err("backup is outside the harness backup directory".into());
     }
     Ok(())
-}
-
-fn with_cleanup_error(error: String, partial: &Path) -> String {
-    match path_exists_no_follow(partial) {
-        Ok(false) => error,
-        Ok(true) => match std::fs::remove_dir_all(partial) {
-            Ok(()) => error,
-            Err(cleanup) => format!(
-                "{error}; partial directory remains at {}: {cleanup}",
-                partial.display()
-            ),
-        },
-        Err(cleanup) => format!(
-            "{error}; could not inspect partial install {}: {cleanup}",
-            partial.display()
-        ),
-    }
 }
 
 #[cfg(windows)]
@@ -802,7 +802,119 @@ mod tests {
             ledger::read(harness.config_root()).unwrap()[1].action,
             "restore"
         );
+        assert_eq!(
+            ledger::read(harness.config_root()).unwrap()[1]
+                .backup_path
+                .as_deref(),
+            Some(backup.to_string_lossy().as_ref())
+        );
         assert!(restore(&harness, "alpha", &backup).is_err());
+    }
+
+    #[test]
+    fn each_uninstall_backup_can_be_restored_once() {
+        let (_dir, harness) = fixture();
+        let skill = harness.config_root().join("skills/alpha");
+
+        uninstall(&harness, "alpha").unwrap();
+        let first_backup = PathBuf::from(
+            ledger::read(harness.config_root()).unwrap()[0]
+                .backup_path
+                .as_deref()
+                .unwrap(),
+        );
+        restore(&harness, "alpha", &first_backup).unwrap();
+        uninstall(&harness, "alpha").unwrap();
+
+        let rows = ledger::read(harness.config_root()).unwrap();
+        let second_backup = PathBuf::from(rows[2].backup_path.as_deref().unwrap());
+        assert_ne!(first_backup, second_backup);
+        restore(&harness, "alpha", &second_backup).unwrap();
+
+        assert!(skill.is_dir());
+        assert!(restore(&harness, "alpha", &first_backup).is_err());
+        assert!(restore(&harness, "alpha", &second_backup).is_err());
+    }
+
+    #[test]
+    fn restore_refuses_to_fall_back_past_a_newer_pending_uninstall() {
+        let (_dir, harness) = fixture();
+        let skill = harness.config_root().join("skills/alpha");
+        uninstall(&harness, "alpha").unwrap();
+        let backup = PathBuf::from(
+            ledger::read(harness.config_root()).unwrap()[0]
+                .backup_path
+                .as_deref()
+                .unwrap(),
+        );
+        restore(&harness, "alpha", &backup).unwrap();
+
+        let before = safe_directory_checksum(&skill).unwrap();
+        let next_backup = ledger::backup_path(harness.config_root(), "alpha", "uninstall");
+        let guard = atomic::lock_mutations(&skill).unwrap();
+        let plan = atomic::MutationPlan {
+            target: skill.clone(),
+            backup: Some(next_backup),
+            before_checksum: Some(before),
+            after_checksum: None,
+        };
+        ledger::reserve_mutation(
+            harness.config_root(),
+            ResourceKind::Skill,
+            "alpha",
+            "uninstall",
+            &plan,
+            &guard,
+        )
+        .unwrap();
+        drop(guard);
+
+        let error = restore(&harness, "alpha", &backup).unwrap_err();
+        assert!(error.contains("latest uninstall for skill alpha did not complete"));
+        assert!(skill.is_dir());
+
+        std::fs::write(skill.join("SKILL.md"), "external change").unwrap();
+        let error = restore(&harness, "alpha", &backup).unwrap_err();
+        assert!(error.contains("latest uninstall for skill alpha is not safely restorable"));
+        assert_eq!(
+            std::fs::read_to_string(skill.join("SKILL.md")).unwrap(),
+            "external change"
+        );
+    }
+
+    #[test]
+    fn copy_dir_refuses_existing_destinations_without_overwriting_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let destination = dir.path().join("destination");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(source.join("file"), b"source").unwrap();
+        std::fs::write(destination.join("file"), b"external").unwrap();
+
+        assert!(copy_dir(&source, &destination).is_err());
+        assert_eq!(
+            std::fs::read(destination.join("file")).unwrap(),
+            b"external"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_dir_leaves_a_partial_destination_for_inspection_on_failure() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let destination = dir.path().join("destination");
+        std::fs::create_dir(&source).unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::write(&outside, b"outside").unwrap();
+        symlink(outside, source.join("link")).unwrap();
+
+        assert!(copy_dir(&source, &destination).is_err());
+        assert!(destination.is_dir());
+        assert_eq!(std::fs::read_dir(destination).unwrap().count(), 0);
     }
 
     #[test]

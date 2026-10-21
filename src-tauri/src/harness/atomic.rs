@@ -107,6 +107,18 @@ pub(crate) enum RecordedMutationError<E> {
     Finalization(E),
 }
 
+enum RecordedChange<'a> {
+    Patches(Vec<Patch>),
+    Write(&'a [u8]),
+    Restore([u8; 32], &'a [u8]),
+    Remove([u8; 32]),
+}
+
+enum RecordedOutcome {
+    Written(Receipt),
+    Removed,
+}
+
 /// Errors from [`commit`] and [`write_file`].
 #[derive(Debug)]
 pub enum CommitError {
@@ -584,8 +596,17 @@ pub(crate) fn commit_locked(
     _guard: &MutationGuard,
 ) -> std::result::Result<Receipt, CommitError> {
     let original = read_original(path)?;
-    let mut document = parse_document(path, original.as_deref())?;
-    for patch in &patches {
+    let candidate = patch_candidate(path, original.as_deref(), &patches)?;
+    apply_and_write(path, original, &candidate, backup_to)
+}
+
+fn patch_candidate(
+    path: &Path,
+    original: Option<&[u8]>,
+    patches: &[Patch],
+) -> std::result::Result<Vec<u8>, CommitError> {
+    let mut document = parse_document(path, original)?;
+    for patch in patches {
         patch.apply(&mut document).map_err(|error| match error {
             PatchError::Shape => CommitError::Shape {
                 path: path.to_path_buf(),
@@ -595,8 +616,7 @@ pub(crate) fn commit_locked(
             },
         })?;
     }
-    let candidate = serialize_pretty(path, &document).map_err(CommitError::Io)?;
-    apply_and_write(path, original, &candidate, backup_to)
+    serialize_pretty(path, &document).map_err(CommitError::Io)
 }
 
 /// Write exact bytes once and verify the bytes actually read back.
@@ -610,47 +630,6 @@ pub fn write_file(
     apply_and_write(path, original, bytes, backup_to)
 }
 
-/// Reserve a ledger row under the mutation lock before applying a JSON patch.
-/// The completion callback marks that same row Applied after verified readback.
-pub(crate) fn commit_recorded<E>(
-    path: &Path,
-    patches: Vec<Patch>,
-    backup_to: Option<&Path>,
-    reserve: impl FnOnce(&MutationPlan, &MutationGuard) -> std::result::Result<(), E>,
-    complete: impl FnOnce(&MutationPlan, &MutationGuard) -> std::result::Result<(), E>,
-) -> std::result::Result<Receipt, RecordedMutationError<E>> {
-    let guard = lock_mutations(path).map_err(RecordedMutationError::Preparation)?;
-    let original = read_original(path).map_err(RecordedMutationError::Preparation)?;
-    let mut document =
-        parse_document(path, original.as_deref()).map_err(RecordedMutationError::Preparation)?;
-    for patch in &patches {
-        patch.apply(&mut document).map_err(|error| {
-            RecordedMutationError::Preparation(match error {
-                PatchError::Shape => CommitError::Shape {
-                    path: path.to_path_buf(),
-                },
-                PatchError::Stale => CommitError::Stale {
-                    path: path.to_path_buf(),
-                },
-            })
-        })?;
-    }
-    let candidate = serialize_pretty(path, &document)
-        .map_err(CommitError::Io)
-        .map_err(RecordedMutationError::Preparation)?;
-    let plan = MutationPlan {
-        target: path.to_path_buf(),
-        backup: backup_to.map(Path::to_path_buf),
-        before_checksum: original.as_deref().map(|bytes| hex(&sha256(bytes))),
-        after_checksum: Some(hex(&sha256(&candidate))),
-    };
-    reserve(&plan, &guard).map_err(RecordedMutationError::Reservation)?;
-    let receipt = apply_and_write(path, original, &candidate, backup_to)
-        .map_err(RecordedMutationError::Mutation)?;
-    complete(&plan, &guard).map_err(RecordedMutationError::Finalization)?;
-    Ok(receipt)
-}
-
 /// Restore `bytes` only while the file still holds `expected_current`, under
 /// the same mutation lock as commit and write_file. A drift refusal happens
 /// before any write; the original file is untouched.
@@ -662,14 +641,7 @@ pub fn restore(
 ) -> std::result::Result<Receipt, CommitError> {
     let _guard = lock_mutations(path)?;
     let current = read_original(path)?;
-    let actual = current.as_deref().map(sha256);
-    if actual != Some(expected_current) {
-        return Err(CommitError::Drift {
-            path: path.to_path_buf(),
-            expected: expected_current,
-            actual,
-        });
-    }
+    ensure_current(path, &current, expected_current)?;
     apply_and_write(path, current, bytes, backup_to)
 }
 
@@ -690,6 +662,19 @@ pub(crate) fn remove_current_locked(
     _guard: &MutationGuard,
 ) -> std::result::Result<(), CommitError> {
     let current = read_original(path)?;
+    ensure_current(path, &current, expected_current)?;
+    remove_prepared(
+        path,
+        current.as_deref().expect("validated current bytes"),
+        backup_to,
+    )
+}
+
+fn ensure_current(
+    path: &Path,
+    current: &Option<Vec<u8>>,
+    expected_current: [u8; 32],
+) -> std::result::Result<(), CommitError> {
     let actual = current.as_deref().map(sha256);
     if actual != Some(expected_current) {
         return Err(CommitError::Drift {
@@ -698,7 +683,15 @@ pub(crate) fn remove_current_locked(
             actual,
         });
     }
-    if let (Some(backup), Some(bytes)) = (backup_to, current.as_deref()) {
+    Ok(())
+}
+
+fn remove_prepared(
+    path: &Path,
+    bytes: &[u8],
+    backup_to: Option<&Path>,
+) -> std::result::Result<(), CommitError> {
+    if let Some(backup) = backup_to {
         write_backup(backup, bytes)?;
     }
     std::fs::remove_file(path).map_err(|source| {
@@ -709,8 +702,100 @@ pub(crate) fn remove_current_locked(
     })
 }
 
-/// Restore exact bytes under one reservation, verifying the current state
-/// before the reservation is appended and the replacement is attempted.
+fn recorded_change<E>(
+    path: &Path,
+    change: RecordedChange<'_>,
+    backup_to: Option<&Path>,
+    reserve: impl FnOnce(&MutationPlan, &MutationGuard) -> std::result::Result<(), E>,
+    complete: impl FnOnce(&MutationPlan, &MutationGuard) -> std::result::Result<(), E>,
+) -> std::result::Result<RecordedOutcome, RecordedMutationError<E>> {
+    let guard = lock_mutations(path).map_err(RecordedMutationError::Preparation)?;
+    let original = read_original(path).map_err(RecordedMutationError::Preparation)?;
+    let candidate = match change {
+        RecordedChange::Patches(patches) => Some(
+            patch_candidate(path, original.as_deref(), &patches)
+                .map_err(RecordedMutationError::Preparation)?,
+        ),
+        RecordedChange::Write(bytes) => Some(bytes.to_vec()),
+        RecordedChange::Restore(expected, bytes) => {
+            ensure_current(path, &original, expected)
+                .map_err(RecordedMutationError::Preparation)?;
+            Some(bytes.to_vec())
+        }
+        RecordedChange::Remove(expected) => {
+            ensure_current(path, &original, expected)
+                .map_err(RecordedMutationError::Preparation)?;
+            None
+        }
+    };
+    let plan = MutationPlan {
+        target: path.to_path_buf(),
+        backup: original.as_ref().and(backup_to).map(Path::to_path_buf),
+        before_checksum: original.as_deref().map(|value| hex(&sha256(value))),
+        after_checksum: candidate.as_deref().map(|bytes| hex(&sha256(bytes))),
+    };
+    reserve(&plan, &guard).map_err(RecordedMutationError::Reservation)?;
+    let outcome = match candidate {
+        Some(bytes) => RecordedOutcome::Written(
+            apply_and_write(path, original, &bytes, backup_to)
+                .map_err(RecordedMutationError::Mutation)?,
+        ),
+        None => {
+            remove_prepared(
+                path,
+                original.as_deref().expect("validated current bytes"),
+                backup_to,
+            )
+            .map_err(RecordedMutationError::Mutation)?;
+            RecordedOutcome::Removed
+        }
+    };
+    complete(&plan, &guard).map_err(RecordedMutationError::Finalization)?;
+    Ok(outcome)
+}
+
+/// Reserve a mutation before changing the target and mark it Applied only
+/// after the target or preserved deletion backup proves the change landed.
+pub(crate) fn commit_recorded<E>(
+    path: &Path,
+    patches: Vec<Patch>,
+    backup_to: Option<&Path>,
+    reserve: impl FnOnce(&MutationPlan, &MutationGuard) -> std::result::Result<(), E>,
+    complete: impl FnOnce(&MutationPlan, &MutationGuard) -> std::result::Result<(), E>,
+) -> std::result::Result<Receipt, RecordedMutationError<E>> {
+    recorded_change(
+        path,
+        RecordedChange::Patches(patches),
+        backup_to,
+        reserve,
+        complete,
+    )
+    .map(|outcome| match outcome {
+        RecordedOutcome::Written(receipt) => receipt,
+        RecordedOutcome::Removed => unreachable!("patch mutation cannot remove a file"),
+    })
+}
+
+pub(crate) fn write_file_recorded<E>(
+    path: &Path,
+    bytes: &[u8],
+    backup_to: Option<&Path>,
+    reserve: impl FnOnce(&MutationPlan, &MutationGuard) -> std::result::Result<(), E>,
+    complete: impl FnOnce(&MutationPlan, &MutationGuard) -> std::result::Result<(), E>,
+) -> std::result::Result<Receipt, RecordedMutationError<E>> {
+    recorded_change(
+        path,
+        RecordedChange::Write(bytes),
+        backup_to,
+        reserve,
+        complete,
+    )
+    .map(|outcome| match outcome {
+        RecordedOutcome::Written(receipt) => receipt,
+        RecordedOutcome::Removed => unreachable!("write mutation cannot remove a file"),
+    })
+}
+
 pub(crate) fn restore_recorded<E>(
     path: &Path,
     expected_current: [u8; 32],
@@ -719,32 +804,19 @@ pub(crate) fn restore_recorded<E>(
     reserve: impl FnOnce(&MutationPlan, &MutationGuard) -> std::result::Result<(), E>,
     complete: impl FnOnce(&MutationPlan, &MutationGuard) -> std::result::Result<(), E>,
 ) -> std::result::Result<Receipt, RecordedMutationError<E>> {
-    let guard = lock_mutations(path).map_err(RecordedMutationError::Preparation)?;
-    let current = read_original(path).map_err(RecordedMutationError::Preparation)?;
-    let actual = current.as_deref().map(sha256);
-    if actual != Some(expected_current) {
-        return Err(RecordedMutationError::Preparation(CommitError::Drift {
-            path: path.to_path_buf(),
-            expected: expected_current,
-            actual,
-        }));
-    }
-    let plan = MutationPlan {
-        target: path.to_path_buf(),
-        backup: backup_to.map(Path::to_path_buf),
-        before_checksum: current.as_deref().map(|value| hex(&sha256(value))),
-        after_checksum: Some(hex(&sha256(bytes))),
-    };
-    reserve(&plan, &guard).map_err(RecordedMutationError::Reservation)?;
-    let receipt = apply_and_write(path, current, bytes, backup_to)
-        .map_err(RecordedMutationError::Mutation)?;
-    complete(&plan, &guard).map_err(RecordedMutationError::Finalization)?;
-    Ok(receipt)
+    recorded_change(
+        path,
+        RecordedChange::Restore(expected_current, bytes),
+        backup_to,
+        reserve,
+        complete,
+    )
+    .map(|outcome| match outcome {
+        RecordedOutcome::Written(receipt) => receipt,
+        RecordedOutcome::Removed => unreachable!("restore mutation cannot remove a file"),
+    })
 }
 
-/// Remove an unchanged file after reserving a row. Its exact bytes are saved
-/// to `backup_to`, making a completed deletion distinguishable from an
-/// abandoned reservation.
 pub(crate) fn remove_current_recorded<E>(
     path: &Path,
     expected_current: [u8; 32],
@@ -752,51 +824,17 @@ pub(crate) fn remove_current_recorded<E>(
     reserve: impl FnOnce(&MutationPlan, &MutationGuard) -> std::result::Result<(), E>,
     complete: impl FnOnce(&MutationPlan, &MutationGuard) -> std::result::Result<(), E>,
 ) -> std::result::Result<(), RecordedMutationError<E>> {
-    let guard = lock_mutations(path).map_err(RecordedMutationError::Preparation)?;
-    let current = read_original(path).map_err(RecordedMutationError::Preparation)?;
-    let actual = current.as_deref().map(sha256);
-    if actual != Some(expected_current) {
-        return Err(RecordedMutationError::Preparation(CommitError::Drift {
-            path: path.to_path_buf(),
-            expected: expected_current,
-            actual,
-        }));
-    }
-    let bytes = current.as_deref().expect("validated current bytes");
-    let plan = MutationPlan {
-        target: path.to_path_buf(),
-        backup: Some(backup_to.to_path_buf()),
-        before_checksum: Some(hex(&sha256(bytes))),
-        after_checksum: None,
-    };
-    reserve(&plan, &guard).map_err(RecordedMutationError::Reservation)?;
-    remove_current_locked(path, expected_current, Some(backup_to), &guard)
-        .map_err(RecordedMutationError::Mutation)?;
-    complete(&plan, &guard).map_err(RecordedMutationError::Finalization)?;
-    Ok(())
-}
-
-/// Write exact bytes under one reservation and verify the bytes read back.
-pub(crate) fn write_file_recorded<E>(
-    path: &Path,
-    bytes: &[u8],
-    backup_to: Option<&Path>,
-    reserve: impl FnOnce(&MutationPlan, &MutationGuard) -> std::result::Result<(), E>,
-    complete: impl FnOnce(&MutationPlan, &MutationGuard) -> std::result::Result<(), E>,
-) -> std::result::Result<Receipt, RecordedMutationError<E>> {
-    let guard = lock_mutations(path).map_err(RecordedMutationError::Preparation)?;
-    let original = read_original(path).map_err(RecordedMutationError::Preparation)?;
-    let plan = MutationPlan {
-        target: path.to_path_buf(),
-        backup: backup_to.map(Path::to_path_buf),
-        before_checksum: original.as_deref().map(|value| hex(&sha256(value))),
-        after_checksum: Some(hex(&sha256(bytes))),
-    };
-    reserve(&plan, &guard).map_err(RecordedMutationError::Reservation)?;
-    let receipt = apply_and_write(path, original, bytes, backup_to)
-        .map_err(RecordedMutationError::Mutation)?;
-    complete(&plan, &guard).map_err(RecordedMutationError::Finalization)?;
-    Ok(receipt)
+    recorded_change(
+        path,
+        RecordedChange::Remove(expected_current),
+        Some(backup_to),
+        reserve,
+        complete,
+    )
+    .map(|outcome| match outcome {
+        RecordedOutcome::Written(_) => unreachable!("remove mutation cannot write a file"),
+        RecordedOutcome::Removed => (),
+    })
 }
 
 pub fn hex(digest: &[u8]) -> String {

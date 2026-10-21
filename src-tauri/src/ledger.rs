@@ -63,57 +63,6 @@ fn op_id(kind: &str, id: &str, action: &str) -> String {
     format!("{kind}:{id}:{action}:{stamp}")
 }
 
-pub fn record(
-    config_root: &Path,
-    kind: ResourceKind,
-    id: &str,
-    action: &str,
-    receipt: &atomic::Receipt,
-) -> Result<(), RecordError> {
-    let kind_label = format!("{kind:?}").to_lowercase();
-    let op = op_id(&kind_label, id, action);
-    let row = LedgerRow {
-        timestamp: now_millis(),
-        resource_kind: kind_label,
-        id: id.to_owned(),
-        action: action.to_owned(),
-        backup_path: receipt
-            .backup
-            .as_ref()
-            .map(|path| path.to_string_lossy().into_owned()),
-        before_checksum: receipt.before.as_ref().map(|digest| atomic::hex(digest)),
-        after_checksum: Some(atomic::hex(&receipt.after)),
-        target: Some(receipt.target.to_string_lossy().into_owned()),
-        op: Some(op.clone()),
-        status: Some(LedgerStatus::Applied),
-    };
-    append_for_operation(config_root, row, op)
-}
-
-#[derive(Debug)]
-pub struct RecordError {
-    pub op: String,
-    pub source: String,
-    config_root: PathBuf,
-    row: Box<LedgerRow>,
-}
-
-impl RecordError {
-    pub fn retry(self) -> Result<(), Self> {
-        append_row(&self.config_root, &self.row).map_err(|source| Self { source, ..self })
-    }
-}
-
-impl std::fmt::Display for RecordError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "the mutation landed, but recording operation {} failed: {}",
-            self.op, self.source
-        )
-    }
-}
-
 #[derive(Debug)]
 enum WritePhase {
     Preparation,
@@ -147,7 +96,7 @@ impl std::fmt::Display for LedgerWriteError {
             ),
             WritePhase::Finalization => write!(
                 f,
-                "mutation {} landed, but its Applied status could not be saved: {}",
+                "mutation {} finalization failed: {}",
                 self.op, self.source
             ),
         }
@@ -181,64 +130,11 @@ fn write_error<E: std::fmt::Display>(
     }
 }
 
-fn append_for_operation(config_root: &Path, row: LedgerRow, op: String) -> Result<(), RecordError> {
-    append_row(config_root, &row).map_err(|source| RecordError {
-        op,
-        source,
-        config_root: config_root.to_path_buf(),
-        row: Box::new(row),
-    })
-}
-
-pub fn record_moved(
-    config_root: &Path,
-    kind: ResourceKind,
-    id: &str,
-    action: &str,
-    backup: Option<&Path>,
-    before: Option<&str>,
-    after: Option<&str>,
-) -> Result<(), RecordError> {
-    let kind_label = format!("{kind:?}").to_lowercase();
-    let op = op_id(&kind_label, id, action);
-    let row = LedgerRow {
-        timestamp: now_millis(),
-        resource_kind: kind_label,
-        id: id.to_owned(),
-        action: action.to_owned(),
-        backup_path: backup.map(|path| path.to_string_lossy().into_owned()),
-        before_checksum: before.map(str::to_owned),
-        after_checksum: after.map(str::to_owned),
-        target: None,
-        op: Some(op.clone()),
-        status: Some(LedgerStatus::Applied),
-    };
-    append_for_operation(config_root, row, op)
-}
-
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
-}
-
-fn append_row(config_root: &Path, row: &LedgerRow) -> Result<(), String> {
-    let path = config_root.join(".harness-agent").join("ledger.json");
-    std::fs::create_dir_all(path.parent().ok_or("ledger path has no parent")?)
-        .map_err(|error| error.to_string())?;
-    let row_value = serde_json::to_value(row).map_err(|error| error.to_string())?;
-    atomic::commit(
-        &path,
-        vec![atomic::Patch::Push {
-            path: atomic::p!["rows"],
-            value: row_value,
-            key: Some("op".into()),
-        }],
-        None,
-    )
-    .map(|_| ())
-    .map_err(|error| error.to_string())
 }
 
 fn append_row_locked(
@@ -308,11 +204,9 @@ pub(crate) fn reserve_mutation(
     plan: &atomic::MutationPlan,
     guard: &atomic::MutationGuard,
 ) -> Result<String, String> {
-    let kind_label = format!("{kind:?}").to_lowercase();
-    let op = op_id(&kind_label, id, action);
-    let row = row_for_plan(&kind_label, id, action, &op, plan);
-    reserve_row_locked(config_root, &row, guard)?;
-    Ok(op)
+    let context = MutationContext::new(config_root, kind, id, action);
+    context.reserve(plan, guard)?;
+    Ok(context.op)
 }
 
 /// Mark a verified reservation Applied while the caller still holds the same
@@ -351,29 +245,58 @@ pub(crate) fn complete_mutation(
     .map_err(|error| error.to_string())
 }
 
-fn commit_recorded(
+struct MutationContext<'a> {
+    config_root: &'a Path,
+    kind: String,
+    id: &'a str,
+    action: &'a str,
+    op: String,
+}
+
+impl<'a> MutationContext<'a> {
+    fn new(config_root: &'a Path, kind: ResourceKind, id: &'a str, action: &'a str) -> Self {
+        let kind = format!("{kind:?}").to_lowercase();
+        let op = op_id(&kind, id, action);
+        Self {
+            config_root,
+            kind,
+            id,
+            action,
+            op,
+        }
+    }
+
+    fn reserve(
+        &self,
+        plan: &atomic::MutationPlan,
+        guard: &atomic::MutationGuard,
+    ) -> Result<(), String> {
+        let row = row_for_plan(&self.kind, self.id, self.action, &self.op, plan);
+        reserve_row_locked(self.config_root, &row, guard)
+    }
+
+    fn complete(&self, guard: &atomic::MutationGuard) -> Result<(), String> {
+        complete_mutation(self.config_root, &self.op, guard)
+    }
+}
+
+type MutationCallback<'a> =
+    dyn Fn(&atomic::MutationPlan, &atomic::MutationGuard) -> Result<(), String> + 'a;
+
+fn recorded_mutation<T>(
     config_root: &Path,
     kind: ResourceKind,
     id: &str,
     action: &str,
-    path: &Path,
-    patches: Vec<atomic::Patch>,
-    backup: Option<&Path>,
-) -> Result<atomic::Receipt, LedgerWriteError> {
-    let kind_label = format!("{kind:?}").to_lowercase();
-    let op = op_id(&kind_label, id, action);
-    let row_op = op.clone();
-    let result = atomic::commit_recorded(
-        path,
-        patches,
-        backup,
-        |plan, guard| {
-            let row = row_for_plan(&kind_label, id, action, &row_op, plan);
-            reserve_row_locked(config_root, &row, guard)
-        },
-        |_, guard| complete_mutation(config_root, &op, guard),
-    );
-    result.map_err(|error| write_error(&op, error))
+    operation: impl FnOnce(
+        &MutationCallback<'_>,
+        &MutationCallback<'_>,
+    ) -> std::result::Result<T, atomic::RecordedMutationError<String>>,
+) -> Result<T, LedgerWriteError> {
+    let context = MutationContext::new(config_root, kind, id, action);
+    let reserve = |plan, guard| context.reserve(plan, guard);
+    let complete = |_, guard| context.complete(guard);
+    operation(&reserve, &complete).map_err(|error| write_error(&context.op, error))
 }
 
 pub fn commit(
@@ -385,7 +308,9 @@ pub fn commit(
     patches: Vec<atomic::Patch>,
     backup: Option<&Path>,
 ) -> Result<atomic::Receipt, LedgerWriteError> {
-    commit_recorded(config_root, kind, id, action, path, patches, backup)
+    recorded_mutation(config_root, kind, id, action, |reserve, complete| {
+        atomic::commit_recorded(path, patches, backup, reserve, complete)
+    })
 }
 
 pub fn write_file(
@@ -397,20 +322,9 @@ pub fn write_file(
     bytes: &[u8],
     backup: Option<&Path>,
 ) -> Result<atomic::Receipt, LedgerWriteError> {
-    let kind_label = format!("{kind:?}").to_lowercase();
-    let op = op_id(&kind_label, id, action);
-    let row_op = op.clone();
-    let result = atomic::write_file_recorded(
-        path,
-        bytes,
-        backup,
-        |plan, guard| {
-            let row = row_for_plan(&kind_label, id, action, &row_op, plan);
-            reserve_row_locked(config_root, &row, guard)
-        },
-        |_, guard| complete_mutation(config_root, &op, guard),
-    );
-    result.map_err(|error| write_error(&op, error))
+    recorded_mutation(config_root, kind, id, action, |reserve, complete| {
+        atomic::write_file_recorded(path, bytes, backup, reserve, complete)
+    })
 }
 
 pub fn restore_file(
@@ -423,21 +337,9 @@ pub fn restore_file(
     bytes: &[u8],
     backup: Option<&Path>,
 ) -> Result<atomic::Receipt, LedgerWriteError> {
-    let kind_label = format!("{kind:?}").to_lowercase();
-    let op = op_id(&kind_label, id, action);
-    let row_op = op.clone();
-    let result = atomic::restore_recorded(
-        path,
-        expected_current,
-        bytes,
-        backup,
-        |plan, guard| {
-            let row = row_for_plan(&kind_label, id, action, &row_op, plan);
-            reserve_row_locked(config_root, &row, guard)
-        },
-        |_, guard| complete_mutation(config_root, &op, guard),
-    );
-    result.map_err(|error| write_error(&op, error))
+    recorded_mutation(config_root, kind, id, action, |reserve, complete| {
+        atomic::restore_recorded(path, expected_current, bytes, backup, reserve, complete)
+    })
 }
 
 pub fn remove_file(
@@ -449,20 +351,9 @@ pub fn remove_file(
     expected_current: [u8; 32],
     backup: &Path,
 ) -> Result<(), LedgerWriteError> {
-    let kind_label = format!("{kind:?}").to_lowercase();
-    let op = op_id(&kind_label, id, action);
-    let row_op = op.clone();
-    let result = atomic::remove_current_recorded(
-        path,
-        expected_current,
-        backup,
-        |plan, guard| {
-            let row = row_for_plan(&kind_label, id, action, &row_op, plan);
-            reserve_row_locked(config_root, &row, guard)
-        },
-        |_, guard| complete_mutation(config_root, &op, guard),
-    );
-    result.map_err(|error| write_error(&op, error))
+    recorded_mutation(config_root, kind, id, action, |reserve, complete| {
+        atomic::remove_current_recorded(path, expected_current, backup, reserve, complete)
+    })
 }
 
 pub fn read(config_root: &Path) -> Result<Vec<LedgerRow>, String> {
@@ -783,19 +674,20 @@ mod tests {
     }
 
     #[test]
-    fn record_uses_receipt_checksums_backup_bytes_and_target() {
+    fn write_reserves_checksums_backup_bytes_and_target() {
         let (_dir, harness) = fixture();
         let path = harness.settings_path();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"{\"v\":1}").unwrap();
         let backup = backup_path(harness.config_root(), "resource", "edit");
-        let receipt = atomic::write_file(&path, b"{\"v\":2}", Some(&backup)).unwrap();
-        record(
+        write_file(
             harness.config_root(),
             ResourceKind::Settings,
             "resource",
             "edit",
-            &receipt,
+            &path,
+            b"{\"v\":2}",
+            Some(&backup),
         )
         .unwrap();
         let row = read(harness.config_root()).unwrap().remove(0);
@@ -965,36 +857,11 @@ mod tests {
             Some(&next_backup),
         )
         .unwrap();
-        assert_eq!(
-            read(harness.config_root()).unwrap()[0].status,
-            Some(LedgerStatus::Applied)
-        );
-    }
-
-    #[test]
-    fn retrying_the_same_audit_row_keeps_one_operation() {
-        let (_dir, harness) = fixture();
-        let receipt = atomic::write_file(&harness.settings_path(), b"done", None).unwrap();
-        record(
-            harness.config_root(),
-            ResourceKind::Settings,
-            "resource",
-            "edit",
-            &receipt,
-        )
-        .unwrap();
-        let row = read(harness.config_root()).unwrap().remove(0);
-        let error = RecordError {
-            op: row.op.clone().unwrap(),
-            source: "simulated ambiguous append result".into(),
-            config_root: harness.config_root().to_path_buf(),
-            row: Box::new(row),
-        };
-        let op = error.op.clone();
-        error.retry().unwrap();
         let rows = read(harness.config_root()).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].op.as_deref(), Some(op.as_str()));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].status, Some(LedgerStatus::Applied));
+        assert_eq!(rows[1].status, Some(LedgerStatus::Applied));
+        assert_eq!(read_applied(harness.config_root()).unwrap().len(), 2);
     }
 
     #[test]
@@ -1004,32 +871,24 @@ mod tests {
         let action = "config-project";
         let project_a = write_project_file(dir.path(), "project-a.json", b"{\"before\":\"a\"}");
         let project_b = write_project_file(dir.path(), "project-b.json", b"{\"before\":\"b\"}");
-        let receipt_a = atomic::write_file(
+        write_file(
+            harness.config_root(),
+            ResourceKind::Settings,
+            id,
+            action,
             &project_a,
             b"{\"after\":\"same\"}",
             Some(&backup_path(harness.config_root(), "model-a", action)),
         )
         .unwrap();
-        record(
+        write_file(
             harness.config_root(),
             ResourceKind::Settings,
             id,
             action,
-            &receipt_a,
-        )
-        .unwrap();
-        let receipt_b = atomic::write_file(
             &project_b,
             b"{\"after\":\"same\"}",
             Some(&backup_path(harness.config_root(), "model-b", action)),
-        )
-        .unwrap();
-        record(
-            harness.config_root(),
-            ResourceKind::Settings,
-            id,
-            action,
-            &receipt_b,
         )
         .unwrap();
 
@@ -1062,13 +921,14 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"before").unwrap();
         let backup = backup_path(harness.config_root(), "resource", "edit");
-        let receipt = atomic::write_file(&path, b"after", Some(&backup)).unwrap();
-        record(
+        write_file(
             harness.config_root(),
             ResourceKind::Settings,
             "resource",
             "edit",
-            &receipt,
+            &path,
+            b"after",
+            Some(&backup),
         )
         .unwrap();
         std::fs::write(&path, b"drifted").unwrap();
@@ -1110,13 +970,14 @@ mod tests {
         let path = harness.settings_path();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"before").unwrap();
-        let receipt = atomic::write_file(&path, b"after", None).unwrap();
-        record(
+        write_file(
             harness.config_root(),
             ResourceKind::Settings,
             "resource",
             "edit",
-            &receipt,
+            &path,
+            b"after",
+            None,
         )
         .unwrap();
 
@@ -1139,13 +1000,14 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"before").unwrap();
         let backup = backup_path(harness.config_root(), "resource", "edit");
-        let receipt = atomic::write_file(&path, b"after", Some(&backup)).unwrap();
-        record(
+        write_file(
             harness.config_root(),
             ResourceKind::Settings,
             "resource",
             "edit",
-            &receipt,
+            &path,
+            b"after",
+            Some(&backup),
         )
         .unwrap();
         std::fs::write(&backup, b"corrupted").unwrap();
@@ -1166,13 +1028,14 @@ mod tests {
     fn creation_undo_removes_only_the_unchanged_created_file_and_records_the_removal() {
         let (_dir, harness) = fixture();
         let path = harness.settings_path();
-        let receipt = atomic::write_file(&path, b"created", None).unwrap();
-        record(
+        write_file(
             harness.config_root(),
             ResourceKind::Settings,
             "resource",
             "create",
-            &receipt,
+            &path,
+            b"created",
+            None,
         )
         .unwrap();
         undo(
@@ -1187,7 +1050,8 @@ mod tests {
         let rows = read(harness.config_root()).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].action, "undo");
-        assert!(rows[1].backup_path.is_none());
+        let removal_backup = rows[1].backup_path.as_deref().unwrap();
+        assert_eq!(std::fs::read(removal_backup).unwrap(), b"created");
         assert!(rows[1].after_checksum.is_none());
         assert_eq!(
             rows[1].before_checksum.as_deref(),
@@ -1199,13 +1063,14 @@ mod tests {
     fn undo_refuses_a_creation_that_was_drifted_instead_of_removing_it() {
         let (_dir, harness) = fixture();
         let path = harness.settings_path();
-        let receipt = atomic::write_file(&path, b"created", None).unwrap();
-        record(
+        write_file(
             harness.config_root(),
             ResourceKind::Settings,
             "resource",
             "create",
-            &receipt,
+            &path,
+            b"created",
+            None,
         )
         .unwrap();
         std::fs::write(&path, b"modified after creation").unwrap();
