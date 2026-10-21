@@ -1,18 +1,25 @@
-# Orbit
+<div align="center">
+  <img src="assets/orbit-readme.svg" alt="Orbit. Your coding agent setup, in one place." width="900" />
+  <br />
+  <a href="https://github.com/RoyCoding8/Orbit/actions/workflows/ci.yml"><img src="https://github.com/RoyCoding8/Orbit/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-6750A4.svg" alt="Apache License 2.0" /></a>
+</div>
 
-[![CI](https://github.com/RoyCoding8/Orbit/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/RoyCoding8/Orbit/actions/workflows/ci.yml)
+<br />
 
-Orbit is a local desktop app for managing Claude Code configuration. It brings skills, project memories, MCP servers, hooks, settings, and local transcripts into one interface. The frontend is React and TypeScript; the desktop shell and local operations are implemented in Rust with Tauri.
+Orbit puts Claude Code's tools and context in one desktop app. Manage skills, memories, MCP servers, hooks, settings, and transcripts without hunting through configuration files.
 
-Orbit currently supports Claude Code only. It does not sync configuration to a cloud service.
+**Claude Code is the only coding agent supported today.** Orbit is a local desktop app; it does not sync configuration to a cloud service.
 
-## Features
+## What you can manage
 
-- **Skills and memories:** browse and edit skills, manage visibility, restore recent uninstalls, and read project memories.
-- **MCP servers:** manage local stdio and remote HTTP servers, including enable, disable, delete, and connection tests.
-- **Hooks:** inspect user and project hooks, edit them, and test commands with sample JSON input.
-- **Settings:** inspect configuration layers, edit one key at a time, and undo recorded changes when the file has not changed since.
-- **Transcripts:** index local Claude Code sessions, browse and search messages, follow conversation branches, and export Markdown.
+| | Area | What you can do |
+|:--:|---|---|
+| <img src="assets/icons/skills.svg" alt="" width="24" /> | **Skills and memories** | Browse and edit skills, control visibility, restore recent uninstalls, and read project memories. |
+| <img src="assets/icons/mcp.svg" alt="" width="24" /> | **MCP servers** | Manage local stdio and remote HTTP servers, then test their connections. |
+| <img src="assets/icons/hooks.svg" alt="" width="24" /> | **Hooks** | Inspect and edit user or project hooks. Test commands with sample JSON input. |
+| <img src="assets/icons/settings.svg" alt="" width="24" /> | **Settings** | Inspect configuration layers, edit one key at a time, and undo a recorded change when the file has not changed since. |
+| <img src="assets/icons/transcripts.svg" alt="" width="24" /> | **Transcripts** | Index local sessions, search messages, follow conversation branches, and export Markdown. |
 
 ## Requirements
 
@@ -64,3 +71,7 @@ npm run tauri build
 ```
 
 The installer is written under `src-tauri/target/release/bundle/nsis`.
+
+## License
+
+Orbit is licensed under the [Apache License 2.0](LICENSE).
