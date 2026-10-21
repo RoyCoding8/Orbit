@@ -1,13 +1,10 @@
-#[cfg(not(windows))]
-use std::os::unix::process::CommandExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::{
     collections::BTreeMap,
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
@@ -16,7 +13,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::Digest;
 
-use super::{config::SettingsLayer, ClaudeCodeHarness};
+use super::{
+    config::SettingsLayer,
+    process_lifetime::{self, CaptureEnd, ChildTree, OUTPUT_BYTE_LIMIT},
+    ClaudeCodeHarness,
+};
 use crate::harness::{atomic, Harness, HarnessError, ResourceKind, Result};
 
 const HOOKS_KEY: &str = "hooks";
@@ -306,8 +307,7 @@ pub fn test_command(
         .map_err(|error| format!("Could not create hook test workspace: {error}"))?;
     let mut process = shell_command(command)?;
     process.current_dir(&sandbox).env_clear();
-    #[cfg(not(windows))]
-    process.process_group(0);
+    process_lifetime::isolate_process_group(&mut process);
     if let Some(path) = std::env::var_os("PATH") {
         process.env("PATH", path);
     }
@@ -321,11 +321,13 @@ pub fn test_command(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = process.spawn().map_err(|error| {
+    let child = process.spawn().map_err(|error| {
         let _ = std::fs::remove_dir_all(&sandbox);
         format!("Could not start hook command: {error}")
     })?;
+    let mut child = ChildTree::new(child);
     let mut stdin = child
+        .child_mut()
         .stdin
         .take()
         .ok_or_else(|| "Hook stdin unavailable".to_string())?;
@@ -334,49 +336,38 @@ pub fn test_command(
         let _ = stdin.write_all(&bytes);
     });
     let stdout = child
+        .child_mut()
         .stdout
         .take()
         .ok_or_else(|| "Hook stdout unavailable".to_string())?;
     let stderr = child
+        .child_mut()
         .stderr
         .take()
         .ok_or_else(|| "Hook stderr unavailable".to_string())?;
-    let (tx, rx) = mpsc::channel();
-    for (is_err, mut stream) in [
-        (false, Box::new(stdout) as Box<dyn Read + Send>),
-        (true, Box::new(stderr) as Box<dyn Read + Send>),
-    ] {
-        let tx = tx.clone();
-        thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = stream.read_to_end(&mut bytes);
-            let _ = tx.send((is_err, bytes));
-        });
-    }
-    drop(tx);
+    let stdout = process_lifetime::spawn_capture(stdout, OUTPUT_BYTE_LIMIT, CaptureEnd::Beginning);
+    let stderr = process_lifetime::spawn_capture(stderr, OUTPUT_BYTE_LIMIT, CaptureEnd::End);
     let started = Instant::now();
     let status = loop {
-        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+        if let Some(status) = child
+            .child_mut()
+            .try_wait()
+            .map_err(|error| error.to_string())?
+        {
             break Some(status);
         }
         if started.elapsed() >= timeout {
-            kill_process_tree(&mut child);
             break None;
         }
         thread::sleep(Duration::from_millis(10));
     };
-    let mut out = String::new();
-    let mut err = String::new();
-    for _ in 0..2 {
-        if let Ok((is_err, bytes)) = rx.recv_timeout(Duration::from_millis(250)) {
-            let text = String::from_utf8_lossy(&bytes).into_owned();
-            if is_err {
-                err = text;
-            } else {
-                out = text;
-            }
-        }
-    }
+    child.cleanup();
+    let out = stdout
+        .recv_timeout(Duration::from_millis(250))
+        .unwrap_or_default();
+    let err = stderr
+        .recv_timeout(Duration::from_millis(250))
+        .unwrap_or_default();
     let _ = std::fs::remove_dir_all(&sandbox);
     Ok(HookTestResult {
         stdout: out,
@@ -400,32 +391,6 @@ fn shell_command(command: &str) -> std::result::Result<Command, String> {
         let mut process = Command::new("sh");
         process.args(["-c", command]);
         Ok(process)
-    }
-}
-
-fn kill_process_tree(child: &mut std::process::Child) {
-    #[cfg(windows)]
-    {
-        let pid = child.id().to_string();
-        let _ = Command::new("taskkill")
-            .args(["/PID", &pid, "/T", "/F"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-    #[cfg(not(windows))]
-    {
-        let group = format!("-{}", child.id());
-        let _ = Command::new("kill")
-            .arg("-9")
-            .arg(&group)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        let _ = child.kill();
-        let _ = child.wait();
     }
 }
 
@@ -1142,16 +1107,33 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn command_runner_caps_output_while_draining_the_pipe() {
+        let result =
+            test_command("yes x | head -c 100000", &json!({}), Duration::from_secs(2)).unwrap();
+        assert!(result.stdout.starts_with("x\n"));
+        assert!(result.stdout.contains("[output truncated]"));
+        assert!(result.stdout.len() <= OUTPUT_BYTE_LIMIT + 32);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn command_runner_kills_descendants_after_successful_parent_exit() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = directory.path().join("child.log");
+        let log_text = log.to_string_lossy().into_owned();
+        let command = format!("(while :; do printf x >> '{log_text}'; sleep 0.02; done) & exit 0");
+        let result = test_command(&command, &json!({}), Duration::from_secs(2)).unwrap();
+        assert_eq!(result.exit_code, Some(0));
+        let after_cleanup = std::fs::read(&log).unwrap_or_default();
+        thread::sleep(Duration::from_millis(150));
+        assert_eq!(std::fs::read(&log).unwrap_or_default(), after_cleanup);
+    }
+
+    #[test]
     fn timing_out_kills_descendants_the_child_handle_cannot_address() {
-        let log = std::env::temp_dir().join(format!(
-            "hook-tree-kill-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_file(&log);
+        let directory = tempfile::tempdir().unwrap();
+        let log = directory.path().join("child.log");
         let log_text = log.to_string_lossy().into_owned();
         let command = if cfg!(windows) {
             format!("ping -n 30 127.0.0.1 > \"{log_text}\"")
@@ -1184,7 +1166,6 @@ mod tests {
                 "a surviving descendant would keep appending to the log"
             );
         }
-        let _ = std::fs::remove_file(&log);
     }
 
     #[test]

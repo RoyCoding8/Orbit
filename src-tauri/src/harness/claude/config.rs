@@ -1,10 +1,13 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::mcp::MASK;
+use super::credentials::{
+    contains_mask, restore_masked, secret_name, value_shape_secret, MaskInArray, MASK,
+};
 use super::ClaudeCodeHarness;
 use crate::harness::{atomic, Harness};
 
@@ -24,6 +27,14 @@ const CREDENTIAL_SETTINGS: &[&str] = &[
     "awsAuthRefresh",
     "gcpAuthRefresh",
 ];
+
+struct SettingsValidator {
+    validator: jsonschema::Validator,
+    hook_events: std::collections::HashSet<String>,
+}
+
+static SETTINGS_VALIDATOR: OnceLock<std::result::Result<SettingsValidator, String>> =
+    OnceLock::new();
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -230,25 +241,19 @@ fn read_object(path: &Path) -> ConfigResult<Map<String, Value>> {
 /// value the bundled schema rejects (a legacy variable name, a typed object
 /// missing a new required field) can never block an unrelated edit.
 fn validate_value(key: &str, value: &Value) -> ConfigResult<()> {
-    let schema: Value = serde_json::from_str(SETTINGS_SCHEMA)
-        .map_err(|error| ConfigError::Schema(error.to_string()))?;
-    let validator = jsonschema::validator_for(&schema)
-        .map_err(|error| ConfigError::Schema(error.to_string()))?;
+    let settings = settings_validator()?;
     let mut scoped = Map::new();
     scoped.insert(key.to_owned(), value.clone());
     if key == "hooks" {
-        if let (Some(known_events), Some(hooks)) = (
-            schema
-                .get("properties")
-                .and_then(|properties| properties.get("hooks"))
-                .and_then(|hooks| hooks.get("properties"))
-                .and_then(Value::as_object),
-            scoped.get_mut("hooks").and_then(Value::as_object_mut),
-        ) {
-            hooks.retain(|event, _| known_events.contains_key(event));
+        if let Some(hooks) = scoped.get_mut("hooks").and_then(Value::as_object_mut) {
+            hooks.retain(|event, _| settings.hook_events.contains(event));
         }
     }
-    if let Some(error) = validator.iter_errors(&Value::Object(scoped)).next() {
+    if let Some(error) = settings
+        .validator
+        .iter_errors(&Value::Object(scoped))
+        .next()
+    {
         let path = error.instance_path.to_string();
         return Err(ConfigError::Validation {
             path: if path.is_empty() {
@@ -262,20 +267,27 @@ fn validate_value(key: &str, value: &Value) -> ConfigResult<()> {
     Ok(())
 }
 
-fn secret_name(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    ["key", "token", "secret", "auth", "password", "credential"]
-        .iter()
-        .any(|needle| name.contains(needle))
-}
-
-/// Credential-shaped string values, checked inside [`SECRET_CONTAINERS`]
-/// where innocuous names routinely carry tokens.
-fn value_shape_secret(text: &str) -> bool {
-    text.to_ascii_lowercase().contains("bearer ")
-        || text.starts_with("sk-")
-        || text.starts_with("ghp_")
-        || text.starts_with("github_pat_")
+fn settings_validator() -> ConfigResult<&'static SettingsValidator> {
+    SETTINGS_VALIDATOR
+        .get_or_init(|| {
+            let schema: Value =
+                serde_json::from_str(SETTINGS_SCHEMA).map_err(|error| error.to_string())?;
+            let validator =
+                jsonschema::validator_for(&schema).map_err(|error| error.to_string())?;
+            let hook_events = schema
+                .get("properties")
+                .and_then(|properties| properties.get("hooks"))
+                .and_then(|hooks| hooks.get("properties"))
+                .and_then(Value::as_object)
+                .map(|events| events.keys().cloned().collect())
+                .unwrap_or_default();
+            Ok(SettingsValidator {
+                validator,
+                hook_events,
+            })
+        })
+        .as_ref()
+        .map_err(|error| ConfigError::Schema(error.clone()))
 }
 
 /// One traversal decides both what the UI sees and, through
@@ -328,40 +340,6 @@ fn masked_value(name: &str, value: &Value, depth: usize, in_secret_container: bo
 /// inside arrays are never matched: array elements carry no name identity, so
 /// a positional match could silently attach one stored credential to a
 /// different entry after a reorder. Such edits refuse instead.
-fn restore_masked(stored: &Value, edited: &mut Value) -> Result<(), MaskInArray> {
-    if edited.as_str() == Some(MASK) {
-        if stored.is_string() {
-            *edited = stored.clone();
-        }
-        return Ok(());
-    }
-    if edited.as_array().is_some() && contains_mask(edited) {
-        return Err(MaskInArray);
-    }
-    if let (Value::Object(previous), Value::Object(updated)) = (stored, edited) {
-        for (name, child) in updated.iter_mut() {
-            if let Some(original) = previous.get(name) {
-                restore_masked(original, child)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// A masked placeholder sat inside an array, where identity is positional and
-/// restoration would risk rebinding one credential to another entry.
-#[derive(Debug)]
-struct MaskInArray;
-
-fn contains_mask(value: &Value) -> bool {
-    match value {
-        Value::String(text) => text == MASK,
-        Value::Array(items) => items.iter().any(contains_mask),
-        Value::Object(map) => map.values().any(contains_mask),
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,28 +485,10 @@ mod tests {
     }
 
     #[test]
-    fn masked_object_fields_round_trip_to_the_stored_document() {
-        let fixture = Fixture::new();
-        let stored = json!({
-            "model":"sonnet",
-            "apiKeyHelper":"/bin/generate_fixture_key.sh",
-            "env":{"ANTHROPIC_API_KEY":"sk-fixture-credential","SAFE_MODE":"ok"}
-        });
-        fixture.write(&fixture.user_settings(), stored.clone());
-
-        let snapshot = load_config(&fixture.harness, &fixture.project).unwrap();
-        let user = snapshot.layers.iter().find(|l| l.name == "user").unwrap();
-        for (key, masked) in &user.values {
-            let mut restored = masked.clone();
-            restore_masked(&stored[key], &mut restored).unwrap();
-            assert_eq!(restored, stored[key], "{key}");
-        }
-    }
-
-    #[test]
     fn applying_a_masked_edit_preserves_the_secret_and_a_fresh_placeholder_is_rejected() {
         let fixture = Fixture::new();
         let original = json!({
+            "apiKeyHelper":"/bin/generate_fixture_key.sh",
             "env":{"ANTHROPIC_API_KEY":"sk-fixture-credential","SAFE_MODE":"ok"}
         });
         fixture.write(&fixture.user_settings(), original.clone());
@@ -544,6 +504,17 @@ mod tests {
         let landed = atomic::read_json(&fixture.user_settings()).unwrap();
         assert_eq!(landed["env"]["ANTHROPIC_API_KEY"], "sk-fixture-credential");
         assert_eq!(landed["env"]["SAFE_MODE"], "new");
+
+        apply_value(
+            &fixture.harness,
+            &fixture.project,
+            SettingsLayer::User,
+            "apiKeyHelper",
+            json!(MASK),
+        )
+        .unwrap();
+        let landed = atomic::read_json(&fixture.user_settings()).unwrap();
+        assert_eq!(landed["apiKeyHelper"], original["apiKeyHelper"]);
 
         let error = apply_value(
             &fixture.harness,

@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStderr, ChildStdout, Command, Stdio},
+    process::{Child, ChildStdout, Command, Stdio},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -11,14 +11,16 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use super::credentials::{self, contains_mask};
+use super::process_lifetime::{self, CaptureEnd, ChildTree};
 use super::ClaudeCodeHarness;
 use crate::harness::{atomic, Harness, HarnessError, ResourceKind, Result};
 
-pub const MASK: &str = "••••••••";
+pub const MASK: &str = credentials::MASK;
 const MCP_SERVERS_KEY: &str = "mcpServers";
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
-/// Total stdout a stdio bench will buffer before it declares the server
-/// unresponsive. A flooded pipe must end in a diagnosis, not unbounded memory.
+/// Maximum bytes accepted from one MCP response stream before reporting a
+/// bounded-buffer diagnosis.
 const BENCH_BYTE_BUDGET: usize = 512 * 1024;
 /// How much captured stderr an exit diagnostic includes.
 const STDERR_TAIL: usize = 4096;
@@ -390,24 +392,6 @@ fn entry_kind(entry: &Value) -> &'static str {
     }
 }
 
-fn secret_name(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    ["key", "token", "secret", "auth", "password", "credential"]
-        .iter()
-        .any(|needle| name.contains(needle))
-}
-
-/// Credential-shaped string values, independent of their key name. Mirrors
-/// the Config path's `value_shape_secret` so both pages agree on what shows
-/// masked.
-fn value_shape_secret(text: &str) -> bool {
-    let lowered = text.to_ascii_lowercase();
-    lowered.contains("bearer ")
-        || text.starts_with("sk-")
-        || text.starts_with("ghp_")
-        || text.starts_with("github_pat_")
-}
-
 /// One traversal decides both what the UI sees and, through
 /// [`preserve_masked_credentials`], what gets saved. A string is masked when
 /// its key looks secret, when it sits in `env`/`headers` and its value looks
@@ -417,8 +401,8 @@ fn value_shape_secret(text: &str) -> bool {
 fn mask_visit(name: &str, value: &Value, in_secret_container: bool) -> Value {
     match value {
         Value::String(text) => {
-            if secret_name(name)
-                || (in_secret_container && value_shape_secret(text))
+            if credentials::secret_name(name)
+                || (in_secret_container && credentials::value_shape_secret(text))
                 || carries_credential(text)
                 || embeds_url_credential(text)
             {
@@ -481,7 +465,7 @@ fn embeds_url_credential(text: &str) -> bool {
         return true;
     }
     url.query_pairs()
-        .any(|(name, _)| secret_name(name.as_ref()))
+        .any(|(name, _)| credentials::secret_name(name.as_ref()))
 }
 
 /// An argument naming its successor as a credential value, such as
@@ -494,7 +478,7 @@ fn credential_flag(text: &str) -> bool {
         .unwrap_or(text);
     flag.chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        && secret_name(flag)
+        && credentials::secret_name(flag)
 }
 
 fn mask_entry(entry: &Value) -> Value {
@@ -510,55 +494,37 @@ fn mask_entry(entry: &Value) -> Value {
 /// so a positional match could rebind one stored credential to a different
 /// element after a reorder. The caller surfaces the refusal instead of saving.
 fn preserve_masked_credentials(stored: &Value, edited: &mut Value) -> Result<()> {
-    if edited.as_str() == Some(MASK) {
-        if stored.is_string() {
-            *edited = stored.clone();
-        }
-        return Ok(());
-    }
-    if edited.as_array().is_some() && contains_mask(edited) {
-        return Err(HarnessError::Write {
-            path: PathBuf::from("mcpServers"),
-            source: std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "masked values inside args cannot be restored positionally; \
-                 re-enter the credential",
-            ),
-        });
-    }
-    if let (Value::Object(previous), Value::Object(updated)) = (stored, edited) {
-        for (name, child) in updated.iter_mut() {
-            if let Some(original) = previous.get(name) {
-                preserve_masked_credentials(original, child)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn contains_mask(value: &Value) -> bool {
-    match value {
-        Value::String(text) => text == MASK,
-        Value::Array(items) => items.iter().any(contains_mask),
-        Value::Object(map) => map.values().any(contains_mask),
-        _ => false,
-    }
+    credentials::restore_masked(stored, edited).map_err(|_| HarnessError::Write {
+        path: PathBuf::from("mcpServers"),
+        source: std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "masked values inside args cannot be restored positionally; \
+             re-enter the credential",
+        ),
+    })
 }
 
 fn test_stdio(config: &StdioEntry) -> std::result::Result<BenchResult, String> {
     let started = Instant::now();
-    let mut child = Command::new(&config.command)
+    let mut command = Command::new(&config.command);
+    command
         .args(&config.args)
         .envs(&config.env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    process_lifetime::isolate_process_group(&mut command);
+    let child = command
         .spawn()
         .map_err(|error| format!("Could not start MCP server: {error}"))?;
-    let stderr_log = child.stderr.take().map(spawn_stderr_drain);
-    let result = stdio_handshake(&mut child);
-    let _ = child.kill();
-    let exit = child.wait().ok();
+    let mut child = ChildTree::new(child);
+    let stderr_log = child
+        .child_mut()
+        .stderr
+        .take()
+        .map(|stderr| process_lifetime::spawn_capture(stderr, STDERR_TAIL, CaptureEnd::End));
+    let result = stdio_handshake(child.child_mut());
+    let exit = child.cleanup();
     let diagnostic = stderr_log.and_then(|log| log.recv_timeout(STDERR_DRAIN_WAIT).ok());
     let tools = result.map_err(|error| finish_error(error, exit, diagnostic.as_deref()))?;
     Ok(BenchResult {
@@ -570,28 +536,6 @@ fn test_stdio(config: &StdioEntry) -> std::result::Result<BenchResult, String> {
 /// Bound the wait for the concurrent stderr reader. Past it the bench reports
 /// without the log rather than hanging on an inherited handle.
 const STDERR_DRAIN_WAIT: Duration = Duration::from_secs(2);
-
-/// Read at most [`BENCH_BYTE_BUDGET`] bytes of stderr on a side thread and
-/// hand back the tail. The thread ends when the pipe closes or the budget
-/// fills; the bench only ever waits [`STDERR_DRAIN_WAIT`] for the result.
-fn spawn_stderr_drain(stderr: ChildStderr) -> mpsc::Receiver<String> {
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        let mut buffer = Vec::new();
-        let mut pipe = stderr.take(BENCH_BYTE_BUDGET as u64);
-        let _ = pipe.read_to_end(&mut buffer);
-        let mut text = String::from_utf8_lossy(&buffer).into_owned();
-        if text.len() > STDERR_TAIL {
-            let mut start = text.len() - STDERR_TAIL;
-            while !text.is_char_boundary(start) {
-                start += 1;
-            }
-            text = text[start..].to_string();
-        }
-        let _ = sender.send(text);
-    });
-    receiver
-}
 
 fn finish_error(
     error: String,
@@ -754,11 +698,11 @@ fn write_rpc(input: &mut impl Write, value: Value) -> std::result::Result<(), St
 
 fn test_http(config: &HttpEntry) -> std::result::Result<BenchResult, String> {
     if !config.url.starts_with("https://") && !is_loopback_http(&config.url) {
-        return Err(format!(
-            "MCP server URL {} sends credentials over plain HTTP outside this machine; \
-             use https:// or a loopback address",
-            config.url
-        ));
+        return Err(
+            "MCP server URL sends credentials over plain HTTP outside this machine; \
+             use https:// or a loopback address"
+                .into(),
+        );
     }
     let started = Instant::now();
     let client = reqwest::blocking::Client::builder()
@@ -796,7 +740,7 @@ fn test_http(config: &HttpEntry) -> std::result::Result<BenchResult, String> {
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
     let endpoint = config.url.clone();
-    let initialization: Value = decode_http_response(initialized)?;
+    let initialization = decode_http_response(initialized, &json!(1))?;
     if initialization.get("error").is_some() {
         return Err("MCP server rejected initialize".into());
     }
@@ -830,7 +774,7 @@ fn test_http(config: &HttpEntry) -> std::result::Result<BenchResult, String> {
             response.status().as_u16()
         ));
     }
-    let payload = decode_http_response(response)?;
+    let payload = decode_http_response(response, &json!(2))?;
     if let Some(error) = payload.get("error") {
         return Err(format!("MCP server rejected tools/list: {error}"));
     }
@@ -869,24 +813,74 @@ fn is_loopback_http(url: &str) -> bool {
 
 fn decode_http_response(
     response: reqwest::blocking::Response,
+    expected_id: &Value,
 ) -> std::result::Result<Value, String> {
     let is_event_stream = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.starts_with("text/event-stream"));
-    let body = response
-        .text()
-        .map_err(|_| "Could not read MCP server response".to_string())?;
-    if is_event_stream {
-        for line in body.lines().filter_map(|line| line.strip_prefix("data: ")) {
-            if let Ok(value) = serde_json::from_str(line) {
+    let mut body = BufReader::new(response.take((BENCH_BYTE_BUDGET + 1) as u64));
+    if !is_event_stream {
+        let mut bytes = Vec::new();
+        body.read_to_end(&mut bytes)
+            .map_err(|_| "Could not read MCP server response".to_string())?;
+        if bytes.len() > BENCH_BYTE_BUDGET {
+            return Err("MCP server response exceeded buffering budget".into());
+        }
+        let value: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| "MCP server returned invalid JSON response".to_string())?;
+        return response_with_id(value, expected_id)
+            .ok_or_else(|| "MCP server returned no response matching request id".into());
+    }
+
+    let mut consumed = 0usize;
+    let mut line = String::new();
+    let mut data = String::new();
+    loop {
+        line.clear();
+        let bytes = body
+            .read_line(&mut line)
+            .map_err(|_| "Could not read MCP server response".to_string())?;
+        if bytes == 0 {
+            if let Some(value) = event_response(&data, expected_id) {
                 return Ok(value);
             }
+            break;
         }
-        return Err("MCP server returned an invalid event stream".into());
+        consumed += bytes;
+        if consumed > BENCH_BYTE_BUDGET {
+            return Err("MCP server response exceeded buffering budget".into());
+        }
+        let line = line.trim_end_matches(|character| matches!(character, '\r' | '\n'));
+        if line.is_empty() {
+            if let Some(value) = event_response(&data, expected_id) {
+                return Ok(value);
+            }
+            data.clear();
+        } else if !line.starts_with(':') {
+            if let Some(value) = line.strip_prefix("data:") {
+                if !data.is_empty() {
+                    data.push('\n');
+                }
+                data.push_str(value.strip_prefix(' ').unwrap_or(value));
+            }
+        }
     }
-    serde_json::from_str(&body).map_err(|_| "MCP server returned invalid JSON response".to_string())
+    Err("MCP server returned no response matching request id".into())
+}
+
+fn event_response(data: &str, expected_id: &Value) -> Option<Value> {
+    let value = serde_json::from_str(data).ok()?;
+    response_with_id(value, expected_id)
+}
+
+fn response_with_id(value: Value, expected_id: &Value) -> Option<Value> {
+    if value.get("id") == Some(expected_id) {
+        Some(value)
+    } else {
+        None
+    }
 }
 
 fn safe_http_error(error: &reqwest::Error) -> String {
@@ -904,6 +898,11 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::fs;
+    use std::{
+        io::{BufRead, BufReader, Write},
+        net::TcpListener,
+        sync::mpsc,
+    };
 
     fn fixture() -> (tempfile::TempDir, ClaudeCodeHarness) {
         let dir = tempfile::tempdir().unwrap();
@@ -922,6 +921,83 @@ mod tests {
             serde_json::to_vec(&value).unwrap(),
         )
         .unwrap();
+    }
+
+    fn local_http_response(
+        body: Vec<u8>,
+        content_type: &str,
+    ) -> (reqwest::blocking::Response, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let content_type = content_type.to_string();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = BufReader::new(stream.try_clone().unwrap());
+            loop {
+                let mut line = String::new();
+                if request.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+        });
+        let response = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap()
+            .post(format!("http://{address}/mcp"))
+            .body("{}")
+            .send()
+            .unwrap();
+        (response, server)
+    }
+
+    fn open_sse_response(
+        body: String,
+    ) -> (
+        reqwest::blocking::Response,
+        mpsc::Sender<()>,
+        thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, wait_for_release) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = BufReader::new(stream.try_clone().unwrap());
+            loop {
+                let mut line = String::new();
+                if request.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n",
+                )
+                .unwrap();
+            write!(stream, "{:X}\r\n", body.len()).unwrap();
+            stream.write_all(body.as_bytes()).unwrap();
+            stream.write_all(b"\r\n").unwrap();
+            stream.flush().unwrap();
+            let _ = wait_for_release.recv_timeout(Duration::from_secs(5));
+            let _ = stream.write_all(b"0\r\n\r\n");
+        });
+        let response = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .post(format!("http://{address}/mcp"))
+            .body("{}")
+            .send()
+            .unwrap();
+        (response, release, server)
     }
 
     #[test]
@@ -1206,9 +1282,14 @@ mod tests {
         let app_data = dir.path().join("app-data");
         config_file(
             &harness,
-            json!({"mcpServers":{"alpha":{"command":"run","env":{"SERVICE_TOKEN":"real-token","MODE":"old"}}}}),
+            json!({"mcpServers":{"alpha":{"command":"run","args":["--api-key","real-arg-token"],"env":{"SERVICE_TOKEN":"real-token","MODE":"old"},"headers":{"Authorization":"real-header-token"}}}}),
         );
-        let edited = json!({"command":"run2","env":{"SERVICE_TOKEN":MASK,"MODE":"new"}});
+        let edited = json!({
+            "command":"run2",
+            "args":["--api-key","real-arg-token"],
+            "env":{"SERVICE_TOKEN":MASK,"MODE":"new"},
+            "headers":{"Authorization":MASK}
+        });
         harness
             .mcp_save("alpha", edited.clone(), &app_data)
             .unwrap();
@@ -1219,30 +1300,29 @@ mod tests {
         );
         assert_eq!(saved["mcpServers"]["alpha"]["env"]["MODE"], "new");
         assert_eq!(saved["mcpServers"]["alpha"]["command"], "run2");
-    }
+        assert_eq!(
+            saved["mcpServers"]["alpha"]["headers"]["Authorization"],
+            "real-header-token"
+        );
+        assert_eq!(
+            saved["mcpServers"]["alpha"]["args"],
+            json!(["--api-key", "real-arg-token"])
+        );
 
-    #[test]
-    fn masked_credentials_on_edit_preserve_raw_values_and_array_masks_are_refused() {
-        let original = json!({
-            "command":"run",
-            "env":{"SERVICE_TOKEN":"sensitive","MODE":"old"},
-            "headers":{"Authorization":"real-header-token"}
-        });
-        let edited = json!({
-            "command":"run2",
-            "env":{"SERVICE_TOKEN":MASK,"MODE":"new"},
-            "headers":{"Authorization":MASK}
-        });
-        let mut restored = edited;
-        preserve_masked_credentials(&original, &mut restored).unwrap();
-        assert_eq!(restored["env"]["SERVICE_TOKEN"], "sensitive");
-        assert_eq!(restored["env"]["MODE"], "new");
-        assert_eq!(restored["headers"]["Authorization"], "real-header-token");
-        assert_eq!(restored["command"], "run2");
-
-        let array_mask = json!({"command":"run","args":["--header",MASK]});
-        let mut masked_args = array_mask.clone();
-        assert!(preserve_masked_credentials(&array_mask, &mut masked_args).is_err());
+        let before_invalid_edit = fs::read(harness.claude_json_path()).unwrap();
+        let error = harness
+            .mcp_save(
+                "alpha",
+                json!({"command":"run3","args":["--api-key",MASK]}),
+                &app_data,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("re-enter the credential"));
+        assert_eq!(
+            fs::read(harness.claude_json_path()).unwrap(),
+            before_invalid_edit,
+            "an unidentifiable array credential must not replace the active entry"
+        );
     }
 
     #[test]
@@ -1259,15 +1339,83 @@ mod tests {
     }
 
     #[test]
-    fn plain_http_outside_loopback_is_rejected_named_url_entry() {
+    fn plain_http_rejection_does_not_echo_query_credentials() {
         let error = test_http(&HttpEntry {
-            url: "http://example.test/mcp".into(),
+            url: "http://example.test/mcp?access_token=fixture-secret".into(),
             headers: BTreeMap::new(),
             extra: BTreeMap::new(),
         })
         .unwrap_err();
         assert!(error.contains("https://"), "names the fix: {error}");
-        assert!(error.contains("example.test"), "names the URL: {error}");
+        assert!(
+            !error.contains("example.test"),
+            "must not echo the URL: {error}"
+        );
+        assert!(
+            !error.contains("fixture-secret"),
+            "must not leak query tokens: {error}"
+        );
+    }
+
+    #[test]
+    fn event_stream_waits_for_the_matching_id_and_returns_before_eof() {
+        let body = concat!(
+            "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/log\"}\n\n",
+            "data: {\"jsonrpc\":\"2.0\",\"id\":99,\"result\":{}}\n\n",
+            "event: message\n",
+            "data: {\"jsonrpc\":\"2.0\",\n",
+            "data: \"id\":1,\n",
+            "data: \"result\":{\"accepted\":true}}\n\n",
+        )
+        .to_string();
+        let (response, release, server) = open_sse_response(body);
+        let (decoded_sender, decoded_receiver) = mpsc::channel();
+        let decoder = thread::spawn(move || {
+            let _ = decoded_sender.send(decode_http_response(response, &json!(1)));
+        });
+        let decoded = decoded_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("decoder must return on the matching event before stream EOF");
+        release.send(()).unwrap();
+        server.join().unwrap();
+        decoder.join().unwrap();
+        let value = decoded.unwrap();
+        assert_eq!(value["id"], 1);
+        assert_eq!(value["result"]["accepted"], true);
+    }
+
+    #[test]
+    fn http_response_body_is_capped_before_json_decode() {
+        let (response, server) =
+            local_http_response(vec![b'x'; BENCH_BYTE_BUDGET + 1], "application/json");
+        assert_eq!(
+            decode_http_response(response, &json!(1)).unwrap_err(),
+            "MCP server response exceeded buffering budget"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn json_http_response_must_match_its_request_id() {
+        let body = serde_json::to_vec(&json!({
+            "jsonrpc":"2.0",
+            "id":2,
+            "result":{"tools":[{"name":"fixture-tool"}]}
+        }))
+        .unwrap();
+        let (response, server) = local_http_response(body, "application/json");
+        let value = decode_http_response(response, &json!(2)).unwrap();
+        server.join().unwrap();
+        assert_eq!(value["id"], 2);
+        assert_eq!(value["result"]["tools"][0]["name"], "fixture-tool");
+
+        let body = serde_json::to_vec(&json!({"jsonrpc":"2.0","id":2,"result":{}})).unwrap();
+        let (response, server) = local_http_response(body, "application/json");
+        assert_eq!(
+            decode_http_response(response, &json!(1)).unwrap_err(),
+            "MCP server returned no response matching request id"
+        );
+        server.join().unwrap();
     }
 
     #[test]
