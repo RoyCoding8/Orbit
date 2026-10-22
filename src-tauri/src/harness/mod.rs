@@ -12,8 +12,9 @@ pub enum ResourceKind {
     Skill,
     /// Per-project auto memory, e.g. `projects/<slug>/memory/MEMORY.md`.
     Memory,
-    /// Global instruction file, e.g. `CLAUDE.md`.
+    /// User instruction file, e.g. `CLAUDE.md`.
     GlobalInstructions,
+    ProjectInstructions,
     /// A settings-layer document, e.g. `settings.json` or `.claude.json`.
     Settings,
     /// MCP server entry, e.g. the `mcpServers` map in Claude's `.claude.json`.
@@ -32,6 +33,12 @@ pub struct ResourceRef {
     pub kind: ResourceKind,
     pub id: String,
     pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum InventoryKind {
+    Skill,
+    McpServer,
 }
 
 /// Errors the adapter surfaces to callers.
@@ -78,7 +85,7 @@ pub trait Harness {
     fn config_root(&self) -> &std::path::Path;
 
     /// List every resource of one kind the harness currently has on disk.
-    fn list(&self, kind: ResourceKind) -> Result<Vec<ResourceRef>>;
+    fn list(&self, kind: InventoryKind) -> Result<Vec<ResourceRef>>;
 
     /// The settings file the harness rewrites itself (Claude: `settings.json`).
     fn settings_path(&self) -> PathBuf;

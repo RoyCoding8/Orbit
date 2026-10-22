@@ -1,4 +1,5 @@
 pub mod harness;
+pub mod history;
 pub mod ledger;
 pub mod transcript;
 
@@ -238,17 +239,94 @@ async fn hooks_test(
 }
 
 #[tauri::command]
-async fn skills_inventory() -> Result<
-    (
-        Vec<harness::claude::skills::SkillEntry>,
-        Vec<harness::claude::skills::MemoryEntry>,
-    ),
-    String,
-> {
+async fn skills_inventory() -> Result<Vec<harness::claude::skills::SkillEntry>, String> {
     run_blocking(move || {
         harness::claude::skills::inventory(&harness::claude::ClaudeCodeHarness::from_env())
     })
     .await
+}
+
+#[tauri::command]
+async fn memory_catalog(
+    project_roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+) -> Result<harness::claude::memories::MemoryCatalog, String> {
+    let project_roots = project_roots.inner().clone();
+    run_blocking(move || {
+        let project = project_roots.resolve(project_root)?;
+        harness::claude::memories::catalog(
+            &harness::claude::ClaudeCodeHarness::from_env(),
+            &project,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn memory_edit(
+    project_roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+    id: String,
+    expected_content: String,
+    content: String,
+) -> Result<(), String> {
+    let project_roots = project_roots.inner().clone();
+    run_blocking(move || {
+        let project = project_roots.resolve(project_root)?;
+        harness::claude::memories::edit(
+            &harness::claude::ClaudeCodeHarness::from_env(),
+            &project,
+            &id,
+            &expected_content,
+            &content,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn history_load(
+    project_roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+) -> Result<history::HistorySnapshot, String> {
+    let project_roots = project_roots.inner().clone();
+    run_blocking(move || {
+        let project = project_roots.resolve(project_root)?;
+        history::load(&harness::claude::ClaudeCodeHarness::from_env(), &project)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn history_restore(
+    project_roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+    id: String,
+    expected_current_checksum: Option<String>,
+) -> Result<(), String> {
+    let project_roots = project_roots.inner().clone();
+    run_blocking(move || {
+        let project = project_roots.resolve(project_root)?;
+        history::restore(
+            &harness::claude::ClaudeCodeHarness::from_env(),
+            &project,
+            &id,
+            expected_current_checksum.as_deref(),
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn history_delete(id: String) -> Result<(), String> {
+    run_blocking(move || history::delete(&harness::claude::ClaudeCodeHarness::from_env(), &id))
+        .await
+}
+
+#[tauri::command]
+async fn history_cleanup_legacy() -> Result<history::CleanupReport, String> {
+    run_blocking(move || history::cleanup_legacy(&harness::claude::ClaudeCodeHarness::from_env()))
+        .await
 }
 
 #[tauri::command]
@@ -403,6 +481,47 @@ async fn transcript_export_markdown(
 }
 
 #[tauri::command]
+async fn transcript_export_directory(
+    app: tauri::AppHandle,
+    session_id: String,
+    destination: String,
+) -> Result<transcript::archive::ArchiveReport, String> {
+    run_blocking(move || {
+        let harness = harness::claude::ClaudeCodeHarness::from_env();
+        transcript::archive::export_archive(
+            &app_data_dir(&app)?,
+            &harness.config_root().join("projects"),
+            &session_id,
+            Path::new(&destination),
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn transcript_import_directory(
+    app: tauri::AppHandle,
+    project_roots: State<'_, ProjectRoots>,
+    project_root: String,
+    source: String,
+) -> Result<transcript::archive::ArchiveReport, String> {
+    let project_roots = project_roots.inner().clone();
+    run_blocking(move || {
+        let project = project_roots.resolve(Some(project_root))?;
+        let harness = harness::claude::ClaudeCodeHarness::from_env();
+        let report = transcript::archive::import_archive(
+            &harness.config_root().join("projects"),
+            Path::new(&source),
+            &project,
+        )?;
+        transcript::ingest::ingest_projects(harness.config_root(), &app_data_dir(&app)?)
+            .map_err(|error| format!("Chat imported, but indexing failed: {error}"))?;
+        Ok(report)
+    })
+    .await
+}
+
+#[tauri::command]
 async fn project_choose(
     app: tauri::AppHandle,
     project_roots: State<'_, ProjectRoots>,
@@ -501,6 +620,12 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             skills_inventory,
+            memory_catalog,
+            memory_edit,
+            history_load,
+            history_restore,
+            history_delete,
+            history_cleanup_legacy,
             skill_set_override,
             skill_edit,
             skill_install,
@@ -528,7 +653,9 @@ pub fn run() {
             transcript_thread_page,
             transcript_message_page_offset,
             transcript_search,
-            transcript_export_markdown
+            transcript_export_markdown,
+            transcript_export_directory,
+            transcript_import_directory
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

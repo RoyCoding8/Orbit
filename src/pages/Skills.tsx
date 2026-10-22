@@ -11,7 +11,6 @@ type Skill = {
   content: string;
   state: SkillState;
 };
-type Memory = { id: string; path: string; content: string };
 type LedgerRow = {
   timestamp: number;
   resourceKind: string;
@@ -28,12 +27,10 @@ type LoadState =
 
 export function Skills() {
   const [skills, setSkills] = useState<Skill[]>([]);
-  const [memories, setMemories] = useState<Memory[]>([]);
   const [ledger, setLedger] = useState<LedgerRow[]>([]);
   const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
   const [editing, setEditing] = useState<Skill | null>(null);
   const [draft, setDraft] = useState("");
-  const [selectedMemory, setSelectedMemory] = useState<Memory | null>(null);
   const [error, setError] = useState("");
   const [editError, setEditError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -43,14 +40,12 @@ export function Skills() {
 
   const load = async () => {
     setLoadState({ kind: "loading" });
-    setSelectedMemory(null);
     try {
       const [inventory, rows] = await Promise.all([
-        invoke<[Skill[], Memory[]]>("skills_inventory"),
+        invoke<Skill[]>("skills_inventory"),
         invoke<LedgerRow[]>("skills_ledger"),
       ]);
-      setSkills(inventory[0]);
-      setMemories(inventory[1]);
+      setSkills(inventory);
       setLedger(rows);
       setError("");
       setLoadState({ kind: "ready" });
@@ -132,10 +127,10 @@ export function Skills() {
       <div className="pane-heading">
         <div>
           <p className="eyebrow">CLAUDE CODE</p>
-          <h2 id="skills-title">Skills & memories</h2>
+          <h2 id="skills-title">Skills</h2>
           <p className="supporting-copy">
-            Manage installed skills and read project memories. Uninstalled
-            skills can be restored from a recorded backup.
+            Skills are read from folders on disk, including folders copied
+            outside Orbit. Refresh to pick up changes.
           </p>
         </div>
         <div className="skills-header-actions">
@@ -161,10 +156,10 @@ export function Skills() {
         </p>
       )}
       {loadState.kind === "loading" ? (
-        <p role="status">Loading skills and memories…</p>
+        <p role="status">Loading skills…</p>
       ) : loadState.kind === "error" ? (
         <p className="inline-error" role="alert">
-          Could not load skills and memories. {loadState.message}
+          Could not load skills. {loadState.message}
         </p>
       ) : (
         <>
@@ -274,40 +269,6 @@ export function Skills() {
                 </article>
               ))}
             </div>
-          )}
-          <div className="section-heading memories-heading">
-            <div>
-              <p className="eyebrow">MEMORY</p>
-              <h3>
-                Saved memories <span className="count">{memories.length}</span>
-              </h3>
-            </div>
-          </div>
-          <div className="memory-list">
-            {memories.map((memory) => (
-              <button
-                className={`memory-row${selectedMemory?.id === memory.id ? " selected" : ""}`}
-                key={memory.id}
-                onClick={() => setSelectedMemory(memory)}
-              >
-                <span>{memory.id}</span>
-                <span>Preview</span>
-              </button>
-            ))}
-          </div>
-          {selectedMemory && (
-            <section className="preview-panel">
-              <div className="section-heading">
-                <h3>{selectedMemory.id}</h3>
-                <button
-                  className="text-button"
-                  onClick={() => setSelectedMemory(null)}
-                >
-                  Close
-                </button>
-              </div>
-              <pre>{selectedMemory.content}</pre>
-            </section>
           )}
           {restorable.length > 0 && (
             <div className="restore-section">

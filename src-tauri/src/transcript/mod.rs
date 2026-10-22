@@ -1,3 +1,4 @@
+pub mod archive;
 pub mod ingest;
 pub mod spine;
 
@@ -23,9 +24,38 @@ pub enum TranscriptError {
 #[serde(rename_all = "camelCase")]
 pub struct SessionSummary {
     pub session_id: String,
+    pub title: Option<String>,
     pub project: String,
     pub updated_at: Option<String>,
     pub message_count: usize,
+}
+
+#[derive(Default)]
+pub(super) struct SessionTitle {
+    custom: Option<String>,
+    generated: Option<String>,
+}
+
+impl SessionTitle {
+    pub fn observe(&mut self, record: &serde_json::Value) {
+        let (slot, key) = match record.get("type").and_then(serde_json::Value::as_str) {
+            Some("custom-title") => (&mut self.custom, "customTitle"),
+            Some("ai-title") => (&mut self.generated, "aiTitle"),
+            _ => return,
+        };
+        if let Some(title) = record
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+        {
+            *slot = Some(title.to_owned());
+        }
+    }
+
+    pub fn finish(self) -> Option<String> {
+        self.custom.or(self.generated)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

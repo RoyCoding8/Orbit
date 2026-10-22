@@ -10,7 +10,7 @@ describe("App shell", () => {
   it("renders the M3E shell with navigation, heading, and an empty pane", () => {
     render(<App />);
 
-    expect(screen.getByRole("heading", { name: "Harness Agent" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Orbit" })).toBeTruthy();
     expect(screen.getByLabelText("Main navigation")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Your harness, in view." })).toBeTruthy();
     expect(screen.getByText("Overview")).toBeTruthy();
@@ -23,7 +23,7 @@ describe("App shell", () => {
     vi.mocked(invoke).mockImplementation(async (command) => {
       switch (command) {
         case "skills_inventory":
-          return [[], []] as never;
+          return [] as never;
         case "skills_ledger":
           return [] as never;
         case "config_load":
@@ -42,7 +42,7 @@ describe("App shell", () => {
     render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: "Open skills" }));
-    expect(screen.getByRole("heading", { name: "Skills & memories" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Skills" })).toBeTruthy();
 
     cleanup();
     render(<App />);
@@ -53,10 +53,16 @@ describe("App shell", () => {
 
   it.each([
     { nav: /Transcripts/, heading: "Transcripts", action: "Index transcripts", empty: "No sessions indexed yet.", input: "Search message text" },
-    { nav: /^Skills$/, heading: "Skills & memories", action: "Install skill", empty: "No skills found", input: null },
+    { nav: /^Skills$/, heading: "Skills", action: "Install skill", empty: "No skills found", input: null },
     { nav: /Servers/, heading: "MCP servers", action: "Add server", empty: "Connect a tool server", input: null },
+    { nav: /Memories/, heading: "Memories & instructions", action: "Choose project", empty: "No memory files found", input: null },
+    { nav: /History/, heading: "History", action: "Choose project", empty: "No saved versions match this scope.", input: null },
   ])("opens $heading from navigation", async ({ nav, heading, action, empty, input }) => {
-    vi.mocked(invoke).mockImplementation(async command => command === "skills_inventory" ? [[], []] : []);
+    vi.mocked(invoke).mockImplementation(async command => {
+      if (command === "memory_catalog") return { projectRoot: "D:/project", groups: [], files: [], excludedCustomMemoryDirectory: null };
+      if (command === "history_load") return { versions: [], logs: [] };
+      return [];
+    });
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: nav }));
     expect(await screen.findByText(empty)).toBeInTheDocument();

@@ -9,12 +9,14 @@ use std::path::{Path, PathBuf};
 pub mod mcp;
 
 use super::{
-    Harness, HarnessError, HarnessId, HarnessPaths, ResourceKind, ResourceRef, Result, CLAUDE_CODE,
+    Harness, HarnessError, HarnessId, HarnessPaths, InventoryKind, ResourceKind, ResourceRef,
+    Result, CLAUDE_CODE,
 };
 
 pub mod config;
 mod credentials;
 pub mod hooks;
+pub mod memories;
 mod process_lifetime;
 pub mod skills;
 
@@ -68,24 +70,10 @@ impl Harness for ClaudeCodeHarness {
         &self.paths.config_root
     }
 
-    fn list(&self, kind: ResourceKind) -> Result<Vec<ResourceRef>> {
+    fn list(&self, kind: InventoryKind) -> Result<Vec<ResourceRef>> {
         match kind {
-            ResourceKind::Skill => list_skill_dirs(&self.paths.config_root.join("skills")),
-            ResourceKind::Memory => list_project_memories(&self.paths.config_root),
-            ResourceKind::GlobalInstructions => {
-                let path = self.paths.config_root.join("CLAUDE.md");
-                if path.exists() {
-                    Ok(vec![ResourceRef {
-                        kind: ResourceKind::GlobalInstructions,
-                        id: "CLAUDE.md".into(),
-                        path,
-                    }])
-                } else {
-                    Ok(Vec::new())
-                }
-            }
-            ResourceKind::Settings => Ok(Vec::new()),
-            ResourceKind::McpServer => list_map_keys(
+            InventoryKind::Skill => list_skill_dirs(&self.paths.config_root.join("skills")),
+            InventoryKind::McpServer => list_map_keys(
                 &self.claude_json_path(),
                 "mcpServers",
                 ResourceKind::McpServer,
@@ -132,104 +120,6 @@ fn list_skill_dirs(skills_root: &Path) -> Result<Vec<ResourceRef>> {
     }
     found.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(found)
-}
-
-fn list_project_memories(config_root: &Path) -> Result<Vec<ResourceRef>> {
-    let projects_root = config_root.join("projects");
-    if std::fs::symlink_metadata(&projects_root).is_ok_and(|meta| is_link(&meta)) {
-        return Ok(Vec::new());
-    }
-    let project_entries = match std::fs::read_dir(&projects_root) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => {
-            return Err(HarnessError::Read {
-                path: projects_root.to_path_buf(),
-                source: err,
-            })
-        }
-    };
-
-    let mut found = Vec::new();
-    for project in project_entries {
-        let Ok(project) = project else { continue };
-        let project_dir = project.path();
-        match std::fs::symlink_metadata(&project_dir) {
-            Ok(meta) if meta.is_dir() && !is_link(&meta) => {}
-            _ => continue,
-        }
-        let slug = project.file_name();
-        let memory_dir = project_dir.join("memory");
-        match std::fs::symlink_metadata(&memory_dir) {
-            Ok(meta) if meta.is_dir() && !is_link(&meta) => {}
-            _ => continue,
-        }
-        let Ok(memories) = list_markdown(&memory_dir, ResourceKind::Memory) else {
-            continue;
-        };
-        for memory in memories {
-            found.push(ResourceRef {
-                kind: ResourceKind::Memory,
-                id: format!("{}/{}", slug.to_string_lossy(), memory.id),
-                path: memory.path,
-            });
-        }
-    }
-    found.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(found)
-}
-
-/// Every `*.md` file directly inside one directory, as one resource each. A
-/// missing directory yields no resources; other read errors surface to the
-/// caller, which decides whether to skip or report. An entry that is not a
-/// plain file is skipped, so a link resolving outside the tree never enters
-/// the inventory.
-fn list_markdown(dir: &Path, kind: ResourceKind) -> Result<Vec<ResourceRef>> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => {
-            return Err(HarnessError::Read {
-                path: dir.to_path_buf(),
-                source: err,
-            })
-        }
-    };
-    let mut found = Vec::new();
-    for entry in entries {
-        let path = match entry {
-            Ok(entry) => entry.path(),
-            Err(_) => continue,
-        };
-        let is_plain_file = std::fs::symlink_metadata(&path)
-            .map(|meta| meta.is_file() && !is_link(&meta))
-            .unwrap_or(false);
-        if is_plain_file && path.extension().and_then(|ext| ext.to_str()) == Some("md") {
-            found.push(ResourceRef {
-                kind,
-                id: path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned(),
-                path,
-            });
-        }
-    }
-    found.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(found)
-}
-
-fn is_link(metadata: &std::fs::Metadata) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        metadata.file_attributes() & 0x400 != 0
-    }
-    #[cfg(not(windows))]
-    {
-        metadata.file_type().is_symlink()
-    }
 }
 
 /// The keys of one top-level map in a JSON document, as one resource per key.
@@ -351,7 +241,7 @@ mod tests {
         )
         .unwrap();
 
-        let refs = fixture.harness().list(ResourceKind::Skill).unwrap();
+        let refs = fixture.harness().list(InventoryKind::Skill).unwrap();
         let ids: Vec<_> = refs.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, ["alpha", "beta"]);
         assert!(refs[0].path.join("SKILL.md").is_file());
@@ -373,147 +263,12 @@ mod tests {
             .unwrap(),
         );
 
-        let refs = fixture.harness().list(ResourceKind::McpServer).unwrap();
+        let refs = fixture.harness().list(InventoryKind::McpServer).unwrap();
         let ids: Vec<_> = refs.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, ["cx-agent", "obscura"]);
         assert!(refs
             .iter()
             .all(|r| r.path == fixture.harness().claude_json_path()));
-    }
-
-    #[test]
-    fn memories_aggregate_per_project_with_project_qualified_ids() {
-        let fixture = Fixture::new();
-        fixture.write(
-            "claude/projects/D--AI-rea-testing/memory/MEMORY.md",
-            "# index\n",
-        );
-        fixture.write(
-            "claude/projects/D--AI-rea-testing/memory/notes.md",
-            "notes\n",
-        );
-        fixture.write("claude/projects/other-repo/memory/MEMORY.md", "# other\n");
-
-        let refs = fixture.harness().list(ResourceKind::Memory).unwrap();
-        let ids: Vec<_> = refs.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            [
-                "D--AI-rea-testing/MEMORY.md",
-                "D--AI-rea-testing/notes.md",
-                "other-repo/MEMORY.md"
-            ],
-            "same-named files in different projects must stay distinct"
-        );
-        assert_eq!(
-            refs[0].path,
-            fixture
-                .home
-                .join("claude/projects/D--AI-rea-testing/memory/MEMORY.md")
-        );
-    }
-
-    #[test]
-    fn memory_files_outside_the_projects_tree_are_not_inventoried() {
-        let fixture = Fixture::new();
-        fixture.write("claude/projects/D--AI/memory/MEMORY.md", "# real\n");
-        fixture.write("claude/memory/MEMORY.md", "# wrong location\n");
-        fixture.write("claude/projects/D--AI/memory/other.txt", "not markdown\n");
-        fixture.write("claude/projects/D--AI/memory/nested/deep.md", "too deep\n");
-
-        let refs = fixture.harness().list(ResourceKind::Memory).unwrap();
-        let ids: Vec<_> = refs.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            ["D--AI/MEMORY.md"],
-            "the legacy top-level memory dir, non-markdown files, and \
-             nested subdirectories are not memories"
-        );
-    }
-
-    #[test]
-    fn markdown_named_directory_does_not_hide_valid_memories() {
-        let fixture = Fixture::new();
-        fixture.write("claude/projects/D--AI/memory/MEMORY.md", "# index\n");
-        fs::create_dir_all(fixture.home.join("claude/projects/D--AI/memory/poison.md")).unwrap();
-        fixture.write("claude/projects/other/memory/notes.md", "notes\n");
-
-        let refs = fixture.harness().list(ResourceKind::Memory).unwrap();
-        let ids: Vec<_> = refs.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            ["D--AI/MEMORY.md", "other/notes.md"],
-            "the poisoned entry is skipped, the valid ones are not blanked"
-        );
-    }
-
-    #[test]
-    fn non_directory_project_entries_are_skipped() {
-        let fixture = Fixture::new();
-        fixture.write("claude/projects/D--AI/memory/MEMORY.md", "# index\n");
-        fixture.write("claude/projects/not-a-dir", "x\n");
-
-        let refs = fixture.harness().list(ResourceKind::Memory).unwrap();
-        let ids: Vec<_> = refs.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids, ["D--AI/MEMORY.md"]);
-    }
-
-    #[cfg(any(unix, windows))]
-    fn link_directory(target: &Path, link: &Path) {
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(target, link).unwrap();
-        #[cfg(windows)]
-        {
-            let link = link.to_string_lossy().replace('/', "\\");
-            let target = target.to_string_lossy().replace('/', "\\");
-            let result = std::process::Command::new("cmd")
-                .args(["/D", "/C", "mklink", "/J", &link, &target])
-                .output()
-                .unwrap();
-            assert!(
-                result.status.success(),
-                "{}",
-                String::from_utf8_lossy(&result.stderr)
-            );
-        }
-    }
-
-    #[test]
-    #[cfg(any(unix, windows))]
-    fn linked_project_and_memory_directories_are_not_followed() {
-        for relative in ["projects", "projects/linked", "projects/linked/memory"] {
-            let fixture = Fixture::new();
-            fixture.write("outside/foreign/memory/root.md", "outside root");
-            fixture.write("outside/memory/project.md", "outside project");
-            fixture.write("outside/leaf.md", "outside memory");
-            let link = fixture.home.join("claude").join(relative);
-            fs::create_dir_all(link.parent().unwrap()).unwrap();
-            link_directory(&fixture.home.join("outside"), &link);
-
-            assert!(
-                fixture
-                    .harness()
-                    .list(ResourceKind::Memory)
-                    .unwrap()
-                    .is_empty(),
-                "followed {relative}"
-            );
-        }
-    }
-
-    #[test]
-    fn empty_or_missing_directories_yield_no_resources_not_errors() {
-        let fixture = Fixture::new();
-        for kind in [
-            ResourceKind::Skill,
-            ResourceKind::Memory,
-            ResourceKind::GlobalInstructions,
-        ] {
-            assert!(
-                fixture.harness().list(kind).unwrap().is_empty(),
-                "{kind:?} should be empty"
-            );
-        }
     }
 
     #[test]
@@ -558,7 +313,7 @@ mod tests {
             override_dir.join(".claude.json")
         );
         assert_eq!(harness.config_root(), override_dir.as_path());
-        let resources = harness.list(ResourceKind::McpServer).unwrap();
+        let resources = harness.list(InventoryKind::McpServer).unwrap();
         assert_eq!(
             resources
                 .iter()
@@ -572,7 +327,7 @@ mod tests {
             default_harness.claude_json_path(),
             home.join(".claude.json")
         );
-        let resources = default_harness.list(ResourceKind::McpServer).unwrap();
+        let resources = default_harness.list(InventoryKind::McpServer).unwrap();
         assert_eq!(
             resources
                 .iter()
@@ -580,39 +335,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["outside"]
         );
-    }
-
-    /// The trait contract: a full resource walk over one fixture tree resolves
-    /// only inside the fixture, never outside it, and stays self-consistent.
-    #[test]
-    fn every_listed_resource_path_lives_inside_the_fixture_root() {
-        let fixture = Fixture::new();
-        skill_fixture(&fixture.home.join("claude"), "alpha");
-        fixture.write("claude/projects/D--AI/memory/MEMORY.md", "# index\n");
-        fixture.write("claude/CLAUDE.md", "# global\n");
-        fixture.write(
-            ".claude.json",
-            &serde_json::to_string(&json!({"mcpServers": {"cx-agent": {"command": "x"}}, "projects": {"D:/fixture": {"allowedTools": []}}})).unwrap(),
-        );
-
-        let harness = fixture.harness();
-        for kind in [
-            ResourceKind::Skill,
-            ResourceKind::Memory,
-            ResourceKind::GlobalInstructions,
-            ResourceKind::McpServer,
-        ] {
-            let refs = harness
-                .list(kind)
-                .unwrap_or_else(|e| panic!("{kind:?}: {e}"));
-            for r in refs {
-                assert!(
-                    r.path.starts_with(&fixture.home),
-                    "{kind:?} resource escaped the fixture: {}",
-                    r.path.display()
-                );
-            }
-        }
     }
 
     #[test]
@@ -661,7 +383,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let refs = fixture.harness().list(ResourceKind::McpServer).unwrap();
+        let refs = fixture.harness().list(InventoryKind::McpServer).unwrap();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].id, "a");
     }

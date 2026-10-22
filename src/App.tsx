@@ -5,38 +5,61 @@ import { Config } from "./pages/Config";
 import { McpPage } from "./pages/Mcp";
 import { Transcripts } from "./pages/Transcripts";
 import { Hooks } from "./pages/Hooks";
+import { Memories } from "./pages/Memories";
+import { History } from "./pages/History";
 import "@m3e/web/theme";
 import "@m3e/web/button";
 import "./app.css";
 
-type Page = "overview" | "skills" | "mcp" | "config" | "hooks" | "transcripts";
+const pages = [
+  { id: "overview", label: "Overview", icon: "▦" },
+  { id: "skills", label: "Skills", icon: "◇" },
+  { id: "memories", label: "Memories", icon: "◈" },
+  { id: "mcp", label: "Servers", icon: "⌘" },
+  { id: "config", label: "Settings", icon: "⚙" },
+  { id: "hooks", label: "Hooks", icon: "↪" },
+  { id: "transcripts", label: "Transcripts", icon: "▤" },
+  { id: "history", label: "History", icon: "↶" },
+] as const;
+
+type Page = typeof pages[number]["id"];
+
+const views = {
+  skills: Skills,
+  memories: Memories,
+  mcp: McpPage,
+  config: Config,
+  hooks: Hooks,
+  transcripts: Transcripts,
+  history: History,
+} satisfies Record<Exclude<Page, "overview">, typeof Skills>;
 
 export function App() {
   const [page, setPage] = useState<Page>("overview");
+  const SelectedPage = page === "overview" ? null : views[page];
 
   return (
     <m3e-theme color="#6750a4" scheme="auto" density={-1} strong-focus>
       <div className="application-shell">
         <header className="topbar">
           <div className="brand-lockup">
-            <span className="brand-mark" aria-hidden="true">H</span>
+            <span className="brand-mark" aria-hidden="true">O</span>
             <div>
-              <p className="eyebrow">HARNESS MANAGER</p>
-              <h1>Harness Agent</h1>
+              <p className="eyebrow">CODING AGENT WORKSPACE</p>
+              <h1>Orbit</h1>
             </div>
           </div>
           <div className="connection-state">Claude Code</div>
         </header>
         <main className="workspace">
           <aside className="rail" aria-label="Main navigation">
-            <button className={`rail-item${page === "overview" ? " active" : ""}`} onClick={() => setPage("overview")} type="button"><span aria-hidden="true">▦</span><span>Overview</span></button>
-            <button className={`rail-item${page === "skills" ? " active" : ""}`} onClick={() => setPage("skills")} type="button"><span aria-hidden="true">◇</span><span>Skills</span></button>
-            <button className={`rail-item${page === "mcp" ? " active" : ""}`} onClick={() => setPage("mcp")} type="button"><span aria-hidden="true">⌘</span><span>Servers</span></button>
-            <button className={`rail-item${page === "config" ? " active" : ""}`} onClick={() => setPage("config")} type="button"><span aria-hidden="true">⚙</span><span>Settings</span></button>
-            <button className={`rail-item${page === "hooks" ? " active" : ""}`} onClick={() => setPage("hooks")} type="button"><span aria-hidden="true">↪</span><span>Hooks</span></button>
-            <button className={`rail-item${page === "transcripts" ? " active" : ""}`} onClick={() => setPage("transcripts")} type="button"><span aria-hidden="true">▤</span><span>Transcripts</span></button>
+            {pages.map(item => (
+              <button key={item.id} className={`rail-item${page === item.id ? " active" : ""}`} aria-current={page === item.id ? "page" : undefined} onClick={() => setPage(item.id)} type="button">
+                <span aria-hidden="true">{item.icon}</span><span>{item.label}</span>
+              </button>
+            ))}
           </aside>
-          {page === "skills" ? <Skills /> : page === "mcp" ? <McpPage /> : page === "config" ? <Config /> : page === "hooks" ? <Hooks /> : page === "transcripts" ? <Transcripts /> : (
+          {SelectedPage ? <SelectedPage /> : (
             <section className="content-pane" aria-labelledby="welcome-title">
               <div className="pane-heading">
                 <div>
@@ -48,7 +71,7 @@ export function App() {
               <div className="empty-panel">
                 <p className="eyebrow">CLAUDE CODE</p>
                 <h3 id="empty-title">Your Claude Code setup</h3>
-                <p className="empty-copy">Skills, MCP servers, hooks, settings, and transcripts read from the Claude Code directories on this device.</p>
+                <p className="empty-copy">Manage skills, project memories, MCP servers, hooks, settings, and chats. Review changes and restore saved versions in History.</p>
                 <div className="card-actions">
                   <M3eButton variant="filled" onClick={() => setPage("skills")}>Open skills</M3eButton>
                   <M3eButton variant="filled-tonal" onClick={() => setPage("config")}>Open settings</M3eButton>

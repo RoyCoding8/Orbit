@@ -1,12 +1,12 @@
 [package]
-name = "harness-agent"
+name = "orbit"
 version = "0.1.0"
 description = "Desktop manager for AI coding harness configuration"
 edition = "2021"
 rust-version = "1.82"
 
 [lib]
-name = "harness_agent_lib"
+name = "orbit_lib"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -15,6 +15,9 @@ tauri-build = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+unicode-normalization = "0.1"
+pulldown-cmark = { version = "0.13", default-features = false }
 serde_yaml = "0.9"
 rusqlite = { version = "0.32", features = ["bundled"] }
 thiserror = "2"

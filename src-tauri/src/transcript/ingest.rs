@@ -1,4 +1,4 @@
-use super::{database_path, SessionSummary, TranscriptError};
+use super::{database_path, SessionSummary, SessionTitle, TranscriptError};
 use rusqlite::{params, Connection};
 use serde_json::Value;
 use std::{collections::HashMap, fs, path::Path};
@@ -14,35 +14,47 @@ pub struct IngestReport {
     pub skipped_state_lines: usize,
 }
 
-/// Version 3 uses project-qualified full source filenames for session keys.
-/// Version 2 used only the file stem, which collided for case-sensitive
-/// `.jsonl`/`.JSONL` pairs, so the derived cache is rebuilt on next ingest.
-const SCHEMA_VERSION: i64 = 3;
+/// Version 3 fixed case-sensitive filename collisions. Version 4 adds native
+/// chat titles without discarding an existing version 3 message cache.
+const SCHEMA_VERSION: i64 = 4;
 
 pub fn open_database(app_data_dir: &Path) -> Result<Connection, TranscriptError> {
     fs::create_dir_all(app_data_dir)?;
-    let connection = Connection::open(database_path(app_data_dir))?;
+    let mut connection = Connection::open(database_path(app_data_dir))?;
+    connection.pragma_update(None, "foreign_keys", true)?;
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version == SCHEMA_VERSION {
+        return Ok(connection);
+    }
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let version: i64 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version > SCHEMA_VERSION {
         return Err(TranscriptError::UnsupportedSchema {
             found: version,
             supported: SCHEMA_VERSION,
         });
     }
-    if version < SCHEMA_VERSION {
-        connection.execute_batch(
-            "PRAGMA foreign_keys = OFF;\n\
-             DROP TABLE IF EXISTS messages;\n\
+    if version == SCHEMA_VERSION {
+        transaction.commit()?;
+        return Ok(connection);
+    }
+    if version < 3 {
+        transaction.execute_batch(
+            "DROP TABLE IF EXISTS messages;\n\
              DROP TABLE IF EXISTS messages_fts;\n\
              DROP TABLE IF EXISTS transcript_ingest_errors;\n\
-             DROP TABLE IF EXISTS sessions;\n\
-             PRAGMA foreign_keys = ON;",
+             DROP TABLE IF EXISTS sessions;",
         )?;
     }
-    connection.execute_batch(include_str!("../../migrations/001_transcripts.sql"))?;
-    if version != SCHEMA_VERSION {
-        connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    transaction.execute_batch(include_str!("../../migrations/001_transcripts.sql"))?;
+    if version == 3 {
+        transaction.execute("ALTER TABLE sessions ADD COLUMN title TEXT", [])?;
     }
+    if version != SCHEMA_VERSION {
+        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    }
+    transaction.commit()?;
     Ok(connection)
 }
 
@@ -169,6 +181,10 @@ fn ingest_session(
         .filter_map(|(_, _, result)| result.as_ref().ok())
         .collect::<Vec<_>>();
     let tool_ids = tool_call_owners(&valid_values);
+    let mut title = SessionTitle::default();
+    for value in &valid_values {
+        title.observe(value);
+    }
     let fallback_message = valid_values
         .iter()
         .find_map(|value| value.get("uuid").and_then(Value::as_str))
@@ -181,8 +197,8 @@ fn ingest_session(
     )?;
     transaction.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id])?;
     transaction.execute(
-        "INSERT INTO sessions(session_id, project, source_path, updated_at, message_count) VALUES (?1, ?2, ?3, ?4, 0)",
-        params![session_id, project, path.to_string_lossy(), modified],
+        "INSERT INTO sessions(session_id, project, source_path, updated_at, message_count, title) VALUES (?1, ?2, ?3, ?4, 0, ?5)",
+        params![session_id, project, path.to_string_lossy(), modified, title.finish()],
     )?;
     let mut malformed = 0usize;
     let mut skipped_state = 0usize;
@@ -261,6 +277,7 @@ fn is_state_line(value: &Value) -> bool {
         Some(kind) => matches!(
             kind,
             "last-prompt"
+                | "custom-title"
                 | "atis-latch"
                 | "mode"
                 | "permission-mode"
@@ -464,10 +481,11 @@ fn find_tool_link(value: &Value) -> Option<String> {
 
 pub fn list_sessions(app_data_dir: &Path) -> Result<Vec<SessionSummary>, TranscriptError> {
     let connection = open_database(app_data_dir)?;
-    let mut statement = connection.prepare("SELECT session_id, project, updated_at, message_count FROM sessions ORDER BY updated_at DESC, session_id")?;
+    let mut statement = connection.prepare("SELECT session_id, project, updated_at, message_count, title FROM sessions ORDER BY updated_at DESC, session_id")?;
     let rows = statement.query_map([], |row| {
         Ok(SessionSummary {
             session_id: row.get(0)?,
+            title: row.get(4)?,
             project: row.get(1)?,
             updated_at: row.get(2)?,
             message_count: row.get::<_, i64>(3)? as usize,
@@ -485,6 +503,19 @@ fn read_spills_for_tests(session_path: &Path) -> HashMap<String, (Option<String>
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn adding_titles_preserves_the_existing_version_three_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = Connection::open(database_path(directory.path())).unwrap();
+        connection.execute_batch("CREATE TABLE sessions (session_id TEXT PRIMARY KEY, project TEXT NOT NULL, source_path TEXT NOT NULL, updated_at TEXT, message_count INTEGER NOT NULL DEFAULT 0); INSERT INTO sessions VALUES ('existing.jsonl', 'project', 'source.jsonl', NULL, 7); PRAGMA user_version = 3;").unwrap();
+        drop(connection);
+        let sessions = list_sessions(directory.path()).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "existing.jsonl");
+        assert_eq!(sessions[0].message_count, 7);
+        assert_eq!(sessions[0].title, None);
+    }
 
     #[test]
     fn ingestion_counts_source_lines_and_indexes_valid_messages() {
@@ -611,12 +642,28 @@ mod tests {
         .unwrap();
         writeln!(file, "{{\"type\":\"last-prompt\",\"prompt\":\"do thing\"}}").unwrap();
         writeln!(file, "{{\"type\":\"mode\",\"mode\":\"bypassPermissions\"}}").unwrap();
-        writeln!(file, "").unwrap();
+        writeln!(
+            file,
+            "{{\"type\":\"custom-title\",\"customTitle\":\"Agent\"}}"
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{{\"type\":\"ai-title\",\"aiTitle\":\"Generated name\"}}"
+        )
+        .unwrap();
+        writeln!(file).unwrap();
         let report = ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
-        assert_eq!(report.lines_read, 5);
+        assert_eq!(report.lines_read, 7);
         assert_eq!(report.messages_indexed, 1);
         assert_eq!(report.malformed_lines, 0);
-        assert_eq!(report.skipped_state_lines, 4);
+        assert_eq!(report.skipped_state_lines, 6);
+        assert_eq!(
+            list_sessions(&temp.path().join("db")).unwrap()[0]
+                .title
+                .as_deref(),
+            Some("Agent")
+        );
         let connection = open_database(&temp.path().join("db")).unwrap();
         let errors: i64 = connection
             .query_row("SELECT count(*) FROM transcript_ingest_errors", [], |row| {
@@ -929,6 +976,21 @@ mod tests {
         let report = ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
         assert_eq!(report.sessions, 2);
         assert_eq!(report.skipped_files, 0);
+    }
+
+    #[test]
+    fn current_cache_opens_while_another_connection_holds_the_writer_slot() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut writer = open_database(temp.path()).unwrap();
+        let transaction = writer
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let reader = open_database(temp.path()).unwrap();
+        let version: i64 = reader
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+        transaction.rollback().unwrap();
     }
 
     #[test]

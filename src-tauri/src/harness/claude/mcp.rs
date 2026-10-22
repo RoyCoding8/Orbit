@@ -645,7 +645,7 @@ fn stdio_handshake(child: &mut Child) -> std::result::Result<Vec<String>, String
         .ok_or_else(|| "MCP server stdin unavailable".to_string())?;
     write_rpc(
         input,
-        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"harness-agent","version":"0.1.0"}}}),
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"orbit","version":"0.1.0"}}}),
     )?;
     let response = reader.next_response("initialize", 1)?;
     if response.get("error").is_some() {
@@ -703,7 +703,7 @@ fn test_http(config: &HttpEntry) -> std::result::Result<BenchResult, String> {
             .map_err(|_| format!("Invalid MCP header value for {key}"))?;
         request = request.header(key, value);
     }
-    let initialized = request.json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"harness-agent","version":"0.1.0"}}})).send().map_err(|error| safe_http_error(&error))?;
+    let initialized = request.json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"orbit","version":"0.1.0"}}})).send().map_err(|error| safe_http_error(&error))?;
     if initialized.status().is_redirection() {
         return Err(format!(
             "MCP server redirected (HTTP {}); redirects are not followed, point the entry at the final URL",
@@ -1315,7 +1315,7 @@ mod tests {
     #[test]
     fn dead_stdio_command_surfaces_spawn_failure_without_panicking() {
         let error = test_stdio(&StdioEntry {
-            command: "missing-harness-agent-mcp-command".into(),
+            command: "missing-orbit-mcp-command".into(),
             args: vec![],
             env: BTreeMap::new(),
             extra: BTreeMap::new(),

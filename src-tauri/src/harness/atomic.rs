@@ -1,5 +1,6 @@
 //! Single-attempt verified mutations for harness-owned files.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -12,6 +13,18 @@ use super::{HarnessError, Result};
 
 static MUTATION_LOCK: Mutex<()> = Mutex::new(());
 static TEMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
 
 /// A non-empty chain of object keys addressing one value in a JSON document.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +125,9 @@ pub(crate) enum RecordedWrite<'a> {
     #[cfg(test)]
     Bytes(&'a [u8]),
     Restore([u8; 32], &'a [u8]),
+    /// Create a file only while the locked target is absent. Unlike the test
+    /// fixture byte writer, this remains conditional in production.
+    Create(&'a [u8]),
 }
 
 /// Errors from [`commit`] and [`write_file`].
@@ -143,6 +159,9 @@ pub enum CommitError {
         path: PathBuf,
         expected: [u8; 32],
         actual: Option<[u8; 32]>,
+    },
+    Exists {
+        path: PathBuf,
     },
 }
 
@@ -191,6 +210,11 @@ impl std::fmt::Display for CommitError {
                     .map(|digest| hex(digest))
                     .unwrap_or_else(|| "absent".into())
             ),
+            Self::Exists { path } => write!(
+                f,
+                "{} already exists; refusing to create over it",
+                path.display()
+            ),
         }
     }
 }
@@ -235,6 +259,13 @@ impl From<CommitError> for HarnessError {
                         .map(|digest| hex(digest))
                         .unwrap_or_else(|| "absent".into())
                 )),
+            },
+            CommitError::Exists { path } => HarnessError::Write {
+                path,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "target already exists",
+                ),
             },
             CommitError::Shape { path } => HarnessError::Write {
                 path,
@@ -433,7 +464,7 @@ fn serialize_pretty(path: &Path, value: &impl Serialize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn replace_via_temp(path: &Path, bytes: &[u8]) -> std::result::Result<(), CommitError> {
+fn stage_file(path: &Path, bytes: &[u8]) -> std::result::Result<PathBuf, CommitError> {
     let dir = path.parent().ok_or_else(|| {
         CommitError::Io(HarnessError::Write {
             path: path.to_path_buf(),
@@ -456,12 +487,26 @@ fn replace_via_temp(path: &Path, bytes: &[u8]) -> std::result::Result<(), Commit
         std::process::id(),
         sequence
     ));
-    std::fs::write(&temp, bytes).map_err(|source| {
-        CommitError::Io(HarnessError::Write {
-            path: temp.clone(),
-            source,
-        })
-    })?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .map_err(|source| {
+            CommitError::Io(HarnessError::Write {
+                path: temp.clone(),
+                source,
+            })
+        })?;
+    if let Err(source) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(&temp);
+        return Err(CommitError::Io(HarnessError::Write { path: temp, source }));
+    }
+    Ok(temp)
+}
+
+fn replace_via_temp(path: &Path, bytes: &[u8]) -> std::result::Result<(), CommitError> {
+    let temp = stage_file(path, bytes)?;
     std::fs::rename(&temp, path).map_err(|source| {
         let _ = std::fs::remove_file(&temp);
         CommitError::WriteAttempt {
@@ -473,6 +518,47 @@ fn replace_via_temp(path: &Path, bytes: &[u8]) -> std::result::Result<(), Commit
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
+}
+
+fn create_via_temp(path: &Path, bytes: &[u8]) -> std::result::Result<(), CommitError> {
+    let temp = stage_file(path, bytes)?;
+    if let Err(source) = publish_new_file(&temp, path) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(if source.kind() == std::io::ErrorKind::AlreadyExists {
+            CommitError::Exists {
+                path: path.to_path_buf(),
+            }
+        } else {
+            CommitError::WriteAttempt {
+                path: path.to_path_buf(),
+                source,
+            }
+        });
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn publish_new_file(temp: &Path, path: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileW(existing: *const u16, destination: *const u16) -> i32;
+    }
+    let existing: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // MoveFileW refuses an existing destination; both UTF-16 buffers live through the call.
+    if unsafe { MoveFileW(existing.as_ptr(), destination.as_ptr()) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn publish_new_file(temp: &Path, path: &Path) -> std::io::Result<()> {
+    std::fs::hard_link(temp, path)?;
+    let _ = std::fs::remove_file(temp);
+    Ok(())
 }
 
 pub(crate) fn lock_mutations(path: &Path) -> std::result::Result<MutationGuard, CommitError> {
@@ -706,7 +792,30 @@ pub(crate) fn write_recorded<E>(
     complete: impl FnOnce(&MutationPlan, &MutationGuard) -> std::result::Result<(), E>,
 ) -> std::result::Result<Receipt, RecordedMutationError<E>> {
     let guard = lock_mutations(path).map_err(RecordedMutationError::Preparation)?;
-    let original = read_original(path).map_err(RecordedMutationError::Preparation)?;
+    let create_only = matches!(&change, RecordedWrite::Create(_));
+    if create_only {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => {
+                return Err(RecordedMutationError::Preparation(CommitError::Exists {
+                    path: path.to_path_buf(),
+                }));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(RecordedMutationError::Preparation(CommitError::Io(
+                    HarnessError::Read {
+                        path: path.to_path_buf(),
+                        source,
+                    },
+                )));
+            }
+        }
+    }
+    let original = if create_only {
+        None
+    } else {
+        read_original(path).map_err(RecordedMutationError::Preparation)?
+    };
     let candidate = match change {
         RecordedWrite::Patches(patches) => patch_candidate(path, original.as_deref(), &patches)
             .map_err(RecordedMutationError::Preparation)?,
@@ -717,6 +826,7 @@ pub(crate) fn write_recorded<E>(
                 .map_err(RecordedMutationError::Preparation)?;
             bytes.to_vec()
         }
+        RecordedWrite::Create(bytes) => bytes.to_vec(),
     };
     let plan = MutationPlan {
         target: path.to_path_buf(),
@@ -725,8 +835,31 @@ pub(crate) fn write_recorded<E>(
         after_checksum: Some(hex(&sha256(&candidate))),
     };
     reserve(&plan, &guard).map_err(RecordedMutationError::Reservation)?;
-    let receipt = apply_and_write(path, original, &candidate, backup_to)
-        .map_err(RecordedMutationError::Mutation)?;
+    let receipt = if create_only {
+        create_via_temp(path, &candidate).map_err(RecordedMutationError::Mutation)?;
+        let landed = std::fs::read(path).map_err(|source| {
+            RecordedMutationError::Mutation(CommitError::VerifyRead {
+                path: path.to_path_buf(),
+                source,
+            })
+        })?;
+        if landed != candidate {
+            return Err(RecordedMutationError::Mutation(CommitError::Conflict {
+                path: path.to_path_buf(),
+                expected: sha256(&candidate),
+                actual: sha256(&landed),
+            }));
+        }
+        Receipt {
+            backup: None,
+            before: None,
+            after: sha256(&landed),
+            target: path.to_path_buf(),
+        }
+    } else {
+        apply_and_write(path, original, &candidate, backup_to)
+            .map_err(RecordedMutationError::Mutation)?
+    };
     complete(&plan, &guard).map_err(RecordedMutationError::Finalization)?;
     Ok(receipt)
 }
@@ -766,6 +899,37 @@ pub fn hex(digest: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_file_publication_never_replaces_an_existing_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("memory.md");
+        create_via_temp(&target, b"saved memory").unwrap();
+        assert!(matches!(
+            create_via_temp(&target, b"replacement"),
+            Err(CommitError::Exists { .. })
+        ));
+        assert_eq!(std::fs::read(&target).unwrap(), b"saved memory");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn staging_refuses_an_existing_temp_link_without_changing_its_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("settings.json");
+        let _guard = lock_mutations(&target).unwrap();
+        let outside = directory.path().join("preserve.txt");
+        std::fs::write(&outside, b"preserve").unwrap();
+        let temp = directory.path().join(format!(
+            ".settings.json.{}.{}.tmp",
+            std::process::id(),
+            TEMP_SEQUENCE.load(std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::hard_link(&outside, &temp).unwrap();
+        assert!(stage_file(&target, b"replacement").is_err());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"preserve");
+        assert!(!target.exists());
+    }
     use serde_json::json;
 
     fn write_fixture(path: &Path, bytes: &[u8]) {
@@ -1135,8 +1299,7 @@ mod tests {
         let error = remove_current(&path, sha256(b"created")).unwrap_err();
         assert!(matches!(error, CommitError::Drift { .. }));
         assert_eq!(std::fs::read(&path).unwrap(), b"changed");
-        let removed = remove_current(&path, sha256(b"changed")).unwrap();
-        assert_eq!(removed, ());
+        remove_current(&path, sha256(b"changed")).unwrap();
         let error = remove_current(&path, sha256(b"created")).unwrap_err();
         match error {
             CommitError::Drift { actual, .. } => assert_eq!(actual, None),

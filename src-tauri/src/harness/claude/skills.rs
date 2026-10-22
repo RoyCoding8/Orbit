@@ -22,14 +22,6 @@ pub struct SkillEntry {
     pub state: SkillOverride,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct MemoryEntry {
-    pub id: String,
-    pub path: PathBuf,
-    pub content: String,
-}
-
 #[derive(Debug, Clone, Default)]
 struct Frontmatter {
     name: Option<String>,
@@ -77,11 +69,9 @@ fn parse_frontmatter(content: &str, fallback_name: &str) -> Frontmatter {
     }
 }
 
-pub fn inventory(
-    harness: &ClaudeCodeHarness,
-) -> Result<(Vec<SkillEntry>, Vec<MemoryEntry>), String> {
+pub fn inventory(harness: &ClaudeCodeHarness) -> Result<Vec<SkillEntry>, String> {
     let refs = harness
-        .list(ResourceKind::Skill)
+        .list(super::super::InventoryKind::Skill)
         .map_err(|e| e.to_string())?;
     let settings = atomic::read_json(&harness.settings_path()).map_err(|e| e.to_string())?;
     let overrides = settings.get("skillOverrides").and_then(Value::as_object);
@@ -117,25 +107,7 @@ pub fn inventory(
             state,
         });
     }
-    let refs = harness
-        .list(ResourceKind::Memory)
-        .map_err(|e| e.to_string())?;
-    let mut memories = Vec::with_capacity(refs.len());
-    for resource in refs {
-        match read_plain_file(&resource.path) {
-            Ok(content) => memories.push(MemoryEntry {
-                id: resource.id,
-                path: resource.path,
-                content,
-            }),
-            Err(error) => eprintln!(
-                "Skipping memory {} at {}: {error}",
-                resource.id,
-                resource.path.display()
-            ),
-        }
-    }
-    Ok((skills, memories))
+    Ok(skills)
 }
 
 pub fn set_override(
@@ -667,16 +639,15 @@ mod tests {
     #[test]
     fn inventory_reads_frontmatter_and_falls_back_on_malformed_yaml() {
         let (_dir, harness) = fixture();
-        let (skills, memories) = inventory(&harness).unwrap();
+        let skills = inventory(&harness).unwrap();
         assert_eq!(skills[0].name, "Alpha Skill");
         assert_eq!(skills[0].description.as_deref(), Some("A fixture skill"));
-        assert!(memories.is_empty());
         std::fs::write(
             harness.config_root().join("skills/alpha/SKILL.md"),
             "---\nname: [broken\n---\nbody\n",
         )
         .unwrap();
-        let (skills, _) = inventory(&harness).unwrap();
+        let skills = inventory(&harness).unwrap();
         assert_eq!(skills[0].name, "alpha");
         assert_eq!(skills[0].description, None);
     }
@@ -1024,32 +995,24 @@ mod tests {
     }
 
     #[test]
-    fn inventory_skips_an_unreadable_entry_without_losing_healthy_entries() {
-        let (dir, harness) = fixture();
+    fn inventory_discovers_copied_skills_and_skips_unreadable_entries() {
+        let (_dir, harness) = fixture();
         let bad = harness.config_root().join("skills/bad");
         std::fs::create_dir_all(&bad).unwrap();
         std::fs::write(bad.join("SKILL.md"), [0xff, 0xfe]).unwrap();
-        let memories = harness.config_root().join("projects/test/memory");
-        std::fs::create_dir_all(&memories).unwrap();
-        std::fs::write(memories.join("broken.md"), [0xff, 0xfe]).unwrap();
-        std::fs::write(memories.join("good.md"), "memory").unwrap();
+        let copied = harness.config_root().join("skills/copied-outside-app");
+        std::fs::create_dir_all(&copied).unwrap();
+        std::fs::write(copied.join("SKILL.md"), "external skill\n").unwrap();
 
-        let (skills, memories) = inventory(&harness).unwrap();
+        let skills = inventory(&harness).unwrap();
         assert_eq!(
             skills
                 .iter()
                 .map(|skill| skill.id.as_str())
                 .collect::<Vec<_>>(),
-            ["alpha"]
+            ["alpha", "copied-outside-app"]
         );
-        assert_eq!(
-            memories
-                .iter()
-                .map(|memory| memory.id.as_str())
-                .collect::<Vec<_>>(),
-            ["test/good.md"]
-        );
-        assert!(dir.path().join("claude").exists());
+        assert_eq!(skills[1].content, "external skill\n");
     }
 
     #[test]

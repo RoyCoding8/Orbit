@@ -6,7 +6,7 @@ import { Skills } from "./Skills";
 const SKILL = { id: "alpha", name: "Alpha", description: "Fixture skill", path: "D:/fixture/skills/alpha/SKILL.md", content: "Original skill content.", state: "on" };
 
 function inventory(command: string) {
-  if (command === "skills_inventory") return [[SKILL], []];
+  if (command === "skills_inventory") return [SKILL];
   if (command === "skills_ledger") return [];
   throw new Error(`Unexpected command ${command}`);
 }
@@ -24,7 +24,7 @@ it("restores the unconsumed backup after repeated uninstall cycles", async () =>
     { timestamp: 3, id: "alpha", action: "uninstall", backupPath: "new-backup" },
   ];
   const ipc = vi.fn((command: string) => {
-    if (command === "skills_inventory") return [[], []];
+    if (command === "skills_inventory") return [];
     if (command === "skills_ledger") return rows;
     if (command === "skill_restore") return null;
     throw new Error(command);
@@ -41,10 +41,10 @@ describe("Skills loading", () => {
     let finish: (value: unknown) => void = () => {};
     mockIPC(command => command === "skills_inventory" ? new Promise(resolve => { finish = resolve; }) : []);
     render(<Skills />);
-    expect(screen.getByRole("status")).toHaveTextContent("Loading skills and memories");
+    expect(screen.getByRole("status")).toHaveTextContent("Loading skills");
     expect(screen.getByRole("button", { name: "Install skill" })).toBeDisabled();
     expect(screen.queryByText("No skills found")).not.toBeInTheDocument();
-    await act(async () => { finish([[], []]); });
+    await act(async () => { finish([]); });
     expect(await screen.findByText("No skills found")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Install skill" })).toBeEnabled();
   });
@@ -70,7 +70,7 @@ describe("Skills editor", () => {
     let saved = false;
     const ipc = vi.fn((command: string) => {
       if (command === "skill_edit") { saved = true; return null; }
-      if (command === "skills_inventory" && saved) return [[{ ...SKILL, content: "Updated content." }], []];
+      if (command === "skills_inventory" && saved) return [{ ...SKILL, content: "Updated content." }];
       return inventory(command);
     });
     mockIPC(ipc);

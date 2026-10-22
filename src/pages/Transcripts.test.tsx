@@ -3,7 +3,10 @@ import { StrictMode } from "react";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import type { InvokeArgs } from "@tauri-apps/api/core";
 import { mockIPC } from "@tauri-apps/api/mocks";
+import { open } from "@tauri-apps/plugin-dialog";
 import { Transcripts } from "./Transcripts";
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 
 const SESSIONS = [
   { sessionId: "alpha/one", project: "alpha", updatedAt: "2026-10-20T10:00:00Z", messageCount: 3 },
@@ -169,5 +172,94 @@ describe("Transcripts search results", () => {
     }
     expect(screen.queryByText("previous session content")).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Session alpha/one" })).toBeInTheDocument();
+  });
+});
+
+describe("native Claude archives", () => {
+  it("exports the selected session to a user-chosen directory", async () => {
+    vi.mocked(open).mockResolvedValue("C:/archive-destination");
+    const report = {
+      action: "exported",
+      sourceSessionId: "alpha/one",
+      sessionId: "alpha/one",
+      files: 3,
+      path: "C:/archive-destination/claude-session-one",
+    };
+    const ipc = vi.fn((command: string, payload?: InvokeArgs) => {
+      if (command === "transcript_list_sessions") return SESSIONS;
+      if (command === "transcript_thread_page") return [message("selected content")];
+      if (command === "transcript_export_directory") return report;
+      throw new Error(`Unexpected command ${command} with ${JSON.stringify(payload)}`);
+    });
+    mockIPC(ipc);
+    render(<Transcripts />);
+
+    await screen.findByText("alpha/one");
+    fireEvent.click(screen.getByRole("button", { name: /alpha\/one/ }));
+    await screen.findByText("selected content");
+    fireEvent.click(screen.getByRole("button", { name: "Export Claude archive" }));
+
+    expect(await screen.findByText(/Archived 3 native files/)).toBeInTheDocument();
+    expect(ipc).toHaveBeenCalledWith("transcript_export_directory", {
+      sessionId: "alpha/one",
+      destination: "C:/archive-destination",
+    });
+  });
+
+  it("imports an archive only after both directory choices and refreshes sessions", async () => {
+    vi.mocked(open).mockResolvedValue("C:/archive-source");
+    const importedSession = {
+      sessionId: "new-project/11111111-2222-4333-8444-555555555555.jsonl",
+      project: "new-project",
+      updatedAt: "2026-10-21T10:00:00Z",
+      messageCount: 2,
+    };
+    let sessionLoads = 0;
+    const ipc = vi.fn((command: string, payload?: InvokeArgs) => {
+      if (command === "transcript_list_sessions") {
+        return ++sessionLoads === 1 ? SESSIONS : [...SESSIONS, importedSession];
+      }
+      if (command === "project_choose") return "C:/destination-project";
+      if (command === "transcript_import_directory") {
+        return {
+          action: "imported",
+          sourceSessionId: "alpha/one.jsonl",
+          sessionId: importedSession.sessionId,
+          files: 3,
+          path: "C:/claude/projects/new-project/11111111-2222-4333-8444-555555555555.jsonl",
+        };
+      }
+      throw new Error(`Unexpected command ${command} with ${JSON.stringify(payload)}`);
+    });
+    mockIPC(ipc);
+    render(<Transcripts />);
+
+    await screen.findByText("alpha/one");
+    fireEvent.click(screen.getByRole("button", { name: "Import Claude archive" }));
+
+    expect(await screen.findByText(/Imported alpha\/one.jsonl as new-project/)).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /11111111-2222-4333-8444-555555555555.jsonl/ })).toBeInTheDocument();
+    expect(ipc).toHaveBeenCalledWith("project_choose", {});
+    expect(ipc).toHaveBeenCalledWith("transcript_import_directory", {
+      source: "C:/archive-source",
+      projectRoot: "C:/destination-project",
+    });
+  });
+
+  it("does not invoke import when the archive picker is canceled", async () => {
+    vi.mocked(open).mockResolvedValue(null);
+    const ipc = vi.fn((command: string) => {
+      if (command === "transcript_list_sessions") return SESSIONS;
+      throw new Error(`Unexpected command ${command}`);
+    });
+    mockIPC(ipc);
+    render(<Transcripts />);
+
+    await screen.findByText("alpha/one");
+    fireEvent.click(screen.getByRole("button", { name: "Import Claude archive" }));
+
+    await act(async () => {});
+    expect(ipc).not.toHaveBeenCalledWith("project_choose", {});
+    expect(ipc).not.toHaveBeenCalledWith("transcript_import_directory", expect.anything());
   });
 });

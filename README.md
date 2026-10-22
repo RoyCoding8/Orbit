@@ -15,11 +15,13 @@ Orbit puts Claude Code's tools and context in one desktop app. Manage skills, me
 
 | | Area | What you can do |
 |:--:|---|---|
-| <img src="assets/icons/skills.svg" alt="" width="24" /> | **Skills and memories** | Browse and edit skills, control visibility, restore recent uninstalls, and read project memories. |
+| <img src="assets/icons/skills.svg" alt="" width="24" /> | **Skills** | Browse and edit skills, control visibility, install or remove folders, and discover skills copied in outside Orbit. |
+| | **Memories** | Edit project memory indexes and topics, follow imports and links, and find incoming references. |
 | <img src="assets/icons/mcp.svg" alt="" width="24" /> | **MCP servers** | Manage local stdio and remote HTTP servers, then test their connections. |
 | <img src="assets/icons/hooks.svg" alt="" width="24" /> | **Hooks** | Inspect and edit user or project hooks. Test commands with sample JSON input. |
 | <img src="assets/icons/settings.svg" alt="" width="24" /> | **Settings** | Inspect configuration layers, edit one key at a time, and undo a recorded change when the file has not changed since. |
-| <img src="assets/icons/transcripts.svg" alt="" width="24" /> | **Transcripts** | Index local sessions, search messages, follow conversation branches, and export Markdown. |
+| <img src="assets/icons/transcripts.svg" alt="" width="24" /> | **Transcripts** | Index sessions, search messages, follow conversation branches, and export or import native chat archives to a chosen project. Markdown export is also available. |
+| | **History** | Browse saved versions separately from operation logs, restore a version, or delete a saved backup. |
 
 ## Requirements
 

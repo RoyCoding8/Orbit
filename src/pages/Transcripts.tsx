@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 
 type Session = {
   sessionId: string;
+  title: string | null;
   project: string;
   updatedAt: string | null;
   messageCount: number;
@@ -36,6 +38,13 @@ type IngestReport = {
   malformedLines: number;
   skippedFiles: number;
   skippedStateLines: number;
+};
+type ArchiveReport = {
+  action: "exported" | "imported";
+  sourceSessionId: string;
+  sessionId: string;
+  files: number;
+  path: string;
 };
 type Thread = {
   sessionId: string;
@@ -254,6 +263,58 @@ export function Transcripts() {
     }
   };
 
+  const exportArchive = async () => {
+    if (!selectedSession) return;
+    setPending(true);
+    try {
+      const destination = await open({
+        directory: true,
+        multiple: false,
+        title: "Choose where to save the Claude session archive",
+      });
+      if (typeof destination !== "string") return;
+      const report = await invoke<ArchiveReport>("transcript_export_directory", {
+        sessionId: selectedSession,
+        destination,
+      });
+      setNotice(`Archived ${report.files} native files to ${report.path}.`);
+    } catch (error) {
+      setNotice(`Archive export failed. ${String(error)}`);
+    } finally {
+      setPending(false);
+    }
+  };
+
+  const importArchive = async () => {
+    setPending(true);
+    try {
+      const source = await open({
+        directory: true,
+        multiple: false,
+        title: "Choose a Claude session archive",
+      });
+      if (typeof source !== "string") return;
+      const projectRoot = await invoke<string | null>("project_choose");
+      if (!projectRoot) return;
+      const report = await invoke<ArchiveReport>("transcript_import_directory", {
+        source,
+        projectRoot,
+      });
+      try {
+        await refreshSessions();
+        setNotice(`Imported ${report.sourceSessionId} as ${report.sessionId}.`);
+      } catch (error) {
+        setNotice(
+          `Imported ${report.sessionId}, but the transcript list could not refresh. ${String(error)}`,
+        );
+      }
+    } catch (error) {
+      setNotice(`Archive import failed. ${String(error)}`);
+    } finally {
+      setPending(false);
+    }
+  };
+
   return (
     <section
       className="content-pane transcript-pane"
@@ -268,14 +329,24 @@ export function Transcripts() {
             record.
           </p>
         </div>
-        <button
-          className="primary-action"
-          type="button"
-          onClick={() => void indexSource()}
-          disabled={busy}
-        >
-          {pending ? "Working…" : "Index transcripts"}
-        </button>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button
+            className="secondary-action"
+            type="button"
+            onClick={() => void importArchive()}
+            disabled={busy}
+          >
+            Import Claude archive
+          </button>
+          <button
+            className="primary-action"
+            type="button"
+            onClick={() => void indexSource()}
+            disabled={busy}
+          >
+            {pending ? "Working…" : "Index transcripts"}
+          </button>
+        </div>
       </div>
       <p className="transcript-notice" role="status">
         {notice}
@@ -315,7 +386,7 @@ export function Transcripts() {
                 className={`session-card ${selectedSession === session.sessionId ? "selected" : ""}`}
                 onClick={() => void selectSession(session.sessionId)}
               >
-                <strong>{session.sessionId}</strong>
+                <strong>{session.title ?? session.sessionId}</strong>
                 <span>
                   {session.project} · {session.messageCount.toLocaleString()}{" "}
                   messages
@@ -360,13 +431,24 @@ export function Transcripts() {
               {selectedSession ? `Session ${selectedSession}` : "Thread view"}
             </h3>
             {selectedSession && (
-              <button
-                type="button"
-                className="secondary-action"
-                onClick={() => void exportSession()}
-              >
-                Export Markdown
-              </button>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  className="secondary-action"
+                  onClick={() => void exportArchive()}
+                  disabled={busy}
+                >
+                  Export Claude archive
+                </button>
+                <button
+                  type="button"
+                  className="secondary-action"
+                  onClick={() => void exportSession()}
+                  disabled={busy}
+                >
+                  Export Markdown
+                </button>
+              </div>
             )}
           </div>
           {!selectedSession && (

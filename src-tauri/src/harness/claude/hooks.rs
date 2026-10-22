@@ -296,7 +296,7 @@ pub fn test_command(
         return Err("Hook command must not be empty".into());
     }
     let sandbox = std::env::temp_dir().join(format!(
-        "harness-agent-hook-{}-{}",
+        "orbit-hook-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

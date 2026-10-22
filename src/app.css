@@ -229,15 +229,9 @@ p { margin: 0; }
 .state-toggle input { accent-color: var(--md-sys-color-primary, #6750a4); width: 18px; height: 18px; }
 .state-control select { max-width: 180px; border: 1px solid var(--md-sys-color-outline-variant, #cac4d0); border-radius: 10px; padding: 8px; background: var(--md-sys-color-surface, #fff); color: inherit; }
 .card-actions { display: flex; gap: 8px; }
-.memory-list { border: 1px solid var(--md-sys-color-outline-variant, #cac4d0); border-radius: 16px; overflow: hidden; }
-.memories-heading { margin-top: 8px; }
-.memory-row, .restore-row { display: flex; width: 100%; align-items: center; justify-content: space-between; padding: 14px 18px; border: 0; border-bottom: 1px solid var(--md-sys-color-outline-variant, #cac4d0); background: transparent; color: inherit; text-align: left; }
-.memory-row { cursor: pointer; }
-.memory-row:last-child, .restore-row:last-child { border-bottom: 0; }
-.memory-row span + span { color: var(--md-sys-color-primary, #6750a4); font-size: 12px; }
-.memory-row.selected { background: var(--md-sys-color-secondary-container, #e8def8); }
-.preview-panel { padding: 18px; border: 1px solid var(--md-sys-color-outline-variant, #cac4d0); border-radius: 18px; }
-.preview-panel pre, .diff-columns pre, .diff-columns textarea { box-sizing: border-box; width: 100%; max-height: 42vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; border: 1px solid var(--md-sys-color-outline-variant, #cac4d0); border-radius: 12px; background: var(--md-sys-color-surface, #fff); color: inherit; font: 12px/1.5 ui-monospace, monospace; }
+.restore-row { display: flex; width: 100%; align-items: center; justify-content: space-between; padding: 14px 18px; border: 0; border-bottom: 1px solid var(--md-sys-color-outline-variant, #cac4d0); background: transparent; color: inherit; text-align: left; }
+.restore-row:last-child { border-bottom: 0; }
+.diff-columns pre, .diff-columns textarea { box-sizing: border-box; width: 100%; max-height: 42vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; border: 1px solid var(--md-sys-color-outline-variant, #cac4d0); border-radius: 12px; background: var(--md-sys-color-surface, #fff); color: inherit; font: 12px/1.5 ui-monospace, monospace; }
 .inline-error { padding: 12px 16px; border-radius: 12px; background: #f9dedc; color: #8c1d18; }
 .edit-dialog[open] { display: flex; flex-direction: column; gap: 16px; box-sizing: border-box; width: min(1100px, calc(100% - 40px)); max-height: 90vh; padding: 24px; border: 0; border-radius: 24px; color: var(--md-sys-color-on-surface, #1d1b20); background: var(--md-sys-color-surface, #fff); box-shadow: 0 12px 44px rgb(0 0 0 / 20%); }
 .edit-dialog::backdrop { background: rgb(0 0 0 / 35%); }

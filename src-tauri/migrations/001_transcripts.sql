@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     project TEXT NOT NULL,
     source_path TEXT NOT NULL,
     updated_at TEXT,
+    title TEXT,
     message_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS messages (

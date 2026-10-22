@@ -8,7 +8,7 @@ use crate::harness::{atomic, ResourceKind};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-enum LedgerStatus {
+pub enum LedgerStatus {
     Pending,
     Applied,
 }
@@ -32,7 +32,7 @@ pub struct LedgerRow {
     /// New rows start Pending before the target changes, then become Applied
     /// after verified readback. Missing status means a pre-reservation row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    status: Option<LedgerStatus>,
+    pub status: Option<LedgerStatus>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
