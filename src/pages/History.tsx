@@ -4,6 +4,13 @@ import "./History.css";
 
 type Scope = "global" | "project" | "other";
 type VersionKind = "file" | "directory";
+type BackupStatus = "available" | "missing" | "checksumMismatch" | "unavailable";
+const backupLabels: Record<BackupStatus, string> = {
+  available: "Saved payload available",
+  missing: "Saved backup is missing.",
+  checksumMismatch: "Saved backup checksum does not match its recorded checksum.",
+  unavailable: "Saved backup could not be read or verified.",
+};
 type OperationStatus =
   | "applied"
   | "pending"
@@ -24,7 +31,7 @@ type HistoryVersion = {
   kind: VersionKind;
   checksum: string;
   currentChecksum: string | null;
-  available: boolean;
+  backupStatus: BackupStatus;
   restorable: boolean;
 };
 type HistoryLog = {
@@ -38,8 +45,7 @@ type HistoryLog = {
   scopeLabel: string;
   target: string | null;
   status: OperationStatus;
-  backupAvailable: boolean;
-  hasBackup: boolean;
+  backupStatus: BackupStatus | null;
 };
 type HistorySnapshot = { versions: HistoryVersion[]; logs: HistoryLog[] };
 type LoadState = "loading" | "ready" | "error";
@@ -280,8 +286,8 @@ export function History() {
                       <p className="history-meta">
                         {formatTime(version.timestamp)} · {version.action} · {targetState(version.currentChecksum)}
                       </p>
-                      {!version.available && (
-                        <p className="history-unavailable">Saved payload is missing or does not match its checksum.</p>
+                      {version.backupStatus !== "available" && (
+                        <p className="history-unavailable">{backupLabels[version.backupStatus]}</p>
                       )}
                     </div>
                     <div className="history-actions">
@@ -297,7 +303,7 @@ export function History() {
                         className="action-button danger"
                         type="button"
                         onClick={() => removeVersion(version)}
-                        disabled={busy || loadState !== "ready" || !version.available}
+                        disabled={busy || loadState !== "ready" || version.backupStatus !== "available"}
                       >
                         Delete version
                       </button>
@@ -333,11 +339,7 @@ export function History() {
                     {entry.scopeLabel} · {formatTime(entry.timestamp)} · {entry.action}
                   </p>
                   <p className="history-meta">
-                    {entry.hasBackup
-                      ? entry.backupAvailable
-                        ? "Saved payload available"
-                        : "Saved payload removed or unavailable"
-                      : "No saved payload"}
+                    {entry.backupStatus === null ? "No saved payload" : backupLabels[entry.backupStatus]}
                   </p>
                 </div>
               </article>

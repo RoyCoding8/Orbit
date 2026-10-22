@@ -92,10 +92,22 @@ export function Memories() {
   };
 
   const selectFile = (file: MemoryFile) => {
-    if (file.id !== selectedId && confirmDiscard()) {
+    if (!busy && file.id !== selectedId && confirmDiscard()) {
       setSelectedId(file.id);
       setDraft(file.content);
     }
+  };
+  const removeFile = async () => {
+    if (!selected || !catalog || !window.confirm(
+      `Delete ${selected.name} and remove references to it from memory and instruction files? The file and changed references will be backed up in History.${dirty ? " Unsaved edits will be discarded." : ""}`,
+    )) return;
+    setBusy(true);
+    setError("");
+    try {
+      await invoke("memory_delete", { projectRoot: catalog.projectRoot, id: selected.id, expectedContent: selected.content });
+      await load(catalog.projectRoot, true);
+    } catch (reason) { setError(String(reason)); }
+    finally { setBusy(false); }
   };
   const openReference = (reference: MemoryReference) => {
     if (reference.status !== "known" || !reference.fileId) return;
@@ -144,7 +156,10 @@ export function Memories() {
               {selected ? <>
                 <div className="memory-file-heading">
                   <div><p className="eyebrow">{roleLabel(selected.role)}</p><h3>{selected.name}</h3><code>{selected.path}</code></div>
-                  <button className="action-button primary" onClick={() => void save()} disabled={busy || !selected.editable || draft === selected.content}>{busy ? "Saving…" : "Save changes"}</button>
+                  <div className="memory-header-actions">
+                    <button className="action-button danger" onClick={() => void removeFile()} disabled={busy || !selected.editable}>Delete file</button>
+                    <button className="action-button primary" onClick={() => void save()} disabled={busy || !selected.editable || draft === selected.content}>Save changes</button>
+                  </div>
                 </div>
                 <p className="memory-load-behavior"><strong>Claude Code loading:</strong> {selected.loadBehavior}</p>
                 <label className="memory-content-label" htmlFor="memory-content">Markdown content</label>

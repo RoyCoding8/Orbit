@@ -16,7 +16,7 @@ Orbit puts Claude Code's tools and context in one desktop app. Manage skills, me
 | | Area | What you can do |
 |:--:|---|---|
 | <img src="assets/icons/skills.svg" alt="" width="24" /> | **Skills** | Browse and edit skills, control visibility, install or remove folders, and discover skills copied in outside Orbit. |
-| | **Memories** | Edit project memory indexes and topics, follow imports and links, and find incoming references. |
+| | **Memories** | Edit or delete project memories and instructions, follow imports and links, and find incoming references. Deletion removes references and saves restorable backups. |
 | <img src="assets/icons/mcp.svg" alt="" width="24" /> | **MCP servers** | Manage local stdio and remote HTTP servers, then test their connections. |
 | <img src="assets/icons/hooks.svg" alt="" width="24" /> | **Hooks** | Inspect and edit user or project hooks. Test commands with sample JSON input. |
 | <img src="assets/icons/settings.svg" alt="" width="24" /> | **Settings** | Inspect configuration layers, edit one key at a time, and undo a recorded change when the file has not changed since. |
@@ -38,7 +38,9 @@ sudo apt-get install --yes build-essential curl wget file \
   libssl-dev librsvg2-dev patchelf
 ```
 
-Windows builds require the Microsoft C++ Build Tools and WebView2. macOS builds require Xcode Command Line Tools.
+Windows builds use WebView2 and a native compiler matching your default Rust toolchain. For GNU, use `stable-x86_64-pc-windows-gnu` with MinGW-w64 GCC and G++ on `PATH`. For MSVC, use Microsoft C++ Build Tools. Windows CI uses MSVC.
+
+macOS builds require Xcode Command Line Tools.
 
 ## Run locally
 

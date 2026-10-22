@@ -9,9 +9,9 @@ const version = {
   id: "operation-1", timestamp: 1, resourceKind: "memory", resourceId: "notes",
   action: "edit", scope: "project", scopeId: "project", scopeLabel: "Project memory",
   target: "D:/project/notes.md", kind: "file", checksum: "saved", currentChecksum: "current",
-  available: true, restorable: true,
+  backupStatus: "available", restorable: true,
 };
-const log = { ...version, status: "applied", hasBackup: true, backupAvailable: true };
+const log = { ...version, status: "applied" };
 
 it("keeps a failed restore visible and sends the chosen project and current checksum", async () => {
   vi.spyOn(window, "confirm").mockReturnValue(true);
@@ -36,7 +36,7 @@ it("deletes the saved payload while retaining the separate operation log", async
   vi.mocked(invoke).mockImplementation(async command => {
     if (command === "history_load") return {
       versions: deleted ? [] : [version],
-      logs: [{ ...log, backupAvailable: !deleted }],
+      logs: [{ ...log, backupStatus: deleted ? "missing" : "available" }],
     };
     if (command === "history_delete") { deleted = true; return null; }
     throw new Error(command);
@@ -47,5 +47,19 @@ it("deletes the saved payload while retaining the separate operation log", async
   expect(invoke).toHaveBeenCalledWith("history_delete", { id: "operation-1" });
   fireEvent.click(screen.getByRole("tab", { name: /Logs/ }));
   expect(screen.getByText("memory · notes")).toBeInTheDocument();
-  expect(screen.getByText("Saved payload removed or unavailable")).toBeInTheDocument();
+  expect(screen.getByText("Saved backup is missing.")).toBeInTheDocument();
+});
+
+it("reports a checksum mismatch separately and prevents restoring the changed backup", async () => {
+  vi.mocked(invoke).mockResolvedValue({
+    versions: [{ ...version, backupStatus: "checksumMismatch", restorable: false }],
+    logs: [{ ...log, backupStatus: "checksumMismatch" }],
+  });
+  render(<History />);
+  expect(await screen.findByText("Saved backup checksum does not match its recorded checksum.")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Restore" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Delete version" })).toBeDisabled();
+  expect(screen.queryByText(/missing/i)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("tab", { name: /Logs/ }));
+  expect(screen.getByText("Saved backup checksum does not match its recorded checksum.")).toBeInTheDocument();
 });

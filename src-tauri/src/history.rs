@@ -45,6 +45,15 @@ pub enum HistoryOperationStatus {
     Unavailable,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum BackupStatus {
+    Available,
+    Missing,
+    ChecksumMismatch,
+    Unavailable,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryVersion {
@@ -64,7 +73,7 @@ pub struct HistoryVersion {
     pub checksum: String,
     /// Checksum of the current target state, or `None` when it is absent.
     pub current_checksum: Option<String>,
-    pub available: bool,
+    pub backup_status: BackupStatus,
     pub restorable: bool,
 }
 
@@ -82,8 +91,7 @@ pub struct HistoryLog {
     pub scope_label: String,
     pub target: Option<PathBuf>,
     pub status: HistoryOperationStatus,
-    pub has_backup: bool,
-    pub backup_available: bool,
+    pub backup_status: Option<BackupStatus>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
@@ -130,14 +138,14 @@ pub fn load(harness: &ClaudeCodeHarness, project: &Path) -> Result<HistorySnapsh
             .target
             .as_deref()
             .and_then(|target| target_scope(harness, &project, row, Path::new(target)));
-        let backup_available = row
-            .backup_path
-            .as_deref()
-            .zip(row.before_checksum.as_deref())
-            .is_some_and(|(backup, checksum)| {
-                artifact_matches(harness.config_root(), Path::new(backup), checksum)
-                    .unwrap_or(false)
-            });
+        let backup_status = row.backup_path.as_deref().map(|backup| {
+            saved_backup_status(
+                harness.config_root(),
+                Path::new(backup),
+                row.before_checksum.as_deref(),
+            )
+            .unwrap_or(BackupStatus::Unavailable)
+        });
         let status = history_status(row);
         let log_scope = scope.as_ref();
         logs.push(HistoryLog {
@@ -155,8 +163,7 @@ pub fn load(harness: &ClaudeCodeHarness, project: &Path) -> Result<HistorySnapsh
                 .map_or_else(|| "Unclassified target".into(), |value| value.label.clone()),
             target: row.target.as_deref().map(PathBuf::from),
             status,
-            has_backup: row.backup_path.is_some(),
-            backup_available,
+            backup_status,
         });
 
         let Some(op) = row.op.as_deref() else {
@@ -165,22 +172,18 @@ pub fn load(harness: &ClaudeCodeHarness, project: &Path) -> Result<HistorySnapsh
         let Some(target) = row.target.as_deref().map(PathBuf::from) else {
             continue;
         };
-        let (Some(backup), Some(checksum), Some(scope)) = (
-            row.backup_path.as_deref(),
-            row.before_checksum.as_deref(),
-            scope,
-        ) else {
+        let (Some(backup_status), Some(checksum), Some(scope)) =
+            (backup_status, row.before_checksum.as_deref(), scope)
+        else {
             continue;
         };
-        if !reservation_is_complete(row) {
+        if !reservation_is_complete(row) || backup_status == BackupStatus::Missing {
             continue;
         }
         let kind = scope.kind;
-        let available =
-            artifact_matches(harness.config_root(), Path::new(backup), checksum).unwrap_or(false);
         let current_result = checksum_if_present(&target);
         let current_checksum = current_result.as_ref().ok().cloned().flatten();
-        let restorable = available
+        let restorable = backup_status == BackupStatus::Available
             && current_result.is_ok()
             && matches!(ledger::operation_state(row), Ok(OperationState::Applied));
         versions.push(HistoryVersion {
@@ -196,7 +199,7 @@ pub fn load(harness: &ClaudeCodeHarness, project: &Path) -> Result<HistorySnapsh
             kind,
             checksum: checksum.to_owned(),
             current_checksum,
-            available,
+            backup_status,
             restorable,
         });
     }
@@ -251,8 +254,13 @@ pub fn restore(
         .before_checksum
         .as_deref()
         .ok_or("history entry has no recorded checksum")?;
-    if !artifact_matches(harness.config_root(), &backup_path, recorded_checksum)? {
-        return Err("the saved version is missing or no longer matches its checksum".into());
+    match saved_backup_status(harness.config_root(), &backup_path, Some(recorded_checksum))? {
+        BackupStatus::Available => {}
+        BackupStatus::Missing => return Err("the saved backup is missing".into()),
+        BackupStatus::ChecksumMismatch => {
+            return Err("the saved backup checksum does not match its recorded checksum".into())
+        }
+        BackupStatus::Unavailable => return Err("the saved backup is unavailable".into()),
     }
     if !matches!(ledger::operation_state(&row)?, OperationState::Applied) {
         return Err("this history entry did not complete and cannot be restored".into());
@@ -402,7 +410,8 @@ pub fn cleanup_legacy(harness: &ClaudeCodeHarness) -> Result<CleanupReport, Stri
                     .before_checksum
                     .as_deref()
                     .is_some_and(|checksum| {
-                        artifact_matches(harness.config_root(), &path, checksum).unwrap_or(false)
+                        saved_backup_status(harness.config_root(), &path, Some(checksum))
+                            == Ok(BackupStatus::Available)
                     })
         });
         if shared_with_modern {
@@ -794,14 +803,21 @@ fn checksum_if_present(path: &Path) -> Result<Option<String>, String> {
     }
 }
 
-fn artifact_matches(config_root: &Path, path: &Path, expected: &str) -> Result<bool, String> {
+fn saved_backup_status(
+    config_root: &Path,
+    path: &Path,
+    expected: Option<&str>,
+) -> Result<BackupStatus, String> {
     let Some(kind) = app_backup_kind(config_root, path)? else {
-        return Ok(false);
+        return Ok(BackupStatus::Missing);
     };
-    if !checksum_matches_kind(kind, expected) {
-        return Ok(false);
+    let Some(expected) = expected else {
+        return Ok(BackupStatus::Unavailable);
+    };
+    if !checksum_matches_kind(kind, expected) || artifact_checksum(path, kind)? != expected {
+        return Ok(BackupStatus::ChecksumMismatch);
     }
-    Ok(artifact_checksum(path, kind)? == expected)
+    Ok(BackupStatus::Available)
 }
 
 fn checksum_matches_kind(kind: VersionKind, checksum: &str) -> bool {
@@ -1156,10 +1172,54 @@ mod tests {
             .logs
             .iter()
             .any(|log| log.id == log_id && log.action == "edit"));
-        assert!(after
-            .versions
-            .iter()
-            .any(|entry| entry.id == id && !entry.available));
+        assert!(!after.versions.iter().any(|entry| entry.id == id));
+        assert_eq!(
+            after
+                .logs
+                .iter()
+                .find(|log| log.id == id)
+                .unwrap()
+                .backup_status,
+            Some(BackupStatus::Missing)
+        );
+        delete(&harness, &id).unwrap();
+        let error =
+            restore(&harness, &project, &id, version.current_checksum.as_deref()).unwrap_err();
+        assert_eq!(error, "the saved backup is missing");
+    }
+
+    #[test]
+    fn a_changed_backup_reports_checksum_mismatch_and_is_preserved() {
+        let (_dir, harness, project) = fixture();
+        skills::edit_skill(&harness, "alpha", "original skill\n", "new skill\n").unwrap();
+        let row = ledger::read(harness.config_root()).unwrap().remove(0);
+        let backup = Path::new(row.backup_path.as_deref().unwrap());
+        std::fs::write(backup, "externally changed backup").unwrap();
+        let snapshot = load(&harness, &project).unwrap();
+        let version = snapshot.versions.first().unwrap();
+        assert_eq!(version.backup_status, BackupStatus::ChecksumMismatch);
+        assert!(!version.restorable);
+        assert_eq!(
+            snapshot.logs[0].backup_status,
+            Some(BackupStatus::ChecksumMismatch)
+        );
+        assert_eq!(
+            restore(
+                &harness,
+                &project,
+                &version.id,
+                version.current_checksum.as_deref()
+            )
+            .unwrap_err(),
+            "the saved backup checksum does not match its recorded checksum"
+        );
+        assert!(delete(&harness, &version.id)
+            .unwrap_err()
+            .contains("checksum"));
+        assert_eq!(
+            std::fs::read_to_string(backup).unwrap(),
+            "externally changed backup"
+        );
     }
 
     #[test]

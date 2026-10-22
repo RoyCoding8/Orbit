@@ -285,6 +285,26 @@ async fn memory_edit(
 }
 
 #[tauri::command]
+async fn memory_delete(
+    project_roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+    id: String,
+    expected_content: String,
+) -> Result<(), String> {
+    let project_roots = project_roots.inner().clone();
+    run_blocking(move || {
+        let project = project_roots.resolve(project_root)?;
+        harness::claude::memories::delete(
+            &harness::claude::ClaudeCodeHarness::from_env(),
+            &project,
+            &id,
+            &expected_content,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
 async fn history_load(
     project_roots: State<'_, ProjectRoots>,
     project_root: Option<String>,
@@ -622,6 +642,7 @@ pub fn run() {
             skills_inventory,
             memory_catalog,
             memory_edit,
+            memory_delete,
             history_load,
             history_restore,
             history_delete,

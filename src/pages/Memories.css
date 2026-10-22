@@ -18,7 +18,7 @@
 .memory-empty-group { margin-top: 12px; color: var(--md-sys-color-on-surface-variant, #49454f); font-size: 12px; }
 .memory-editor-area { display: grid; gap: 12px; }
 .memory-file-heading { display: flex; align-items: start; justify-content: space-between; gap: 14px; }
-.memory-file-heading > div { display: grid; min-width: 0; gap: 5px; }
+.memory-file-heading > div:first-child { display: grid; min-width: 0; gap: 5px; }
 .memory-file-heading h3 { font-size: 19px; }
 .memory-file-heading code { color: var(--md-sys-color-on-surface-variant, #49454f); font-size: 11px; }
 .memory-load-behavior { padding: 10px 12px; border-radius: 10px; background: var(--md-sys-color-surface, #fff); color: var(--md-sys-color-on-surface-variant, #49454f); font-size: 12px; line-height: 1.5; }

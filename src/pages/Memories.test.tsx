@@ -38,6 +38,14 @@ function installCatalog(initial = catalog) {
       current = { ...current, files: current.files.map((file) => file.id === args.id ? { ...file, content: String(args.content) } : file) };
       return null;
     }
+    if (command === "memory_delete") {
+      current = { ...current, files: current.files.filter((file) => file.id !== args?.id).map((file) => ({
+        ...file,
+        content: "Only remaining [outside](../private.md).",
+        references: file.references.filter((reference) => reference.fileId !== args?.id),
+      })) };
+      return null;
+    }
     if (command === "project_choose") return "D:/workspace/other-project";
     throw new Error("Unexpected command " + command);
   });
@@ -85,6 +93,22 @@ describe("Memories", () => {
     expect(await screen.findByText("D:/workspace/other-project")).toBeInTheDocument();
   });
 
+  it("deletes with the original content and reloads the updated memory index", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const ipc = installCatalog();
+    render(<Memories />);
+    fireEvent.click(await screen.findByRole("button", { name: /architecture\.md Auto-memory topic/ }));
+    fireEvent.change(screen.getByLabelText("Markdown content"), { target: { value: "Unsaved draft." } });
+    fireEvent.click(screen.getByRole("button", { name: "Delete file" }));
+    await screen.findByRole("heading", { name: "MEMORY.md" });
+    expect(ipc).toHaveBeenCalledWith("memory_delete", {
+      projectRoot: "D:/workspace/orbit", id: "topic", expectedContent: "Original topic.",
+    });
+    expect(screen.getByLabelText("Markdown content")).toHaveValue("Only remaining [outside](../private.md).");
+    expect(screen.queryByRole("button", { name: /architecture\.md Auto-memory topic/ })).not.toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Memory connections" })).getByText("../private.md")).toBeInTheDocument();
+  });
+
   it("keeps a draft when the backend rejects a stale save", async () => {
     mockIPC((command: string) => {
       if (command === "memory_catalog") return catalog;
@@ -109,6 +133,8 @@ describe("Memories", () => {
     fireEvent.change(editor, { target: { value: "Keep this draft." } });
     fireEvent.click(screen.getByRole("button", { name: /MEMORY\.md Auto-memory index/ }));
     expect(confirm).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Delete file" }));
+    expect(confirm).toHaveBeenCalledTimes(2);
     expect(screen.getByLabelText("Markdown content")).toHaveValue("Keep this draft.");
     expect(screen.getByRole("heading", { name: "architecture.md" })).toBeInTheDocument();
     confirm.mockRestore();
