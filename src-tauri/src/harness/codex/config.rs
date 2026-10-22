@@ -6,11 +6,11 @@ use std::{
 
 use serde_json::{Map, Value};
 
-use super::{CodexHarness, store};
+use super::{store, CodexHarness};
 use crate::{
     harness::{
-        Harness, ResourceKind,
         claude::config::{ConfigLayer, ConfigSnapshot, EffectiveSetting, SettingsLayer},
+        Harness, ResourceKind,
     },
     ledger,
 };
@@ -71,20 +71,41 @@ pub fn load_config(harness: &CodexHarness, project_root: &Path) -> Result<Config
             if layer.name.starts_with("project") && PROJECT_IGNORED_KEYS.contains(&key.as_str()) {
                 continue;
             }
-            effective.insert(
-                key.clone(),
-                EffectiveSetting {
+            let source = if layer.name.starts_with("project") {
+                layer.path.clone()
+            } else {
+                layer.name.clone()
+            };
+            effective
+                .entry(key.clone())
+                .and_modify(|setting: &mut EffectiveSetting| {
+                    merge_effective_value(&mut setting.value, value.clone());
+                    setting.source = source.clone();
+                })
+                .or_insert_with(|| EffectiveSetting {
                     value: value.clone(),
-                    source: if layer.name.starts_with("project") {
-                        layer.path.clone()
-                    } else {
-                        layer.name.clone()
-                    },
-                },
-            );
+                    source,
+                });
         }
     }
     Ok(ConfigSnapshot { layers, effective })
+}
+
+/// Codex overlays TOML tables recursively; scalars and arrays replace the
+/// lower-precedence value. Layer snapshots remain unchanged for editing.
+fn merge_effective_value(base: &mut Value, overlay: Value) {
+    match (base, overlay) {
+        (Value::Object(base), Value::Object(overlay)) => {
+            for (key, value) in overlay {
+                if let Some(existing) = base.get_mut(&key) {
+                    merge_effective_value(existing, value);
+                } else {
+                    base.insert(key, value);
+                }
+            }
+        }
+        (base, overlay) => *base = overlay,
+    }
 }
 
 pub fn apply_value(
@@ -497,6 +518,47 @@ mod tests {
         assert_eq!(
             snapshot.effective["root_only"].source,
             repository
+                .join(".codex/config.toml")
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn effective_tables_keep_inherited_siblings_and_project_overrides() {
+        let (root, harness, project) = fixture();
+        let project_key = project.to_string_lossy().replace('\\', "/");
+        fs::write(
+            harness.settings_path(),
+            format!(
+                "[projects.\"{project_key}\"]\ntrust_level = 'trusted'\n\n[env]\nUSER_ONLY = 'user'\nSHARED = 'user'\n\n[mcp_servers.docs.env]\nTOKEN = 'user-token'\nMODE = 'user'\n"
+            ),
+        )
+        .unwrap();
+        fs::create_dir_all(project.join(".codex")).unwrap();
+        fs::write(
+            project.join(".codex/config.toml"),
+            "[env]\nPROJECT_ONLY = 'project'\nSHARED = 'project'\n\n[mcp_servers.docs.env]\nMODE = 'project'\n",
+        )
+        .unwrap();
+
+        let snapshot = load_config(&harness, &project).unwrap();
+        assert_eq!(snapshot.effective["env"].value["USER_ONLY"], "user");
+        assert_eq!(snapshot.effective["env"].value["PROJECT_ONLY"], "project");
+        assert_eq!(snapshot.effective["env"].value["SHARED"], "project");
+        assert_eq!(
+            snapshot.effective["mcp_servers"].value["docs"]["env"]["TOKEN"],
+            crate::harness::credentials::MASK
+        );
+        assert_eq!(
+            snapshot.effective["mcp_servers"].value["docs"]["env"]["MODE"],
+            "project"
+        );
+        assert_eq!(
+            snapshot.effective["env"].source,
+            project
                 .join(".codex/config.toml")
                 .canonicalize()
                 .unwrap()

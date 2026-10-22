@@ -1,9 +1,9 @@
 use serde_json::{Map, Value};
 
-use super::{CodexHarness, store};
+use super::{store, CodexHarness};
 use crate::harness::{
-    Harness, ResourceKind,
     claude::mcp::{self, BenchResult, HttpEntry, ServerView, StdioEntry},
+    Harness, ResourceKind,
 };
 
 const SERVERS: &str = "mcp_servers";
@@ -202,6 +202,9 @@ fn kind(entry: &Value) -> Result<&'static str, String> {
 }
 
 fn validate_entry(entry: &Value, expected: &str) -> Result<(), String> {
+    if entry.get("command").is_some() && entry.get("url").is_some() {
+        return Err("MCP server cannot contain both `command` and `url`".into());
+    }
     match expected {
         "stdio" => {
             let config: StdioEntry = serde_json::from_value(entry.clone())
@@ -360,14 +363,13 @@ mod tests {
             crate::harness::credentials::MASK
         );
         assert_eq!(
-            store::read_value(&h.settings_path()).unwrap()[SERVERS]["sample"]["http_headers"]["Authorization"],
+            store::read_value(&h.settings_path()).unwrap()[SERVERS]["sample"]["http_headers"]
+                ["Authorization"],
             "Bearer private-token"
         );
-        assert!(
-            !serde_json::to_string(&views)
-                .unwrap()
-                .contains("private-token")
-        );
+        assert!(!serde_json::to_string(&views)
+            .unwrap()
+            .contains("private-token"));
         store::mutate(
             &h,
             ResourceKind::McpServer,
@@ -385,17 +387,35 @@ mod tests {
         edited["url"] = Value::String("https://example.test/updated".into());
         save(&h, "sample", edited).unwrap();
         assert_eq!(
-            store::read_value(&h.settings_path()).unwrap()[SERVERS]["sample"]["http_headers"]["Authorization"],
+            store::read_value(&h.settings_path()).unwrap()[SERVERS]["sample"]["http_headers"]
+                ["Authorization"],
             "Bearer rotated-token"
         );
-        assert!(
-            fs::read_to_string(h.settings_path())
-                .unwrap()
-                .contains("# retained")
-        );
+        assert!(fs::read_to_string(h.settings_path())
+            .unwrap()
+            .contains("# retained"));
         set_enabled(&h, "sample", false).unwrap();
         assert!(!list(&h).unwrap()[0].enabled);
         delete(&h, "sample").unwrap();
+        assert!(list(&h).unwrap().is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn save_rejects_entries_with_both_transport_fields() {
+        let (root, h) = harness();
+        let error = save(
+            &h,
+            "ambiguous",
+            serde_json::json!({
+                "type": "http",
+                "command": "server",
+                "url": "https://example.test/mcp"
+            }),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("both `command` and `url`"));
         assert!(list(&h).unwrap().is_empty());
         let _ = fs::remove_dir_all(root);
     }
