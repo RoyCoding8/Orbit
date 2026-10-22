@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod codex;
 pub mod ingest;
 pub mod spine;
 

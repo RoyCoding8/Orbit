@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -47,6 +47,24 @@ struct Manifest {
 struct ManifestFile {
     path: String,
     sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CodexManifest {
+    version: u32,
+    source_session_id: String,
+    title: String,
+    rollout_file: String,
+    files: Vec<ManifestFile>,
+    attachments: Vec<CodexAttachment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CodexAttachment {
+    reference_hash: String,
+    path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -176,6 +194,587 @@ pub fn import_archive(
         files: manifest.files.len(),
         path: target_file.to_string_lossy().into_owned(),
     })
+}
+
+pub(super) fn export_codex_archive(
+    config_root: &Path,
+    app_data_dir: &Path,
+    session_id: &str,
+    destination: &Path,
+) -> Result<ArchiveReport, String> {
+    let home = checked_directory(config_root, "Codex home")?;
+    let connection = open_database(app_data_dir).map_err(|error| error.to_string())?;
+    let source_path: String = connection
+        .query_row(
+            "SELECT source_path FROM sessions WHERE session_id = ?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("Could not find the indexed Codex chat: {error}"))?;
+    let source_file = checked_codex_rollout(&home, Path::new(&source_path))?;
+    let archive_parent = checked_directory(destination, "archive destination")?;
+    for native_root in [home.join("sessions"), home.join("archived_sessions")] {
+        if native_root
+            .canonicalize()
+            .is_ok_and(|root| archive_parent.starts_with(root))
+        {
+            return Err("Choose an archive destination outside Codex session storage.".to_owned());
+        }
+    }
+
+    let archive_root = archive_parent.join(format!("codex-chat-{}", Uuid::new_v4()));
+    fs::create_dir(&archive_root)
+        .map_err(|error| format!("Could not create Codex archive directory: {error}"))?;
+    let mut created_files = Vec::new();
+    let result = (|| {
+        let rollout_name = if source_file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".jsonl.zst"))
+        {
+            "rollout.jsonl.zst"
+        } else {
+            "rollout.jsonl"
+        };
+        let rollout_target = archive_root.join(rollout_name);
+        let (rollout_hash, _) = copy_file(&source_file, &rollout_target)?;
+        created_files.push(rollout_target);
+        let mut files = vec![ManifestFile {
+            path: rollout_name.to_owned(),
+            sha256: rollout_hash,
+        }];
+        let mut attachments = Vec::new();
+        let contents = read_codex_rollout(&source_file)?;
+        for (index, reference) in rollout_image_references(&contents).into_iter().enumerate() {
+            let source = PathBuf::from(&reference);
+            let Ok(metadata) = fs::symlink_metadata(&source) else {
+                continue;
+            };
+            if crate::harness::atomic::is_link_or_reparse(&metadata) || !metadata.is_file() {
+                continue;
+            }
+            let Some(file_name) = source.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            validate_path_component(file_name)?;
+            let relative = format!("assets/{index}-{file_name}");
+            let assets = archive_root.join("assets");
+            if !assets.exists() {
+                fs::create_dir(&assets)
+                    .map_err(|error| format!("Could not create Codex archive assets: {error}"))?;
+            }
+            let target = archive_root.join(&relative);
+            let (hash, _) = copy_file(&source, &target)?;
+            created_files.push(target);
+            files.push(ManifestFile {
+                path: relative.clone(),
+                sha256: hash,
+            });
+            attachments.push(CodexAttachment {
+                reference_hash: codex_reference_hash(&reference),
+                path: relative,
+            });
+        }
+        let title =
+            codex_title(&home, session_id).unwrap_or_else(|| "Imported Codex chat".to_owned());
+        let manifest = CodexManifest {
+            version: 1,
+            source_session_id: session_id.to_owned(),
+            title,
+            rollout_file: rollout_name.to_owned(),
+            files,
+            attachments,
+        };
+        let manifest_path = archive_root.join("manifest.json");
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&manifest_path)
+            .map_err(|error| format!("Could not create Codex archive manifest: {error}"))?;
+        created_files.push(manifest_path);
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer_pretty(&mut writer, &manifest)
+            .map_err(|error| format!("Could not encode Codex archive manifest: {error}"))?;
+        writer
+            .flush()
+            .map_err(|error| format!("Could not finish Codex archive manifest: {error}"))?;
+        Ok(ArchiveReport {
+            action: ArchiveAction::Exported,
+            source_session_id: session_id.to_owned(),
+            session_id: session_id.to_owned(),
+            files: manifest.files.len(),
+            path: archive_root.to_string_lossy().into_owned(),
+        })
+    })();
+    match result {
+        Ok(report) => Ok(report),
+        Err(error) => {
+            remove_owned_tree(&archive_root, &created_files);
+            Err(error)
+        }
+    }
+}
+
+pub(super) fn import_codex_archive(
+    config_root: &Path,
+    source: &Path,
+    project: &Path,
+) -> Result<ArchiveReport, String> {
+    let home = checked_directory(config_root, "Codex home")?;
+    let archive_root = checked_directory(source, "Codex archive")?;
+    let project = checked_directory(project, "destination project")?;
+    let manifest_path = archive_root.join("manifest.json");
+    let manifest_meta = fs::symlink_metadata(&manifest_path)
+        .map_err(|error| format!("Codex archive manifest is unavailable: {error}"))?;
+    if crate::harness::atomic::is_link_or_reparse(&manifest_meta) || !manifest_meta.is_file() {
+        return Err("Codex archive manifest must be a plain file.".to_owned());
+    }
+    let manifest: CodexManifest =
+        serde_json::from_reader(File::open(&manifest_path).map_err(|error| error.to_string())?)
+            .map_err(|error| format!("Codex archive manifest is invalid: {error}"))?;
+    validate_codex_archive(&archive_root, &manifest)?;
+    let rollout_source = archive_root.join(&manifest.rollout_file);
+    let contents = read_codex_rollout(&rollout_source)?;
+    let source_meta = contents
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find_map(|value| {
+            if value.get("type").and_then(Value::as_str) == Some("session_meta") {
+                value.get("payload").cloned()
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| "Archived Codex rollout has no session metadata.".to_owned())?;
+    let source_id = source_meta
+        .get("session_id")
+        .or_else(|| source_meta.get("id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Archived Codex session metadata has no ID.".to_owned())?;
+    if source_id != manifest.source_session_id {
+        return Err("Codex archive session ID does not match its rollout.".to_owned());
+    }
+
+    let id = Uuid::new_v4().to_string();
+    let title_names = read_codex_titles(&home.join("session_index.jsonl"));
+    let title = unique_title(&manifest.title, &title_names);
+    let (stamp, date, updated_at) = current_codex_timestamp();
+    let session_directory = home
+        .join("sessions")
+        .join(&date.0)
+        .join(&date.1)
+        .join(&date.2);
+    create_codex_directory(&home, &session_directory)?;
+    let rollout_path = session_directory.join(format!("rollout-{stamp}-{id}.jsonl"));
+    let attachment_stage = home.join("imported_attachments").join(format!(".{id}.tmp"));
+    let attachment_root = home.join("imported_attachments").join(&id);
+    let attachment_map = install_codex_attachments(
+        &home,
+        &archive_root,
+        &manifest,
+        &attachment_stage,
+        &attachment_root,
+    )?;
+    let staged_rollout = session_directory.join(format!(".{id}.tmp"));
+    let write_result = transform_codex_rollout(
+        &rollout_source,
+        &staged_rollout,
+        source_id,
+        &id,
+        &claude_path_string(&project)?,
+        &attachment_map,
+    );
+    if let Err(error) = write_result {
+        remove_codex_import(&staged_rollout, &attachment_root, &attachment_stage);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&staged_rollout, &rollout_path) {
+        remove_codex_import(&staged_rollout, &attachment_root, &attachment_stage);
+        return Err(format!(
+            "Could not register imported Codex rollout: {error}"
+        ));
+    }
+    if attachment_stage.exists() {
+        if let Err(error) = fs::rename(&attachment_stage, &attachment_root) {
+            let _ = fs::remove_file(&rollout_path);
+            remove_codex_import(&staged_rollout, &attachment_root, &attachment_stage);
+            return Err(format!(
+                "Could not install imported Codex attachments: {error}"
+            ));
+        }
+    }
+    if let Err(error) = append_codex_title(&home, &id, &title, &updated_at) {
+        let _ = fs::remove_file(&rollout_path);
+        let _ = fs::remove_dir_all(&attachment_root);
+        return Err(error);
+    }
+
+    Ok(ArchiveReport {
+        action: ArchiveAction::Imported,
+        source_session_id: manifest.source_session_id,
+        session_id: id,
+        files: manifest.files.len(),
+        path: rollout_path.to_string_lossy().into_owned(),
+    })
+}
+
+fn checked_codex_rollout(home: &Path, source: &Path) -> Result<PathBuf, String> {
+    let metadata = fs::symlink_metadata(source)
+        .map_err(|error| format!("Could not inspect the indexed Codex rollout: {error}"))?;
+    if crate::harness::atomic::is_link_or_reparse(&metadata) || !metadata.is_file() {
+        return Err("The indexed Codex rollout must be a plain file.".to_owned());
+    }
+    let path = source
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve the indexed Codex rollout: {error}"))?;
+    let active = home.join("sessions").canonicalize().ok();
+    let archived = home.join("archived_sessions").canonicalize().ok();
+    if !active.as_ref().is_some_and(|root| path.starts_with(root))
+        && !archived.as_ref().is_some_and(|root| path.starts_with(root))
+    {
+        return Err("The indexed rollout is outside Codex sessions.".to_owned());
+    }
+    Ok(path)
+}
+
+fn read_codex_rollout(path: &Path) -> Result<String, String> {
+    let mut reader = open_codex_rollout_reader(path)?;
+    let mut contents = String::new();
+    reader
+        .read_to_string(&mut contents)
+        .map_err(|error| format!("Could not read Codex rollout contents: {error}"))?;
+    Ok(contents)
+}
+
+fn open_codex_rollout_reader(path: &Path) -> Result<Box<dyn BufRead>, String> {
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".jsonl.zst"))
+    {
+        let decoder = zstd::stream::read::Decoder::new(file)
+            .map_err(|error| format!("Could not decode compressed Codex rollout: {error}"))?;
+        Ok(Box::new(BufReader::new(decoder)))
+    } else {
+        Ok(Box::new(BufReader::new(file)))
+    }
+}
+
+fn rollout_image_references(contents: &str) -> Vec<String> {
+    contents
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|value| value.get("type").and_then(Value::as_str) == Some("event_msg"))
+        .filter_map(|value| value.get("payload").cloned())
+        .filter_map(|payload| payload.get("local_images").cloned())
+        .filter_map(|value| value.as_array().cloned())
+        .flatten()
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .collect()
+}
+
+fn codex_reference_hash(reference: &str) -> String {
+    format!("{:x}", Sha256::digest(reference.as_bytes()))
+}
+
+fn codex_title(home: &Path, id: &str) -> Option<String> {
+    read_codex_title_map(&home.join("session_index.jsonl"))
+        .get(id)
+        .cloned()
+}
+
+fn read_codex_title_map(path: &Path) -> HashMap<String, String> {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    contents
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|value| {
+            Some((
+                value.get("id")?.as_str()?.to_owned(),
+                value.get("thread_name")?.as_str()?.to_owned(),
+            ))
+        })
+        .collect()
+}
+
+fn read_codex_titles(path: &Path) -> HashSet<String> {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return HashSet::new();
+    };
+    contents
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|value| value.get("thread_name")?.as_str().map(str::to_owned))
+        .collect()
+}
+
+fn validate_codex_archive(root: &Path, manifest: &CodexManifest) -> Result<(), String> {
+    if manifest.version != 1
+        || !matches!(
+            manifest.rollout_file.as_str(),
+            "rollout.jsonl" | "rollout.jsonl.zst"
+        )
+    {
+        return Err("This Codex archive version is not supported.".to_owned());
+    }
+    Uuid::parse_str(&manifest.source_session_id)
+        .map_err(|_| "Codex archive session ID is invalid.".to_owned())?;
+    let mut paths = HashSet::new();
+    for file in &manifest.files {
+        validate_codex_archive_path(&file.path)?;
+        if !paths.insert(file.path.as_str()) {
+            return Err("Codex archive contains a duplicate file path.".to_owned());
+        }
+        let (hash, _) = hash_file(&root.join(&file.path))?;
+        if hash != file.sha256 {
+            return Err(format!("Codex archive checksum failed for {}.", file.path));
+        }
+    }
+    if !paths.contains(manifest.rollout_file.as_str()) {
+        return Err("Codex archive does not contain its rollout file.".to_owned());
+    }
+    for attachment in &manifest.attachments {
+        if attachment.reference_hash.len() != 64
+            || !attachment
+                .reference_hash
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+            || !attachment.path.starts_with("assets/")
+            || !paths.contains(attachment.path.as_str())
+        {
+            return Err("Codex archive contains an invalid attachment reference.".to_owned());
+        }
+    }
+    let directories = if manifest.attachments.is_empty() {
+        HashSet::new()
+    } else {
+        HashSet::from(["assets".to_owned()])
+    };
+    let mut expected_files: HashSet<String> = paths.into_iter().map(str::to_owned).collect();
+    expected_files.insert("manifest.json".to_owned());
+    validate_archive_inventory(root, &expected_files, &directories)
+}
+
+fn validate_codex_archive_path(path: &str) -> Result<(), String> {
+    let safe = matches!(path, "rollout.jsonl" | "rollout.jsonl.zst")
+        || (path.starts_with("assets/")
+            && path.split('/').all(|component| {
+                !component.is_empty()
+                    && component != "."
+                    && component != ".."
+                    && !component.contains('\\')
+                    && !component.contains(':')
+                    && !component.contains('\0')
+            }));
+    if safe {
+        Ok(())
+    } else {
+        Err("Codex archive contains an unsafe file path.".to_owned())
+    }
+}
+
+fn install_codex_attachments(
+    home: &Path,
+    archive: &Path,
+    manifest: &CodexManifest,
+    stage: &Path,
+    target: &Path,
+) -> Result<HashMap<String, String>, String> {
+    if manifest.attachments.is_empty() {
+        return Ok(HashMap::new());
+    }
+    create_codex_directory(home, stage.parent().expect("attachment staging parent"))?;
+    fs::create_dir(stage).map_err(|error| format!("Could not stage Codex attachments: {error}"))?;
+    let mut references = HashMap::new();
+    for attachment in &manifest.attachments {
+        let file_name = Path::new(&attachment.path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "Codex archive attachment name is invalid.".to_owned())?;
+        validate_path_component(file_name)?;
+        let staged_file = stage.join(file_name);
+        if let Err(error) = copy_file_exclusive(&archive.join(&attachment.path), &staged_file) {
+            let _ = fs::remove_dir_all(stage);
+            return Err(error);
+        }
+        references.insert(
+            attachment.reference_hash.clone(),
+            target.join(file_name).to_string_lossy().into_owned(),
+        );
+    }
+    if path_exists(target)? {
+        let _ = fs::remove_dir_all(stage);
+        return Err("Codex attachment destination already exists.".to_owned());
+    }
+    Ok(references)
+}
+
+fn transform_codex_rollout(
+    source: &Path,
+    target: &Path,
+    old_id: &str,
+    new_id: &str,
+    cwd: &str,
+    attachments: &HashMap<String, String>,
+) -> Result<(), String> {
+    let input = open_codex_rollout_reader(source)?;
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .map_err(|error| format!("Could not stage imported Codex rollout: {error}"))?;
+    let mut output = BufWriter::new(file);
+    for line in input.lines() {
+        let line =
+            line.map_err(|error| format!("Could not read archived rollout line: {error}"))?;
+        if line.trim().is_empty() {
+            writeln!(output).map_err(|error| error.to_string())?;
+            continue;
+        }
+        let mut value: Value = serde_json::from_str(&line)
+            .map_err(|error| format!("Archived Codex rollout contains invalid JSON: {error}"))?;
+        if value.get("type").and_then(Value::as_str) == Some("session_meta") {
+            let payload = value
+                .get_mut("payload")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| "Codex session metadata payload is invalid.".to_owned())?;
+            if payload.get("session_id").and_then(Value::as_str) == Some(old_id) {
+                payload.insert("session_id".to_owned(), Value::String(new_id.to_owned()));
+            }
+            if payload.get("id").and_then(Value::as_str) == Some(old_id) {
+                payload.insert("id".to_owned(), Value::String(new_id.to_owned()));
+            }
+            payload.insert("cwd".to_owned(), Value::String(cwd.to_owned()));
+        }
+        if value.get("type").and_then(Value::as_str) == Some("turn_context") {
+            if let Some(payload) = value.get_mut("payload").and_then(Value::as_object_mut) {
+                if payload.contains_key("cwd") {
+                    payload.insert("cwd".to_owned(), Value::String(cwd.to_owned()));
+                }
+            }
+        }
+        if value.get("type").and_then(Value::as_str) == Some("event_msg") {
+            if let Some(local_images) = value
+                .get_mut("payload")
+                .and_then(Value::as_object_mut)
+                .and_then(|payload| payload.get_mut("local_images"))
+                .and_then(Value::as_array_mut)
+            {
+                for image in local_images {
+                    let Some(reference) = image.as_str() else {
+                        continue;
+                    };
+                    if let Some(target) = attachments.get(&codex_reference_hash(reference)) {
+                        *image = Value::String(target.clone());
+                    }
+                }
+            }
+        }
+        serde_json::to_writer(&mut output, &value).map_err(|error| error.to_string())?;
+        writeln!(output).map_err(|error| error.to_string())?;
+    }
+    output.flush().map_err(|error| error.to_string())
+}
+
+fn append_codex_title(home: &Path, id: &str, title: &str, updated_at: &str) -> Result<(), String> {
+    let path = home.join("session_index.jsonl");
+    if let Ok(metadata) = fs::symlink_metadata(&path) {
+        if crate::harness::atomic::is_link_or_reparse(&metadata) || !metadata.is_file() {
+            return Err("Codex session index must be a plain file.".to_owned());
+        }
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| format!("Could not update Codex session title index: {error}"))?;
+    serde_json::to_writer(
+        &mut file,
+        &serde_json::json!({
+            "id": id,
+            "thread_name": title,
+            "updated_at": updated_at
+        }),
+    )
+    .map_err(|error| error.to_string())?;
+    file.write_all(b"\n").map_err(|error| error.to_string())?;
+    file.flush().map_err(|error| error.to_string())
+}
+
+fn create_codex_directory(home: &Path, target: &Path) -> Result<(), String> {
+    let home = home
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve Codex home: {error}"))?;
+    let relative = target
+        .strip_prefix(&home)
+        .map_err(|_| "Codex import path escaped Codex home.".to_owned())?;
+    let mut current = home.clone();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            return Err("Codex import path has an invalid component.".to_owned());
+        };
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata)
+                if !crate::harness::atomic::is_link_or_reparse(&metadata) && metadata.is_dir() =>
+            {
+                if current.canonicalize().ok().as_deref() != Some(current.as_path()) {
+                    return Err("Codex import directory resolves outside its home.".to_owned());
+                }
+            }
+            Ok(_) => return Err("Codex import path contains a non-directory or link.".to_owned()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::create_dir(&current)
+                .map_err(|error| format!("Could not create Codex import directory: {error}"))?,
+            Err(error) => return Err(format!("Could not inspect Codex import directory: {error}")),
+        }
+    }
+    Ok(())
+}
+
+fn remove_codex_import(rollout: &Path, attachment_root: &Path, attachment_stage: &Path) {
+    let _ = fs::remove_file(rollout);
+    let _ = fs::remove_dir_all(attachment_root);
+    let _ = fs::remove_dir_all(attachment_stage);
+}
+
+fn current_codex_timestamp() -> (String, (String, String, String), String) {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let days = seconds.div_euclid(86_400);
+    let day_seconds = seconds.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    let hour = day_seconds / 3_600;
+    let minute = day_seconds % 3_600 / 60;
+    let second = day_seconds % 60;
+    let date = (
+        format!("{year:04}"),
+        format!("{month:02}"),
+        format!("{day:02}"),
+    );
+    let stamp = format!(
+        "{}-{}-{}T{hour:02}-{minute:02}-{second:02}",
+        date.0, date.1, date.2
+    );
+    let updated_at = format!(
+        "{}-{}-{}T{hour:02}:{minute:02}:{second:02}Z",
+        date.0, date.1, date.2
+    );
+    (stamp, date, updated_at)
 }
 
 fn indexed_source(

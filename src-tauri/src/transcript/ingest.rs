@@ -14,6 +14,18 @@ pub struct IngestReport {
     pub skipped_state_lines: usize,
 }
 
+pub(super) struct IndexedMessage {
+    pub uuid: String,
+    pub parent_uuid: Option<String>,
+    pub message_type: String,
+    pub text: String,
+    pub raw_json: String,
+    pub position: usize,
+    pub attachment: Option<String>,
+    pub tool_result: Option<String>,
+    pub tool_result_note: Option<String>,
+}
+
 /// Version 3 fixed case-sensitive filename collisions. Version 4 adds native
 /// chat titles without discarding an existing version 3 message cache.
 const SCHEMA_VERSION: i64 = 4;
@@ -130,7 +142,7 @@ fn qualified_session_id(project: &str, path: &Path) -> String {
 /// Sessions whose source file is gone are stale cache entries. Runs only
 /// after the full traversal succeeded, so a partial walk can never delete a
 /// session whose file was simply not visited yet.
-fn prune_vanished_sessions(
+pub(super) fn prune_vanished_sessions(
     connection: &mut Connection,
     ingested_paths: &[String],
 ) -> Result<(), TranscriptError> {
@@ -190,18 +202,10 @@ fn ingest_session(
         .find_map(|value| value.get("uuid").and_then(Value::as_str))
         .map(str::to_owned);
     let spills = read_spills(path, &tool_ids, fallback_message.as_deref());
-    let transaction = connection.transaction()?;
-    transaction.execute(
-        "DELETE FROM messages_fts WHERE session_id = ?1",
-        [session_id],
-    )?;
-    transaction.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id])?;
-    transaction.execute(
-        "INSERT INTO sessions(session_id, project, source_path, updated_at, message_count, title) VALUES (?1, ?2, ?3, ?4, 0, ?5)",
-        params![session_id, project, path.to_string_lossy(), modified, title.finish()],
-    )?;
     let mut malformed = 0usize;
     let mut skipped_state = 0usize;
+    let mut messages = Vec::new();
+    let mut errors = Vec::new();
     for (position, line, value) in parsed {
         if line.trim().is_empty() {
             skipped_state += 1;
@@ -211,10 +215,7 @@ fn ingest_session(
             Ok(value) => value,
             Err(error) => {
                 malformed += 1;
-                transaction.execute(
-                    "INSERT INTO transcript_ingest_errors(session_id, position, error) VALUES (?1, ?2, ?3)",
-                    params![session_id, position, error.to_string()],
-                )?;
+                errors.push((position, error.to_string()));
                 continue;
             }
         };
@@ -224,10 +225,7 @@ fn ingest_session(
         }
         let Some(uuid) = value.get("uuid").and_then(Value::as_str) else {
             malformed += 1;
-            transaction.execute(
-                "INSERT INTO transcript_ingest_errors(session_id, position, error) VALUES (?1, ?2, 'JSON object is missing a string uuid')",
-                params![session_id, position],
-            )?;
+            errors.push((position, "JSON object is missing a string uuid".to_owned()));
             continue;
         };
         let parent_uuid = value.get("parentUuid").and_then(Value::as_str);
@@ -238,22 +236,73 @@ fn ingest_session(
         let text = message_text(&value);
         let attachment = attachment_text(&value);
         let (tool_result, tool_result_note) = spills.get(uuid).cloned().unwrap_or((None, None));
-        let raw = serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_owned());
+        messages.push(IndexedMessage {
+            uuid: uuid.to_owned(),
+            parent_uuid: parent_uuid.map(str::to_owned),
+            message_type: message_type.to_owned(),
+            text,
+            raw_json: serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_owned()),
+            position,
+            attachment,
+            tool_result,
+            tool_result_note,
+        });
+    }
+    let indexed = replace_indexed_session(
+        connection,
+        session_id,
+        project,
+        path,
+        modified.as_deref(),
+        title.finish().as_deref(),
+        &messages,
+        &errors,
+    )?;
+    Ok((input.lines().count(), indexed, malformed, skipped_state))
+}
+
+pub(super) fn replace_indexed_session(
+    connection: &mut Connection,
+    session_id: &str,
+    project: &str,
+    source_path: &Path,
+    updated_at: Option<&str>,
+    title: Option<&str>,
+    messages: &[IndexedMessage],
+    errors: &[(usize, String)],
+) -> Result<usize, TranscriptError> {
+    let transaction = connection.transaction()?;
+    transaction.execute(
+        "DELETE FROM messages_fts WHERE session_id = ?1",
+        [session_id],
+    )?;
+    transaction.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id])?;
+    transaction.execute(
+        "INSERT INTO sessions(session_id, project, source_path, updated_at, message_count, title) VALUES (?1, ?2, ?3, ?4, 0, ?5)",
+        params![session_id, project, source_path.to_string_lossy(), updated_at, title],
+    )?;
+    for (position, error) in errors {
+        transaction.execute(
+            "INSERT INTO transcript_ingest_errors(session_id, position, error) VALUES (?1, ?2, ?3)",
+            params![session_id, position, error],
+        )?;
+    }
+    for message in messages {
         transaction.execute(
             "INSERT OR REPLACE INTO messages(session_id, uuid, parent_uuid, message_type, text, raw_json, position, attachment, tool_result, tool_result_note) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![session_id, uuid, parent_uuid, message_type, text, raw, position, attachment, tool_result, tool_result_note],
+            params![session_id, message.uuid, message.parent_uuid, message.message_type, message.text, message.raw_json, message.position, message.attachment, message.tool_result, message.tool_result_note],
         )?;
         transaction.execute(
             "DELETE FROM messages_fts WHERE session_id = ?1 AND uuid = ?2",
-            params![session_id, uuid],
+            params![session_id, message.uuid],
         )?;
-        let search_text = match &tool_result {
-            Some(result) => format!("{text}\n{result}"),
-            None => text,
+        let search_text = match &message.tool_result {
+            Some(result) => format!("{}\n{result}", message.text),
+            None => message.text.clone(),
         };
         transaction.execute(
             "INSERT INTO messages_fts(session_id, uuid, text) VALUES (?1, ?2, ?3)",
-            params![session_id, uuid, search_text],
+            params![session_id, message.uuid, search_text],
         )?;
     }
     let indexed = transaction.query_row(
@@ -266,7 +315,7 @@ fn ingest_session(
         params![session_id, indexed],
     )?;
     transaction.commit()?;
-    Ok((input.lines().count(), indexed, malformed, skipped_state))
+    Ok(indexed)
 }
 
 /// Valid state records that carry no `uuid` and no conversation content. They
