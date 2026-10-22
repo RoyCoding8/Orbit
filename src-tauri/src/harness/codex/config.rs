@@ -6,11 +6,11 @@ use std::{
 
 use serde_json::{Map, Value};
 
-use super::{store, CodexHarness};
+use super::{CodexHarness, store};
 use crate::{
     harness::{
-        claude::config::{ConfigLayer, ConfigSnapshot, EffectiveSetting, SettingsLayer},
         Harness, ResourceKind,
+        claude::config::{ConfigLayer, ConfigSnapshot, EffectiveSetting, SettingsLayer},
     },
     ledger,
 };
@@ -43,30 +43,43 @@ pub fn load_config(harness: &CodexHarness, project_root: &Path) -> Result<Config
     }];
 
     if project_root.is_dir() {
-        let project_path = project_path(project_root);
-        let project = if project_trusted(harness, project_root)? {
-            object_at(&project_path)?
-        } else {
-            Map::new()
-        };
-        layers.push(ConfigLayer {
-            name: "project".into(),
-            path: project_path.to_string_lossy().into_owned(),
-            values: mask_map(project)?,
-        });
+        let paths = project_config_paths(project_root);
+        let trusted = project_trusted(harness, project_root)?;
+        for (index, project_path) in paths.iter().enumerate() {
+            let selected = index + 1 == paths.len();
+            let project = if trusted && project_path.is_file() {
+                object_at(project_path)?
+            } else {
+                Map::new()
+            };
+            layers.push(ConfigLayer {
+                name: if selected {
+                    "project"
+                } else {
+                    "project_parent"
+                }
+                .into(),
+                path: project_path.to_string_lossy().into_owned(),
+                values: mask_map(project)?,
+            });
+        }
     }
 
     let mut effective = BTreeMap::new();
     for layer in &layers {
         for (key, value) in &layer.values {
-            if layer.name == "project" && PROJECT_IGNORED_KEYS.contains(&key.as_str()) {
+            if layer.name.starts_with("project") && PROJECT_IGNORED_KEYS.contains(&key.as_str()) {
                 continue;
             }
             effective.insert(
                 key.clone(),
                 EffectiveSetting {
                     value: value.clone(),
-                    source: layer.name.clone(),
+                    source: if layer.name.starts_with("project") {
+                        layer.path.clone()
+                    } else {
+                        layer.name.clone()
+                    },
                 },
             );
         }
@@ -79,7 +92,7 @@ pub fn apply_value(
     project_root: &Path,
     layer: SettingsLayer,
     key: &str,
-    mut value: Value,
+    value: Value,
 ) -> Result<(), String> {
     let path = settings_path(harness, project_root, layer)?;
     let key = key.trim();
@@ -91,20 +104,7 @@ pub fn apply_value(
             "Codex ignores `{key}` in project config; edit the user config instead"
         ));
     }
-    validate_top_level(key, &value)?;
-    let stored = store::read_value(&path)?;
-    let previous = stored.get(key).cloned();
-    if let Some(previous) = &previous {
-        let previous = normalize_http_headers(previous.clone())?;
-        value = normalize_http_headers(value)?;
-        crate::harness::credentials::restore_masked(&previous, &mut value)
-            .map_err(|_| format!("/{key}: a masked value inside an array cannot be restored; re-enter the credential"))?;
-        value = restore_native_http_headers(value);
-    }
-    if crate::harness::credentials::contains_mask(&value) {
-        return Err(format!("/{key}: value still contains a masked placeholder; enter the real credential or remove the field"));
-    }
-    let item = json_to_item(&value)?;
+    let path_for_edit = path.clone();
     store::mutate(
         harness,
         ResourceKind::Settings,
@@ -112,6 +112,23 @@ pub fn apply_value(
         &config_action(layer),
         &path,
         move |document| {
+            let mut value = normalize_http_headers(value)?;
+            if document.contains_key(key) {
+                let stored = store::value(document, &path_for_edit)?;
+                if let Some(previous) = stored.get(key) {
+                    let previous = normalize_http_headers(previous.clone())?;
+                    crate::harness::credentials::restore_masked(&previous, &mut value)
+                        .map_err(|_| format!("/{key}: a masked value inside an array cannot be restored; re-enter the credential"))?;
+                }
+            }
+            value = restore_native_http_headers(value);
+            validate_top_level(key, &value)?;
+            if crate::harness::credentials::contains_mask(&value) {
+                return Err(format!(
+                    "/{key}: value still contains a masked placeholder; enter the real credential or remove the field"
+                ));
+            }
+            let item = json_to_item(&value)?;
             document.insert(key, item);
             Ok(())
         },
@@ -173,6 +190,39 @@ pub(crate) fn project_trusted(harness: &CodexHarness, project_root: &Path) -> Re
 
 fn project_path(project_root: &Path) -> PathBuf {
     project_root.join(".codex").join("config.toml")
+}
+
+pub(crate) fn project_config_paths(project_root: &Path) -> Vec<PathBuf> {
+    let selected_config = project_path(project_root);
+    project_config_dirs(project_root)
+        .into_iter()
+        .map(|directory| directory.join(".codex").join("config.toml"))
+        .filter(|path| path.is_file() || path_identity(path) == path_identity(&selected_config))
+        .collect()
+}
+
+pub(crate) fn project_config_dirs(project_root: &Path) -> Vec<PathBuf> {
+    let selected = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let repository = codex_project_root(&selected);
+    let git_root = has_git_marker(&repository);
+    let mut directories = vec![selected.clone()];
+    let mut current = selected.as_path();
+    while git_root && path_identity(current) != path_identity(&repository) {
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        directories.push(parent.to_path_buf());
+        current = parent;
+    }
+    directories.reverse();
+    directories
+}
+
+fn has_git_marker(path: &Path) -> bool {
+    let marker = path.join(".git");
+    marker.is_dir() || marker.is_file()
 }
 
 fn config_action(layer: SettingsLayer) -> String {
@@ -288,8 +338,7 @@ fn codex_project_root(path: &Path) -> PathBuf {
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mut current = path.as_path();
     while current.parent().is_some() {
-        let marker = current.join(".git");
-        if marker.is_dir() || marker.is_file() {
+        if has_git_marker(current) {
             return current.to_path_buf();
         }
         current = current.parent().expect("checked above");
@@ -354,7 +403,14 @@ mod tests {
             crate::harness::credentials::MASK
         );
         assert_eq!(snapshot.effective["model"].value, "project");
-        assert_eq!(snapshot.effective["model"].source, "project");
+        assert_eq!(
+            snapshot.effective["model"].source,
+            project
+                .join(".codex/config.toml")
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -396,6 +452,81 @@ mod tests {
         let snapshot = load_config(&harness, &project).unwrap();
         assert_eq!(snapshot.layers[1].values["model_provider"], "ignored");
         assert!(!snapshot.effective.contains_key("model_provider"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn nested_trusted_project_configs_merge_from_git_root_to_selected_directory() {
+        let (root, harness, project) = fixture();
+        let repository = project.join("repo");
+        let nested = repository.join("packages").join("app");
+        fs::create_dir_all(repository.join(".git")).unwrap();
+        fs::create_dir_all(&nested).unwrap();
+        let repository_key = repository.to_string_lossy().replace('\\', "/");
+        fs::write(
+            harness.settings_path(),
+            format!("model = 'user'\n\n[projects.\"{repository_key}\"]\ntrust_level = 'trusted'\n"),
+        )
+        .unwrap();
+        fs::create_dir_all(repository.join(".codex")).unwrap();
+        fs::write(
+            repository.join(".codex/config.toml"),
+            "model = 'root'\nroot_only = true\n",
+        )
+        .unwrap();
+        fs::create_dir_all(nested.join(".codex")).unwrap();
+        fs::write(
+            nested.join(".codex/config.toml"),
+            "model = 'nested'\nnested_only = true\n",
+        )
+        .unwrap();
+
+        let snapshot = load_config(&harness, &nested).unwrap();
+        assert_eq!(snapshot.layers.len(), 3);
+        assert_eq!(snapshot.layers[1].name, "project_parent");
+        assert_eq!(snapshot.layers[2].name, "project");
+        assert_eq!(snapshot.effective["model"].value, "nested");
+        assert_eq!(
+            snapshot.effective["model"].source,
+            nested
+                .join(".codex/config.toml")
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+        );
+        assert_eq!(
+            snapshot.effective["root_only"].source,
+            repository
+                .join(".codex/config.toml")
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn masked_settings_restore_credentials_from_the_document_being_mutated() {
+        let (root, harness, project) = fixture();
+        fs::write(
+            harness.settings_path(),
+            "[env]\nAPI_TOKEN = 'current-token'\nMODE = 'old'\n",
+        )
+        .unwrap();
+        apply_value(
+            &harness,
+            &project,
+            SettingsLayer::User,
+            "env",
+            serde_json::json!({
+                "API_TOKEN": crate::harness::credentials::MASK,
+                "MODE": "new"
+            }),
+        )
+        .unwrap();
+        let saved = store::read_value(&harness.settings_path()).unwrap();
+        assert_eq!(saved["env"]["API_TOKEN"], "current-token");
+        assert_eq!(saved["env"]["MODE"], "new");
         let _ = fs::remove_dir_all(root);
     }
 }

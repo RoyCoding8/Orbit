@@ -6,13 +6,13 @@ use std::{
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use super::{config, store, CodexHarness};
+use super::{CodexHarness, config, store};
 use crate::harness::{
+    Harness, ResourceKind,
     claude::{
         config::SettingsLayer,
         hooks::{self, HookTestResult, HookView},
     },
-    Harness, ResourceKind,
 };
 
 const EVENTS: &[&str] = &[
@@ -41,6 +41,7 @@ struct Source {
     layer: SettingsLayer,
     format: Format,
     path: PathBuf,
+    editable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -75,9 +76,11 @@ pub fn list(harness: &CodexHarness, project_root: &Path) -> Result<Vec<HookView>
                         id,
                         event: event.clone(),
                         matcher,
+                        editable: source.editable && !commands.is_empty(),
                         commands,
                         enabled: true,
-                        layer: layer_name(layer).into(),
+                        layer: source_layer_name(&source).into(),
+                        source_path: source.path.to_string_lossy().into_owned(),
                     });
                 }
             }
@@ -108,8 +111,13 @@ pub fn save(
     }
     let (source, old) = if let Some(id) = edit_id {
         let located = locate(harness, project_root, layer, id)?;
-        if !command_handlers(&located.entry).is_empty() {
+        if located.source.editable && !command_handlers(&located.entry).is_empty() {
             (located.source.clone(), Some(located))
+        } else if !located.source.editable {
+            return Err(
+                "inherited Codex project hooks are read-only; edit the source layer directly"
+                    .into(),
+            );
         } else {
             return Err("this Codex hook uses a non-command handler and is read-only here".into());
         }
@@ -191,6 +199,11 @@ pub fn delete(
 ) -> Result<(), String> {
     ensure_layer(harness, project_root, layer)?;
     let located = locate(harness, project_root, layer, id)?;
+    if !located.source.editable {
+        return Err(
+            "inherited Codex project hooks are read-only; edit the source layer directly".into(),
+        );
+    }
     if command_handlers(&located.entry).is_empty() {
         return Err("this Codex hook uses a non-command handler and is read-only here".into());
     }
@@ -230,29 +243,41 @@ fn sources(
     project_root: &Path,
     layer: SettingsLayer,
 ) -> Result<Vec<Source>, String> {
-    let root = match layer {
-        SettingsLayer::User => harness.config_root().to_path_buf(),
+    let roots = match layer {
+        SettingsLayer::User => vec![(harness.config_root().to_path_buf(), true)],
         SettingsLayer::Project => {
             if !project_root.is_dir() {
                 return Ok(Vec::new());
             }
-            project_root.join(".codex")
+            let project_dirs = config::project_config_dirs(project_root);
+            let count = project_dirs.len();
+            project_dirs
+                .into_iter()
+                .enumerate()
+                .map(|(index, folder)| {
+                    let selected = index + 1 == count;
+                    (folder.join(".codex"), selected)
+                })
+                .collect()
         }
         SettingsLayer::Local => {
-            return Err("Codex config supports user and project layers only".into())
+            return Err("Codex config supports user and project layers only".into());
         }
     };
     let mut sources = Vec::new();
-    for (format, path) in [
-        (Format::Json, root.join("hooks.json")),
-        (Format::Toml, root.join("config.toml")),
-    ] {
-        if path.is_file() && (format == Format::Json || has_inline_hooks(&path)?) {
-            sources.push(Source {
-                layer,
-                format,
-                path,
-            });
+    for (root, editable) in roots {
+        for (format, path) in [
+            (Format::Json, root.join("hooks.json")),
+            (Format::Toml, root.join("config.toml")),
+        ] {
+            if path.is_file() && (format == Format::Json || has_inline_hooks(&path)?) {
+                sources.push(Source {
+                    layer,
+                    format,
+                    path,
+                    editable,
+                });
+            }
         }
     }
     Ok(sources)
@@ -263,7 +288,10 @@ fn write_source(
     project_root: &Path,
     layer: SettingsLayer,
 ) -> Result<Source, String> {
-    let mut candidates = sources(harness, project_root, layer)?;
+    let mut candidates = sources(harness, project_root, layer)?
+        .into_iter()
+        .filter(|source| source.editable)
+        .collect::<Vec<_>>();
     let configured = candidates
         .iter()
         .filter_map(|source| read_source(source).ok())
@@ -295,6 +323,7 @@ fn write_source(
             layer,
             format: Format::Json,
             path: root.join("hooks.json"),
+            editable: true,
         }
     }))
 }
@@ -321,7 +350,7 @@ fn read_source(source: &Source) -> Result<Map<String, Value>, String> {
                 return Err(format!(
                     "{} must contain a TOML table",
                     source.path.display()
-                ))
+                ));
             }
         },
     };
@@ -448,13 +477,29 @@ fn entry_id(source: &Source, event: &str, index: usize, entry: &Value) -> String
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
+    let source_path = source
+        .path
+        .to_string_lossy()
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     format!(
-        "codex:{}:{}:{}:{}:{hash}",
+        "codex:{}:{}:{}:{}:{}:{hash}",
         layer_name(source.layer),
         format_name(source.format),
         event,
-        index
+        index,
+        source_path
     )
+}
+
+fn source_layer_name(source: &Source) -> &'static str {
+    if source.layer == SettingsLayer::Project && !source.editable {
+        "project_parent"
+    } else {
+        layer_name(source.layer)
+    }
 }
 
 fn ensure_layer(
@@ -586,16 +631,62 @@ mod tests {
         )
         .unwrap();
         assert!(list(&h, &project).unwrap().is_empty());
-        assert!(save(
-            &h,
-            &project,
-            SettingsLayer::Project,
-            "Stop",
-            None,
-            "echo no".into(),
-            None
+        assert!(
+            save(
+                &h,
+                &project,
+                SettingsLayer::Project,
+                "Stop",
+                None,
+                "echo no".into(),
+                None
+            )
+            .is_err()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn inherited_project_hooks_are_listed_read_only_with_unique_source_ids() {
+        let (root, h, project) = harness();
+        let repository = project.join("repo");
+        let nested = repository.join("nested");
+        fs::create_dir_all(repository.join(".git")).unwrap();
+        fs::create_dir_all(repository.join(".codex")).unwrap();
+        fs::create_dir_all(nested.join(".codex")).unwrap();
+        let repository_key = repository.to_string_lossy().replace('\\', "/");
+        fs::write(
+            h.settings_path(),
+            format!("[projects.\"{repository_key}\"]\ntrust_level = 'trusted'\n"),
         )
-        .is_err());
+        .unwrap();
+        let same_hook =
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo inherited"}]}]}}"#;
+        fs::write(repository.join(".codex/hooks.json"), same_hook).unwrap();
+        fs::write(nested.join(".codex/hooks.json"), same_hook).unwrap();
+
+        let listed = list(&h, &nested).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_ne!(listed[0].id, listed[1].id);
+        let inherited = listed
+            .iter()
+            .find(|hook| hook.layer == "project_parent")
+            .unwrap();
+        assert!(!inherited.editable);
+        assert_eq!(
+            inherited.source_path,
+            repository
+                .join(".codex/hooks.json")
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+        );
+        assert!(
+            delete(&h, &nested, SettingsLayer::Project, &inherited.id)
+                .unwrap_err()
+                .contains("read-only")
+        );
+        assert_eq!(list(&h, &nested).unwrap().len(), 2);
         let _ = fs::remove_dir_all(root);
     }
 }

@@ -6,7 +6,7 @@ use toml_edit::DocumentMut;
 
 use super::CodexHarness;
 use crate::{
-    harness::{atomic, Harness, ResourceKind},
+    harness::{Harness, ResourceKind, atomic},
     ledger,
 };
 
@@ -31,6 +31,10 @@ pub(crate) fn read(path: &Path) -> Result<DocumentMut, String> {
 
 pub(crate) fn read_value(path: &Path) -> Result<Value, String> {
     let document = read(path)?;
+    value(&document, path)
+}
+
+pub(crate) fn value(document: &DocumentMut, path: &Path) -> Result<Value, String> {
     toml_edit::de::from_str(&document.to_string()).map_err(|error| {
         format!(
             "failed converting {} to JSON values: {}",

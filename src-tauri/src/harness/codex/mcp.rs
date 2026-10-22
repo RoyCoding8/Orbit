@@ -1,9 +1,9 @@
 use serde_json::{Map, Value};
 
-use super::{store, CodexHarness};
+use super::{CodexHarness, store};
 use crate::harness::{
-    claude::mcp::{self, BenchResult, HttpEntry, ServerView, StdioEntry},
     Harness, ResourceKind,
+    claude::mcp::{self, BenchResult, HttpEntry, ServerView, StdioEntry},
 };
 
 const SERVERS: &str = "mcp_servers";
@@ -62,38 +62,43 @@ pub fn save(harness: &CodexHarness, name: &str, mut entry: Value) -> Result<(), 
         edited.insert("http_headers".into(), headers);
     }
     entry = Value::Object(edited);
-    let mut normalized = normalized_headers(entry);
-    let previous = server_map(&store::read_value(&harness.settings_path())?)?
-        .get(name)
-        .cloned();
-    if let Some(previous) = &previous {
-        mcp::preserve_masked_credentials(&normalized_headers(previous.clone()), &mut normalized)
-            .map_err(|error| error.to_string())?;
-    }
-    if crate::harness::credentials::contains_mask(&normalized) {
-        return Err(
-            "the edited entry still holds masked placeholders; re-enter the credential values"
-                .into(),
-        );
-    }
-    let mut raw = restore_native_headers(normalized);
-    let object = raw
-        .as_object_mut()
-        .ok_or("MCP server entry must be an object")?;
-    if let Some(enabled) = enabled {
-        object.insert("enabled".into(), Value::Bool(enabled));
-    } else if let Some(old_enabled) = previous.as_ref().and_then(|old| old.get("enabled")) {
-        object.insert("enabled".into(), old_enabled.clone());
-    }
-    validate_entry(&raw, &kind)?;
+    let normalized = normalized_headers(entry);
     let id = name.to_owned();
+    let path = harness.settings_path();
+    let path_for_edit = path.clone();
     store::mutate(
         harness,
         ResourceKind::McpServer,
         name,
         "codex-mcp-save",
-        &harness.settings_path(),
+        &path,
         move |document| {
+            let current = store::value(document, &path_for_edit)?;
+            let previous = server_map(&current)?.get(&id).cloned();
+            let mut candidate = normalized;
+            if let Some(previous) = &previous {
+                mcp::preserve_masked_credentials(
+                    &normalized_headers(previous.clone()),
+                    &mut candidate,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            if crate::harness::credentials::contains_mask(&candidate) {
+                return Err(
+                    "the edited entry still holds masked placeholders; re-enter the credential values"
+                        .into(),
+                );
+            }
+            let mut raw = restore_native_headers(candidate);
+            let object = raw
+                .as_object_mut()
+                .ok_or("MCP server entry must be an object")?;
+            if let Some(enabled) = enabled {
+                object.insert("enabled".into(), Value::Bool(enabled));
+            } else if let Some(old_enabled) = previous.as_ref().and_then(|old| old.get("enabled")) {
+                object.insert("enabled".into(), old_enabled.clone());
+            }
+            validate_entry(&raw, &kind)?;
             let item = json_item(&raw)?;
             document[SERVERS][id.as_str()] = item;
             Ok(())
@@ -355,16 +360,39 @@ mod tests {
             crate::harness::credentials::MASK
         );
         assert_eq!(
-            store::read_value(&h.settings_path()).unwrap()[SERVERS]["sample"]["http_headers"]
-                ["Authorization"],
+            store::read_value(&h.settings_path()).unwrap()[SERVERS]["sample"]["http_headers"]["Authorization"],
             "Bearer private-token"
         );
-        assert!(!serde_json::to_string(&views)
-            .unwrap()
-            .contains("private-token"));
-        assert!(fs::read_to_string(h.settings_path())
-            .unwrap()
-            .contains("# retained"));
+        assert!(
+            !serde_json::to_string(&views)
+                .unwrap()
+                .contains("private-token")
+        );
+        store::mutate(
+            &h,
+            ResourceKind::McpServer,
+            "sample",
+            "test-rotate-credential",
+            &h.settings_path(),
+            |document| {
+                document[SERVERS]["sample"]["http_headers"]["Authorization"] =
+                    toml_edit::value("Bearer rotated-token");
+                Ok(())
+            },
+        )
+        .unwrap();
+        let mut edited = views[0].entry.clone();
+        edited["url"] = Value::String("https://example.test/updated".into());
+        save(&h, "sample", edited).unwrap();
+        assert_eq!(
+            store::read_value(&h.settings_path()).unwrap()[SERVERS]["sample"]["http_headers"]["Authorization"],
+            "Bearer rotated-token"
+        );
+        assert!(
+            fs::read_to_string(h.settings_path())
+                .unwrap()
+                .contains("# retained")
+        );
         set_enabled(&h, "sample", false).unwrap();
         assert!(!list(&h).unwrap()[0].enabled);
         delete(&h, "sample").unwrap();
