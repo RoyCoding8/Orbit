@@ -7,18 +7,18 @@
 
 <br />
 
-Orbit puts Claude Code's tools and context in one desktop app. Manage skills, memories, MCP servers, hooks, settings, and transcripts without hunting through configuration files.
+Orbit puts Claude Code and Codex tools and context in one desktop app. Manage skills, memories, MCP servers, hooks, settings, and transcripts without hunting through configuration files.
 
-**Claude Code is the only coding agent supported today.** Orbit is a local desktop app; it does not sync configuration to a cloud service.
+Choose the coding agent in the header. Claude Code is selected initially. Orbit is a local desktop app and keeps each agent's configuration, backups, and transcript index separate.
 
 ## What you can manage
 
 | | Area | What you can do |
 |:--:|---|---|
 | <img src="assets/icons/skills.svg" alt="" width="24" /> | **Skills** | Browse and edit skills, control visibility, install or remove folders, and discover skills copied in outside Orbit. |
-| | **Memories** | Edit or delete project memories and instructions, follow imports and links, and find incoming references. Deletion removes references and saves restorable backups. |
+| | **Memories** | Edit or delete owned memories and instructions, follow links, and find incoming references. See Claude project memory groups or Codex's instruction hierarchy and generated memory. |
 | <img src="assets/icons/mcp.svg" alt="" width="24" /> | **MCP servers** | Manage local stdio and remote HTTP servers, then test their connections. |
-| <img src="assets/icons/hooks.svg" alt="" width="24" /> | **Hooks** | Inspect and edit user or project hooks. Test commands with sample JSON input. |
+| <img src="assets/icons/hooks.svg" alt="" width="24" /> | **Hooks** | Inspect user, project, and inherited hooks. Edit supported command hooks and test commands with sample JSON input. |
 | <img src="assets/icons/settings.svg" alt="" width="24" /> | **Settings** | Inspect configuration layers, edit one key at a time, and undo a recorded change when the file has not changed since. |
 | <img src="assets/icons/transcripts.svg" alt="" width="24" /> | **Transcripts** | Index sessions, search messages, follow conversation branches, and export or import native chat archives to a chosen project. Markdown export is also available. |
 | | **History** | Browse saved versions separately from operation logs, restore a version, or delete a saved backup. |
@@ -28,6 +28,7 @@ Orbit puts Claude Code's tools and context in one desktop app. Manage skills, me
 - Node.js 22
 - The stable Rust toolchain
 - Platform prerequisites for [Tauri v2](https://v2.tauri.app/start/prerequisites/)
+- Codex CLI on `PATH` for Codex skill discovery. Native skill discovery and imported chat resume are verified against Codex 0.163.0.
 
 On Ubuntu, Tauri's native build dependencies include WebKitGTK 4.1, GTK 3, and Ayatana AppIndicator. Install the packages before building:
 
@@ -49,9 +50,13 @@ npm ci
 npm run tauri dev
 ```
 
-By default, Orbit reads and writes Claude Code configuration in the current user's Claude Code directories. To use a separate configuration directory, set `CLAUDE_CONFIG_DIR` before launching; Orbit then reads the settings and global state from that directory. The app treats its launch directory as the project until you select another folder.
+Orbit reads Claude Code's normal configuration directories and honors `CLAUDE_CONFIG_DIR`. For Codex, it honors `CODEX_HOME`, which defaults to `~/.codex`. Select a project folder to inspect that project's instructions, skills, and settings. The launch directory is the initial project.
 
-Orbit writes configuration changes directly to disk. Backups and change history are kept under `.harness-agent` in the Claude configuration directory. Disabled MCP server and hook records and the transcript index are stored in the app-data directory; window preferences are stored in the app-config directory.
+Codex settings remain TOML, and Orbit preserves unrelated keys and comments. The effective settings view previews user and trusted project files. Profiles, command-line options, environment variables, and system policy can change Codex's runtime settings. Codex skill discovery uses the installed CLI's native inventory, including plugin skills and folders copied outside Orbit. Plugin and system skill files are read-only.
+
+Codex instructions follow `AGENTS.override.md`, `AGENTS.md`, and configured fallback precedence through the repository hierarchy. Ancestor instructions are read-only until their project is selected. Generated files under `CODEX_HOME/memories` are read-only because Codex owns their lifecycle. Codex hook trust stays with its native `/hooks` review flow.
+
+Orbit writes configuration changes directly to disk. Backups and change history are kept under `.harness-agent` in each agent's configuration directory. Claude's disabled MCP and hook records and the transcript indexes are stored in the app-data directory. Codex uses native enablement settings. Window preferences are stored in the app-config directory.
 
 Credential values in known configuration fields are masked in the UI, not encrypted on disk. Skills, configuration files, backups, and transcripts can contain private information. Review transcript exports before sharing them. Hook tests execute shell commands with your account's permissions. MCP tests start configured processes or contact configured endpoints and may send their credentials. These operations are not sandboxed.
 

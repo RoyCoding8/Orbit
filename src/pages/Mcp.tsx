@@ -5,7 +5,7 @@ import {
   useState,
   type FormEvent,
 } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useHarness } from "../HarnessContext";
 import { M3eButton } from "@m3e/react/button";
 import "./Mcp.css";
 
@@ -119,6 +119,7 @@ function payloadFor(editor: Editor): Record<string, unknown> {
 }
 
 export function McpPage() {
+  const { invoke, label } = useHarness();
   const [servers, setServers] = useState<Server[]>([]);
   const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
   const [editor, setEditor] = useState<Editor | null>(null);
@@ -232,7 +233,7 @@ export function McpPage() {
           <p className="eyebrow">HARNESS CONFIGURATION</p>
           <h2 id="mcp-title">MCP servers</h2>
           <p className="supporting-copy">
-            Manage tool servers available to Claude Code. Known credential
+            Manage user-level tool servers available to {label}. Known credential
             fields are masked in this view.
           </p>
         </div>

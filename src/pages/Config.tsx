@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useHarness } from "../HarnessContext";
 import { M3eButton } from "@m3e/react/button";
 import "@m3e/web/button";
 
 type LayerName = "user" | "project" | "local";
-type Layer = { name: LayerName; path: string; values: Record<string, unknown> };
+type Layer = { name: LayerName | "project_parent"; path: string; values: Record<string, unknown> };
 type EffectiveSetting = { value: unknown; source: string };
 type Snapshot = {
   layers: Layer[];
@@ -15,6 +15,7 @@ const layerNames: LayerName[] = ["user", "project", "local"];
 const emptySnapshot: Snapshot = { layers: [], effective: {} };
 
 export function Config() {
+  const { invoke, client, label } = useHarness();
   const [snapshot, setSnapshot] = useState<Snapshot>(emptySnapshot);
   const [activeLayer, setActiveLayer] = useState<LayerName>("user");
   const [projectRoot, setProjectRoot] = useState<string | null>(null);
@@ -43,7 +44,7 @@ export function Config() {
     } finally {
       if (requestId === loadSequenceRef.current) setLoading(false);
     }
-  }, [projectRoot]);
+  }, [projectRoot, invoke]);
 
   useEffect(() => {
     void load();
@@ -122,7 +123,7 @@ export function Config() {
     <section className="config-page" aria-labelledby="config-title">
       <div className="pane-heading">
         <div>
-          <p className="eyebrow">CLAUDE CODE</p>
+          <p className="eyebrow">{label.toUpperCase()}</p>
           <h2 id="config-title">Configuration</h2>
           <p className="supporting-copy">
             Review each settings layer and edit one value at a time.
@@ -153,7 +154,7 @@ export function Config() {
             role="tablist"
             aria-label="Settings layers"
           >
-            {layerNames.map((layer) => (
+            {layerNames.filter(layer => client !== "codex" || layer !== "local").map((layer) => (
               <button
                 key={layer}
                 type="button"
@@ -193,7 +194,7 @@ export function Config() {
             onChange={(event) => setValueText(event.target.value)}
             rows={6}
             spellCheck={false}
-            placeholder={'"sonnet"'}
+            placeholder={client === "codex" ? '"gpt-5-codex"' : '"sonnet"'}
           />
           <M3eButton
             variant="filled"
@@ -222,11 +223,18 @@ export function Config() {
             <div>
               <p className="eyebrow">RESOLVED SETTINGS</p>
               <h3 id="effective-title">Effective configuration</h3>
+              {client === "codex" && <p className="supporting-copy">Preview of user settings and trusted project files from the repository root to the selected folder. Profiles, command-line flags, environment and system overrides are not resolved here.</p>}
             </div>
             <span className="setting-count">
               {Object.keys(snapshot.effective).length} keys
             </span>
           </div>
+          {client === "codex" && snapshot.layers.some(layer => layer.name === "project_parent") && (
+            <details>
+              <summary>Inherited project files</summary>
+              {snapshot.layers.filter(layer => layer.name === "project_parent").map(layer => <p key={layer.path} className="layer-path">{layer.path}</p>)}
+            </details>
+          )}
           {error && (
             <p className="config-error" role="alert">
               {error}

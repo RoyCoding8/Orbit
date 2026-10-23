@@ -41,6 +41,8 @@ pub struct HookView {
     pub commands: Vec<String>,
     pub enabled: bool,
     pub layer: String,
+    pub source_path: String,
+    pub editable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -571,6 +573,8 @@ fn is_command_hook(value: &Value) -> bool {
 }
 fn view(id: String, event: &str, entry: HookMatcher, enabled: bool, layer: &str) -> HookView {
     HookView {
+        source_path: String::new(),
+        editable: true,
         id,
         event: event.into(),
         matcher: entry.matcher,

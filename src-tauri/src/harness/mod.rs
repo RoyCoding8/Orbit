@@ -2,6 +2,11 @@
 
 pub mod atomic;
 pub mod claude;
+pub mod codex;
+pub(crate) mod credentials;
+pub(crate) mod memory_links;
+pub(crate) mod process_lifetime;
+pub mod selected;
 
 use std::path::PathBuf;
 
@@ -24,6 +29,8 @@ pub enum ResourceKind {
 /// Which harness a resource belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HarnessId(pub &'static str);
+
+pub const CODEX: HarnessId = HarnessId("codex");
 
 pub const CLAUDE_CODE: HarnessId = HarnessId("claude-code");
 
@@ -89,6 +96,14 @@ pub trait Harness {
 
     /// The settings file the harness rewrites itself (Claude: `settings.json`).
     fn settings_path(&self) -> PathBuf;
+
+    fn mcp_path(&self) -> PathBuf {
+        self.settings_path()
+    }
+
+    fn user_home(&self) -> Option<&std::path::Path> {
+        None
+    }
 }
 
 /// The default state file is beside the config directory. CLAUDE_CONFIG_DIR

@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useHarness } from "../HarnessContext";
 import { open } from "@tauri-apps/plugin-dialog";
 
 type SkillState = "on" | "name-only" | "user-invocable-only" | "off";
@@ -10,6 +10,7 @@ type Skill = {
   path: string;
   content: string;
   state: SkillState;
+  editable: boolean;
 };
 type LedgerRow = {
   timestamp: number;
@@ -26,6 +27,10 @@ type LoadState =
   | { kind: "error"; message: string };
 
 export function Skills() {
+  const { invoke: request, client, label } = useHarness();
+  const [projectRoot, setProjectRoot] = useState<string | null>(null);
+  const invoke = useCallback(<T,>(command: string, args?: Record<string, unknown>) =>
+    request<T>(command, client === "codex" ? { ...args, projectRoot } : args), [request, client, projectRoot]);
   const [skills, setSkills] = useState<Skill[]>([]);
   const [ledger, setLedger] = useState<LedgerRow[]>([]);
   const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
@@ -37,25 +42,30 @@ export function Skills() {
   const editDialog = useRef<HTMLDialogElement>(null);
   const draftInput = useRef<HTMLTextAreaElement>(null);
   const isEditing = editing !== null;
+  const loadSequence = useRef(0);
 
-  const load = async () => {
+  const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
     setLoadState({ kind: "loading" });
     try {
       const [inventory, rows] = await Promise.all([
         invoke<Skill[]>("skills_inventory"),
         invoke<LedgerRow[]>("skills_ledger"),
       ]);
+      if (sequence !== loadSequence.current) return;
       setSkills(inventory);
       setLedger(rows);
       setError("");
       setLoadState({ kind: "ready" });
     } catch (err) {
+      if (sequence !== loadSequence.current) return;
       setLoadState({ kind: "error", message: String(err) });
     }
-  };
+  }, [invoke]);
   useEffect(() => {
     void load();
-  }, []);
+    return () => { loadSequence.current++; };
+  }, [load]);
   useEffect(() => {
     const dialog = editDialog.current;
     if (!isEditing || !dialog) return;
@@ -126,7 +136,7 @@ export function Skills() {
     >
       <div className="pane-heading">
         <div>
-          <p className="eyebrow">CLAUDE CODE</p>
+          <p className="eyebrow">{label.toUpperCase()}</p>
           <h2 id="skills-title">Skills</h2>
           <p className="supporting-copy">
             Skills are read from folders on disk, including folders copied
@@ -134,6 +144,11 @@ export function Skills() {
           </p>
         </div>
         <div className="skills-header-actions">
+          {client === "codex" && <button className="action-button" disabled={busy} onClick={() => {
+            void request<string | null>("project_choose").then(selected => {
+              if (selected) setProjectRoot(selected);
+            }).catch(reason => setError(String(reason)));
+          }}>Choose project</button>}
           <button
             className="action-button"
             onClick={() => void load()}
@@ -150,6 +165,7 @@ export function Skills() {
           </button>
         </div>
       </div>
+      {client === "codex" && <p className="supporting-copy">Project: {projectRoot ?? "Current project"}. Codex loads repository and user skills. Restart Codex after changing skill availability.</p>}
       {error && (
         <p className="inline-error" role="alert">
           {error}
@@ -235,17 +251,17 @@ export function Skills() {
                       }
                     >
                       <option value="on">On</option>
-                      <option value="name-only">Name only</option>
-                      <option value="user-invocable-only">
+                      {client === "claude-code" && <option value="name-only">Name only</option>}
+                      {client === "claude-code" && <option value="user-invocable-only">
                         User invocable only
-                      </option>
+                      </option>}
                       <option value="off">Off</option>
                     </select>
                   </label>
                   <div className="card-actions">
                     <button
                       className="action-button"
-                      disabled={!canMutate}
+                        disabled={!canMutate || !skill.editable}
                       onClick={() => {
                         setEditing(skill);
                         setDraft(skill.content);
@@ -256,7 +272,7 @@ export function Skills() {
                     </button>
                     <button
                       className="action-button danger"
-                      disabled={!canMutate}
+                      disabled={!canMutate || !skill.editable}
                       onClick={() =>
                         void update(() =>
                           invoke("skill_uninstall", { id: skill.id }),

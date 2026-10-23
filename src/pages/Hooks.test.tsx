@@ -11,6 +11,8 @@ const hook = {
   commands: ["node check.js"],
   enabled: true,
   layer: "user",
+  source_path: "settings.json",
+  editable: true,
 };
 
 describe("hook mutation identity", () => {

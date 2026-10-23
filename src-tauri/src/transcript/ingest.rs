@@ -26,6 +26,14 @@ pub(super) struct IndexedMessage {
     pub tool_result_note: Option<String>,
 }
 
+pub(super) struct IndexedSession<'a> {
+    pub id: &'a str,
+    pub project: &'a str,
+    pub source_path: &'a Path,
+    pub updated_at: Option<&'a str>,
+    pub title: Option<&'a str>,
+}
+
 /// Version 3 fixed case-sensitive filename collisions. Version 4 adds native
 /// chat titles without discarding an existing version 3 message cache.
 const SCHEMA_VERSION: i64 = 4;
@@ -250,11 +258,13 @@ fn ingest_session(
     }
     let indexed = replace_indexed_session(
         connection,
-        session_id,
-        project,
-        path,
-        modified.as_deref(),
-        title.finish().as_deref(),
+        IndexedSession {
+            id: session_id,
+            project,
+            source_path: path,
+            updated_at: modified.as_deref(),
+            title: title.finish().as_deref(),
+        },
         &messages,
         &errors,
     )?;
@@ -263,14 +273,17 @@ fn ingest_session(
 
 pub(super) fn replace_indexed_session(
     connection: &mut Connection,
-    session_id: &str,
-    project: &str,
-    source_path: &Path,
-    updated_at: Option<&str>,
-    title: Option<&str>,
+    session: IndexedSession<'_>,
     messages: &[IndexedMessage],
     errors: &[(usize, String)],
 ) -> Result<usize, TranscriptError> {
+    let IndexedSession {
+        id: session_id,
+        project,
+        source_path,
+        updated_at,
+        title,
+    } = session;
     let transaction = connection.transaction()?;
     transaction.execute(
         "DELETE FROM messages_fts WHERE session_id = ?1",

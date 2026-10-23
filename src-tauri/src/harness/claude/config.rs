@@ -108,10 +108,7 @@ struct RawLayer {
 /// ([`masked_value`]), and [`apply_value`] restores masked fields from the
 /// file on disk before writing, so a masked snapshot can never replace a real
 /// credential with a placeholder.
-pub fn load_config(
-    harness: &ClaudeCodeHarness,
-    project_root: &Path,
-) -> ConfigResult<ConfigSnapshot> {
+pub fn load_config(harness: &impl Harness, project_root: &Path) -> ConfigResult<ConfigSnapshot> {
     let user_root = harness.config_root();
     let layers = [
         SettingsLayer::User,
@@ -299,7 +296,12 @@ fn settings_validator() -> ConfigResult<&'static SettingsValidator> {
 /// [`CREDENTIAL_SETTINGS`]. Below the top level, a string is masked when its
 /// key name looks secret at any nesting depth, or when it sits inside an
 /// `env` or `headers` object and its value looks like a credential.
-fn masked_value(name: &str, value: &Value, depth: usize, in_secret_container: bool) -> Value {
+pub(crate) fn masked_value(
+    name: &str,
+    value: &Value,
+    depth: usize,
+    in_secret_container: bool,
+) -> Value {
     match value {
         Value::String(text) => {
             let nested = depth > 0;

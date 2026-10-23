@@ -1,6 +1,7 @@
 use super::archive::{export_codex_archive, import_codex_archive, ArchiveReport};
 use super::ingest::{
-    open_database, prune_vanished_sessions, replace_indexed_session, IndexedMessage, IngestReport,
+    open_database, prune_vanished_sessions, replace_indexed_session, IndexedMessage,
+    IndexedSession, IngestReport,
 };
 use super::TranscriptError;
 use rusqlite::Connection;
@@ -137,7 +138,7 @@ fn ingest_rollout(
         .collect::<Vec<_>>();
     let Some((session_id, project, updated_at)) = parsed
         .iter()
-        .find_map(|(_, _, result)| result.as_ref().ok().and_then(|line| session_metadata(line)))
+        .find_map(|(_, _, result)| result.as_ref().ok().and_then(session_metadata))
     else {
         return Ok((String::new(), lines.len(), 0, 0, lines.len()));
     };
@@ -223,11 +224,13 @@ fn ingest_rollout(
         });
     let indexed = replace_indexed_session(
         connection,
-        &session_id,
-        &project,
-        path,
-        updated_at.as_deref(),
-        title,
+        IndexedSession {
+            id: &session_id,
+            project: &project,
+            source_path: path,
+            updated_at: updated_at.as_deref(),
+            title,
+        },
         &messages,
         &errors,
     )?;

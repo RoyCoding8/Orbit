@@ -3,7 +3,7 @@ pub mod history;
 pub mod ledger;
 pub mod transcript;
 
-use harness::Harness as _;
+use harness::{codex::Client, selected::SelectedHarness, Harness as _};
 use serde_json::Value;
 use std::{
     collections::HashSet,
@@ -77,58 +77,80 @@ async fn run_blocking<T: Send + 'static>(
 }
 
 #[tauri::command]
-async fn mcp_list(app: tauri::AppHandle) -> Result<Vec<harness::claude::mcp::ServerView>, String> {
+async fn mcp_list(
+    app: tauri::AppHandle,
+    client: Option<Client>,
+) -> Result<Vec<harness::claude::mcp::ServerView>, String> {
     run_blocking(move || {
-        harness::claude::ClaudeCodeHarness::from_env()
-            .mcp_servers(&app_data_dir(&app)?)
-            .map_err(|error| error.to_string())
+        let harness = SelectedHarness::from_env(client);
+        harness.mcp_list(&app_data_dir(&app)?)
     })
     .await
 }
 
 #[tauri::command]
-async fn mcp_save(app: tauri::AppHandle, name: String, entry: Value) -> Result<(), String> {
+async fn mcp_save(
+    app: tauri::AppHandle,
+    name: String,
+    entry: Value,
+    client: Option<Client>,
+) -> Result<(), String> {
     run_blocking(move || {
-        harness::claude::ClaudeCodeHarness::from_env()
-            .mcp_save(&name, entry, &app_data_dir(&app)?)
-            .map_err(|error| error.to_string())
+        let harness = SelectedHarness::from_env(client);
+        harness.mcp_save(&name, entry, &app_data_dir(&app)?)
     })
     .await
 }
 
 #[tauri::command]
-async fn mcp_disable(app: tauri::AppHandle, name: String) -> Result<(), String> {
+async fn mcp_disable(
+    app: tauri::AppHandle,
+    name: String,
+    client: Option<Client>,
+) -> Result<(), String> {
     run_blocking(move || {
-        harness::claude::ClaudeCodeHarness::from_env()
-            .mcp_disable(&name, &app_data_dir(&app)?)
-            .map_err(|error| error.to_string())
+        let harness = SelectedHarness::from_env(client);
+        harness.mcp_set_enabled(&name, false, &app_data_dir(&app)?)
     })
     .await
 }
 
 #[tauri::command]
-async fn mcp_enable(app: tauri::AppHandle, name: String) -> Result<(), String> {
+async fn mcp_enable(
+    app: tauri::AppHandle,
+    name: String,
+    client: Option<Client>,
+) -> Result<(), String> {
     run_blocking(move || {
-        harness::claude::ClaudeCodeHarness::from_env()
-            .mcp_enable(&name, &app_data_dir(&app)?)
-            .map_err(|error| error.to_string())
+        let harness = SelectedHarness::from_env(client);
+        harness.mcp_set_enabled(&name, true, &app_data_dir(&app)?)
     })
     .await
 }
 
 #[tauri::command]
-async fn mcp_delete(app: tauri::AppHandle, name: String) -> Result<(), String> {
+async fn mcp_delete(
+    app: tauri::AppHandle,
+    name: String,
+    client: Option<Client>,
+) -> Result<(), String> {
     run_blocking(move || {
-        harness::claude::ClaudeCodeHarness::from_env()
-            .mcp_delete(&name, &app_data_dir(&app)?)
-            .map_err(|error| error.to_string())
+        let harness = SelectedHarness::from_env(client);
+        harness.mcp_delete(&name, &app_data_dir(&app)?)
     })
     .await
 }
 
 #[tauri::command]
-async fn mcp_test(name: String) -> Result<harness::claude::mcp::BenchResult, String> {
-    run_blocking(move || harness::claude::ClaudeCodeHarness::from_env().mcp_test(&name)).await
+async fn mcp_test(
+    name: String,
+    client: Option<Client>,
+) -> Result<harness::claude::mcp::BenchResult, String> {
+    run_blocking(move || {
+        let harness = SelectedHarness::from_env(client);
+        harness.mcp_test(&name)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -136,40 +158,29 @@ async fn hooks_list(
     app: tauri::AppHandle,
     project_roots: State<'_, ProjectRoots>,
     project_root: Option<String>,
+    client: Option<Client>,
 ) -> Result<Vec<harness::claude::hooks::HookView>, String> {
-    let project_roots = project_roots.inner().clone();
+    let roots = project_roots.inner().clone();
     run_blocking(move || {
-        let project_root = project_roots.resolve(project_root)?;
-        harness::claude::ClaudeCodeHarness::from_env()
-            .hooks_list(&project_root, &app_data_dir(&app)?)
-            .map_err(|error| error.to_string())
+        let harness = SelectedHarness::from_env(client);
+        let project = roots.resolve(project_root)?;
+        harness.hooks_list(&project, &app_data_dir(&app)?)
     })
     .await
 }
 
 #[tauri::command]
 async fn hooks_save(
+    draft: harness::selected::HookDraft,
     project_roots: State<'_, ProjectRoots>,
-    layer: harness::claude::config::SettingsLayer,
-    event: String,
-    matcher: Option<String>,
-    command: String,
-    edit_id: Option<String>,
     project_root: Option<String>,
+    client: Option<Client>,
 ) -> Result<(), String> {
-    let project_roots = project_roots.inner().clone();
+    let roots = project_roots.inner().clone();
     run_blocking(move || {
-        let project_root = project_roots.resolve(project_root)?;
-        harness::claude::ClaudeCodeHarness::from_env()
-            .hooks_save(
-                &project_root,
-                layer,
-                &event,
-                matcher,
-                command,
-                edit_id.as_deref(),
-            )
-            .map_err(|error| error.to_string())
+        let harness = SelectedHarness::from_env(client);
+        let project = roots.resolve(project_root)?;
+        harness.hooks_save(&project, draft)
     })
     .await
 }
@@ -177,17 +188,17 @@ async fn hooks_save(
 #[tauri::command]
 async fn hooks_disable(
     app: tauri::AppHandle,
-    project_roots: State<'_, ProjectRoots>,
     layer: harness::claude::config::SettingsLayer,
     id: String,
+    project_roots: State<'_, ProjectRoots>,
     project_root: Option<String>,
+    client: Option<Client>,
 ) -> Result<(), String> {
-    let project_roots = project_roots.inner().clone();
+    let roots = project_roots.inner().clone();
     run_blocking(move || {
-        let project_root = project_roots.resolve(project_root)?;
-        harness::claude::ClaudeCodeHarness::from_env()
-            .hooks_disable(&project_root, &app_data_dir(&app)?, layer, &id)
-            .map_err(|error| error.to_string())
+        let harness = SelectedHarness::from_env(client);
+        let project = roots.resolve(project_root)?;
+        harness.hooks_set_enabled(&project, &app_data_dir(&app)?, layer, &id, false)
     })
     .await
 }
@@ -195,16 +206,22 @@ async fn hooks_disable(
 #[tauri::command]
 async fn hooks_enable(
     app: tauri::AppHandle,
-    project_roots: State<'_, ProjectRoots>,
     id: String,
+    project_roots: State<'_, ProjectRoots>,
     project_root: Option<String>,
+    client: Option<Client>,
 ) -> Result<(), String> {
-    let project_roots = project_roots.inner().clone();
+    let roots = project_roots.inner().clone();
     run_blocking(move || {
-        let project_root = project_roots.resolve(project_root)?;
-        harness::claude::ClaudeCodeHarness::from_env()
-            .hooks_enable(&project_root, &app_data_dir(&app)?, &id)
-            .map_err(|error| error.to_string())
+        let harness = SelectedHarness::from_env(client);
+        let project = roots.resolve(project_root)?;
+        harness.hooks_set_enabled(
+            &project,
+            &app_data_dir(&app)?,
+            harness::claude::config::SettingsLayer::User,
+            &id,
+            true,
+        )
     })
     .await
 }
@@ -212,17 +229,17 @@ async fn hooks_enable(
 #[tauri::command]
 async fn hooks_delete(
     app: tauri::AppHandle,
-    project_roots: State<'_, ProjectRoots>,
     layer: harness::claude::config::SettingsLayer,
     id: String,
+    project_roots: State<'_, ProjectRoots>,
     project_root: Option<String>,
+    client: Option<Client>,
 ) -> Result<(), String> {
-    let project_roots = project_roots.inner().clone();
+    let roots = project_roots.inner().clone();
     run_blocking(move || {
-        let project_root = project_roots.resolve(project_root)?;
-        harness::claude::ClaudeCodeHarness::from_env()
-            .hooks_delete(&project_root, &app_data_dir(&app)?, layer, &id)
-            .map_err(|error| error.to_string())
+        let harness = SelectedHarness::from_env(client);
+        let project = roots.resolve(project_root)?;
+        harness.hooks_delete(&project, &app_data_dir(&app)?, layer, &id)
     })
     .await
 }
@@ -239,9 +256,16 @@ async fn hooks_test(
 }
 
 #[tauri::command]
-async fn skills_inventory() -> Result<Vec<harness::claude::skills::SkillEntry>, String> {
+async fn skills_inventory(
+    project_roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+    client: Option<Client>,
+) -> Result<Vec<harness::claude::skills::SkillEntry>, String> {
+    let roots = project_roots.inner().clone();
     run_blocking(move || {
-        harness::claude::skills::inventory(&harness::claude::ClaudeCodeHarness::from_env())
+        let harness = SelectedHarness::from_env(client);
+        let project = roots.resolve(project_root)?;
+        harness.skills_inventory(&project)
     })
     .await
 }
@@ -250,56 +274,48 @@ async fn skills_inventory() -> Result<Vec<harness::claude::skills::SkillEntry>, 
 async fn memory_catalog(
     project_roots: State<'_, ProjectRoots>,
     project_root: Option<String>,
+    client: Option<Client>,
 ) -> Result<harness::claude::memories::MemoryCatalog, String> {
-    let project_roots = project_roots.inner().clone();
+    let roots = project_roots.inner().clone();
     run_blocking(move || {
-        let project = project_roots.resolve(project_root)?;
-        harness::claude::memories::catalog(
-            &harness::claude::ClaudeCodeHarness::from_env(),
-            &project,
-        )
+        let harness = SelectedHarness::from_env(client);
+        let project = roots.resolve(project_root)?;
+        harness.memory_catalog(&project)
     })
     .await
 }
 
 #[tauri::command]
 async fn memory_edit(
-    project_roots: State<'_, ProjectRoots>,
-    project_root: Option<String>,
     id: String,
     expected_content: String,
     content: String,
+    project_roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+    client: Option<Client>,
 ) -> Result<(), String> {
-    let project_roots = project_roots.inner().clone();
+    let roots = project_roots.inner().clone();
     run_blocking(move || {
-        let project = project_roots.resolve(project_root)?;
-        harness::claude::memories::edit(
-            &harness::claude::ClaudeCodeHarness::from_env(),
-            &project,
-            &id,
-            &expected_content,
-            &content,
-        )
+        let harness = SelectedHarness::from_env(client);
+        let project = roots.resolve(project_root)?;
+        harness.memory_edit(&project, &id, &expected_content, &content)
     })
     .await
 }
 
 #[tauri::command]
 async fn memory_delete(
-    project_roots: State<'_, ProjectRoots>,
-    project_root: Option<String>,
     id: String,
     expected_content: String,
+    project_roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+    client: Option<Client>,
 ) -> Result<(), String> {
-    let project_roots = project_roots.inner().clone();
+    let roots = project_roots.inner().clone();
     run_blocking(move || {
-        let project = project_roots.resolve(project_root)?;
-        harness::claude::memories::delete(
-            &harness::claude::ClaudeCodeHarness::from_env(),
-            &project,
-            &id,
-            &expected_content,
-        )
+        let harness = SelectedHarness::from_env(client);
+        let project = roots.resolve(project_root)?;
+        harness.memory_delete(&project, &id, &expected_content)
     })
     .await
 }
@@ -308,27 +324,31 @@ async fn memory_delete(
 async fn history_load(
     project_roots: State<'_, ProjectRoots>,
     project_root: Option<String>,
+    client: Option<Client>,
 ) -> Result<history::HistorySnapshot, String> {
-    let project_roots = project_roots.inner().clone();
+    let roots = project_roots.inner().clone();
     run_blocking(move || {
-        let project = project_roots.resolve(project_root)?;
-        history::load(&harness::claude::ClaudeCodeHarness::from_env(), &project)
+        let harness = SelectedHarness::from_env(client);
+        let project = roots.resolve(project_root)?;
+        harness.history_load(&project)
     })
     .await
 }
 
 #[tauri::command]
 async fn history_restore(
-    project_roots: State<'_, ProjectRoots>,
-    project_root: Option<String>,
     id: String,
     expected_current_checksum: Option<String>,
+    project_roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+    client: Option<Client>,
 ) -> Result<(), String> {
-    let project_roots = project_roots.inner().clone();
+    let roots = project_roots.inner().clone();
     run_blocking(move || {
-        let project = project_roots.resolve(project_root)?;
+        let harness = SelectedHarness::from_env(client);
+        let project = roots.resolve(project_root)?;
         history::restore(
-            &harness::claude::ClaudeCodeHarness::from_env(),
+            &harness,
             &project,
             &id,
             expected_current_checksum.as_deref(),
@@ -338,87 +358,105 @@ async fn history_restore(
 }
 
 #[tauri::command]
-async fn history_delete(id: String) -> Result<(), String> {
-    run_blocking(move || history::delete(&harness::claude::ClaudeCodeHarness::from_env(), &id))
-        .await
+async fn history_delete(id: String, client: Option<Client>) -> Result<(), String> {
+    run_blocking(move || {
+        let harness = SelectedHarness::from_env(client);
+        history::delete(&harness, &id)
+    })
+    .await
 }
 
 #[tauri::command]
-async fn history_cleanup_legacy() -> Result<history::CleanupReport, String> {
-    run_blocking(move || history::cleanup_legacy(&harness::claude::ClaudeCodeHarness::from_env()))
-        .await
+async fn history_cleanup_legacy(client: Option<Client>) -> Result<history::CleanupReport, String> {
+    run_blocking(move || {
+        let harness = SelectedHarness::from_env(client);
+        history::cleanup_legacy(&harness)
+    })
+    .await
 }
 
 #[tauri::command]
 async fn skill_set_override(
     id: String,
     state: harness::claude::SkillOverride,
+    project_roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+    client: Option<Client>,
 ) -> Result<(), String> {
+    let roots = project_roots.inner().clone();
     run_blocking(move || {
-        harness::claude::skills::set_override(
-            &harness::claude::ClaudeCodeHarness::from_env(),
-            &id,
-            state,
-        )
+        let harness = SelectedHarness::from_env(client);
+        let project = roots.resolve(project_root)?;
+        harness.skill_set_override(&project, &id, state)
     })
     .await
 }
 
 #[tauri::command]
-async fn skill_edit(id: String, expected_content: String, content: String) -> Result<(), String> {
+async fn skill_edit(
+    id: String,
+    expected_content: String,
+    content: String,
+    project_roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+    client: Option<Client>,
+) -> Result<(), String> {
+    let roots = project_roots.inner().clone();
     run_blocking(move || {
-        harness::claude::skills::edit_skill(
-            &harness::claude::ClaudeCodeHarness::from_env(),
-            &id,
-            &expected_content,
-            &content,
-        )
+        let harness = SelectedHarness::from_env(client);
+        let project = roots.resolve(project_root)?;
+        harness.skill_edit(&project, &id, &expected_content, &content)
     })
     .await
 }
 
 #[tauri::command]
-async fn skill_install(source: String) -> Result<String, String> {
+async fn skill_install(source: String, client: Option<Client>) -> Result<String, String> {
     run_blocking(move || {
-        harness::claude::skills::install(
-            &harness::claude::ClaudeCodeHarness::from_env(),
-            std::path::Path::new(&source),
-        )
+        let harness = SelectedHarness::from_env(client);
+        harness.skill_install(Path::new(&source))
     })
     .await
 }
 
 #[tauri::command]
-async fn skill_uninstall(id: String) -> Result<(), String> {
+async fn skill_uninstall(
+    id: String,
+    project_roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+    client: Option<Client>,
+) -> Result<(), String> {
+    let roots = project_roots.inner().clone();
     run_blocking(move || {
-        harness::claude::skills::uninstall(&harness::claude::ClaudeCodeHarness::from_env(), &id)
+        let harness = SelectedHarness::from_env(client);
+        let project = roots.resolve(project_root)?;
+        harness.skill_uninstall(&project, &id)
     })
     .await
 }
 
 #[tauri::command]
-async fn skill_restore(id: String, backup: String) -> Result<(), String> {
+async fn skill_restore(
+    id: String,
+    backup: String,
+    project_roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+    client: Option<Client>,
+) -> Result<(), String> {
+    let roots = project_roots.inner().clone();
     run_blocking(move || {
-        let config_root = harness::claude::ClaudeCodeHarness::from_env();
-        let root = ledger::backup_root(config_root.config_root());
-        let backup_path = std::path::Path::new(&backup);
-        if !backup_path.starts_with(&root) {
-            return Err("backup path is outside the app backup root".into());
-        }
-        let canonical_root = root.canonicalize().map_err(|e| e.to_string())?;
-        let canonical_backup = backup_path.canonicalize().map_err(|e| e.to_string())?;
-        if !canonical_backup.starts_with(canonical_root) {
-            return Err("backup path is outside the app backup root".into());
-        }
-        harness::claude::skills::restore(&config_root, &id, backup_path)
+        let harness = SelectedHarness::from_env(client);
+        let project = roots.resolve(project_root)?;
+        harness.skill_restore(&project, &id, Path::new(&backup))
     })
     .await
 }
 
 #[tauri::command]
-async fn skills_ledger() -> Result<Vec<ledger::LedgerRow>, String> {
+async fn skills_ledger(client: Option<Client>) -> Result<Vec<ledger::LedgerRow>, String> {
     run_blocking(move || {
-        ledger::read_applied(harness::claude::ClaudeCodeHarness::from_env().config_root())
+        let harness = SelectedHarness::from_env(client);
+        ledger::read_applied(harness.config_root())
     })
     .await
 }
@@ -426,13 +464,11 @@ async fn skills_ledger() -> Result<Vec<ledger::LedgerRow>, String> {
 #[tauri::command]
 async fn transcript_ingest(
     app: tauri::AppHandle,
+    client: Option<Client>,
 ) -> Result<transcript::ingest::IngestReport, String> {
     run_blocking(move || {
-        let config_root = harness::claude::ClaudeCodeHarness::from_env()
-            .config_root()
-            .to_path_buf();
-        transcript::ingest::ingest_projects(&config_root, &app_data_dir(&app)?)
-            .map_err(|error| error.to_string())
+        let harness = SelectedHarness::from_env(client);
+        harness.transcript_ingest(&app_data_dir(&app)?)
     })
     .await
 }
@@ -440,9 +476,12 @@ async fn transcript_ingest(
 #[tauri::command]
 async fn transcript_list_sessions(
     app: tauri::AppHandle,
+    client: Option<Client>,
 ) -> Result<Vec<transcript::SessionSummary>, String> {
     run_blocking(move || {
-        transcript::ingest::list_sessions(&app_data_dir(&app)?).map_err(|error| error.to_string())
+        let harness = SelectedHarness::from_env(client);
+        transcript::ingest::list_sessions(&harness.transcript_cache(&app_data_dir(&app)?))
+            .map_err(|e| e.to_string())
     })
     .await
 }
@@ -453,10 +492,13 @@ async fn transcript_thread_page(
     session_id: String,
     offset: usize,
     limit: usize,
+    client: Option<Client>,
 ) -> Result<Vec<transcript::TranscriptMessage>, String> {
     run_blocking(move || {
-        transcript::spine::thread_page(&app_data_dir(&app)?, &session_id, offset, limit)
-            .map_err(|error| error.to_string())
+        let harness = SelectedHarness::from_env(client);
+        let cache = harness.transcript_cache(&app_data_dir(&app)?);
+        transcript::spine::thread_page(&cache, &session_id, offset, limit)
+            .map_err(|e| e.to_string())
     })
     .await
 }
@@ -467,10 +509,13 @@ async fn transcript_message_page_offset(
     session_id: String,
     uuid: String,
     page_size: usize,
+    client: Option<Client>,
 ) -> Result<Option<usize>, String> {
     run_blocking(move || {
-        transcript::spine::message_page_offset(&app_data_dir(&app)?, &session_id, &uuid, page_size)
-            .map_err(|error| error.to_string())
+        let harness = SelectedHarness::from_env(client);
+        let cache = harness.transcript_cache(&app_data_dir(&app)?);
+        transcript::spine::message_page_offset(&cache, &session_id, &uuid, page_size)
+            .map_err(|e| e.to_string())
     })
     .await
 }
@@ -480,10 +525,12 @@ async fn transcript_search(
     app: tauri::AppHandle,
     query: String,
     limit: usize,
+    client: Option<Client>,
 ) -> Result<Vec<transcript::SearchHit>, String> {
     run_blocking(move || {
-        transcript::spine::search(&app_data_dir(&app)?, &query, limit)
-            .map_err(|error| error.to_string())
+        let harness = SelectedHarness::from_env(client);
+        let cache = harness.transcript_cache(&app_data_dir(&app)?);
+        transcript::spine::search(&cache, &query, limit).map_err(|e| e.to_string())
     })
     .await
 }
@@ -492,10 +539,12 @@ async fn transcript_search(
 async fn transcript_export_markdown(
     app: tauri::AppHandle,
     session_id: String,
+    client: Option<Client>,
 ) -> Result<String, String> {
     run_blocking(move || {
-        transcript::spine::export_markdown(&app_data_dir(&app)?, &session_id)
-            .map_err(|error| error.to_string())
+        let harness = SelectedHarness::from_env(client);
+        let cache = harness.transcript_cache(&app_data_dir(&app)?);
+        transcript::spine::export_markdown(&cache, &session_id).map_err(|e| e.to_string())
     })
     .await
 }
@@ -505,15 +554,11 @@ async fn transcript_export_directory(
     app: tauri::AppHandle,
     session_id: String,
     destination: String,
+    client: Option<Client>,
 ) -> Result<transcript::archive::ArchiveReport, String> {
     run_blocking(move || {
-        let harness = harness::claude::ClaudeCodeHarness::from_env();
-        transcript::archive::export_archive(
-            &app_data_dir(&app)?,
-            &harness.config_root().join("projects"),
-            &session_id,
-            Path::new(&destination),
-        )
+        let harness = SelectedHarness::from_env(client);
+        harness.transcript_export(&app_data_dir(&app)?, &session_id, Path::new(&destination))
     })
     .await
 }
@@ -521,22 +566,66 @@ async fn transcript_export_directory(
 #[tauri::command]
 async fn transcript_import_directory(
     app: tauri::AppHandle,
-    project_roots: State<'_, ProjectRoots>,
-    project_root: String,
     source: String,
+    project_roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+    client: Option<Client>,
 ) -> Result<transcript::archive::ArchiveReport, String> {
-    let project_roots = project_roots.inner().clone();
+    let roots = project_roots.inner().clone();
     run_blocking(move || {
-        let project = project_roots.resolve(Some(project_root))?;
-        let harness = harness::claude::ClaudeCodeHarness::from_env();
-        let report = transcript::archive::import_archive(
-            &harness.config_root().join("projects"),
-            Path::new(&source),
-            &project,
-        )?;
-        transcript::ingest::ingest_projects(harness.config_root(), &app_data_dir(&app)?)
-            .map_err(|error| format!("Chat imported, but indexing failed: {error}"))?;
-        Ok(report)
+        let harness = SelectedHarness::from_env(client);
+        let project = roots.resolve(project_root)?;
+        harness.transcript_import(&app_data_dir(&app)?, Path::new(&source), &project)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn config_load(
+    project_roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+    client: Option<Client>,
+) -> Result<harness::claude::config::ConfigSnapshot, String> {
+    let roots = project_roots.inner().clone();
+    run_blocking(move || {
+        let harness = SelectedHarness::from_env(client);
+        let project = roots.resolve(project_root)?;
+        harness.config_load(&project)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn config_apply(
+    layer: harness::claude::config::SettingsLayer,
+    key: String,
+    value: Value,
+    project_roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+    client: Option<Client>,
+) -> Result<(), String> {
+    let roots = project_roots.inner().clone();
+    run_blocking(move || {
+        let harness = SelectedHarness::from_env(client);
+        let project = roots.resolve(project_root)?;
+        harness.config_apply(&project, layer, &key, value)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn config_undo(
+    layer: harness::claude::config::SettingsLayer,
+    key: String,
+    project_roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+    client: Option<Client>,
+) -> Result<(), String> {
+    let roots = project_roots.inner().clone();
+    run_blocking(move || {
+        let harness = SelectedHarness::from_env(client);
+        let project = roots.resolve(project_root)?;
+        harness.config_undo(&project, layer, &key)
     })
     .await
 }
@@ -560,69 +649,6 @@ async fn project_choose(
     run_blocking(move || {
         let canonical = project_roots.grant(&selected)?;
         Ok(Some(canonical.to_string_lossy().into_owned()))
-    })
-    .await
-}
-
-#[tauri::command]
-async fn config_load(
-    project_roots: State<'_, ProjectRoots>,
-    project_root: Option<String>,
-) -> Result<harness::claude::config::ConfigSnapshot, String> {
-    let project_roots = project_roots.inner().clone();
-    run_blocking(move || {
-        let project_root = project_roots.resolve(project_root)?;
-        harness::claude::config::load_config(
-            &harness::claude::ClaudeCodeHarness::from_env(),
-            &project_root,
-        )
-        .map_err(|error| error.to_string())
-    })
-    .await
-}
-
-#[tauri::command]
-async fn config_apply(
-    project_roots: State<'_, ProjectRoots>,
-    layer: harness::claude::config::SettingsLayer,
-    key: String,
-    value: serde_json::Value,
-    project_root: Option<String>,
-) -> Result<(), String> {
-    let project_roots = project_roots.inner().clone();
-    run_blocking(move || {
-        let project_root = project_roots.resolve(project_root)?;
-        harness::claude::config::apply_value(
-            &harness::claude::ClaudeCodeHarness::from_env(),
-            &project_root,
-            layer,
-            &key,
-            value,
-        )
-        .map_err(|error| error.to_string())
-    })
-    .await
-}
-
-#[tauri::command]
-async fn config_undo(
-    project_roots: State<'_, ProjectRoots>,
-    layer: harness::claude::config::SettingsLayer,
-    key: String,
-    project_root: Option<String>,
-) -> Result<(), String> {
-    let project_roots = project_roots.inner().clone();
-    run_blocking(move || {
-        let project_root = project_roots.resolve(project_root)?;
-        let harness = harness::claude::ClaudeCodeHarness::from_env();
-        let path = layer.settings_path(harness.config_root(), &project_root);
-        ledger::undo(
-            harness.config_root(),
-            harness::ResourceKind::Settings,
-            &key,
-            &format!("config-{}", layer.label()),
-            &path,
-        )
     })
     .await
 }

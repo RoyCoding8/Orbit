@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { Skills } from "./Skills";
 
-const SKILL = { id: "alpha", name: "Alpha", description: "Fixture skill", path: "D:/fixture/skills/alpha/SKILL.md", content: "Original skill content.", state: "on" };
+const SKILL = { id: "alpha", name: "Alpha", description: "Fixture skill", path: "D:/fixture/skills/alpha/SKILL.md", content: "Original skill content.", state: "on", editable: true };
 
 function inventory(command: string) {
   if (command === "skills_inventory") return [SKILL];

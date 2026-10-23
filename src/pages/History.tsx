@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useHarness } from "../HarnessContext";
 import "./History.css";
 
 type Scope = "global" | "project" | "other";
@@ -68,6 +68,7 @@ function parseScopeFilter(value: string): ScopeFilter {
 }
 
 export function History() {
+  const { invoke } = useHarness();
   const [snapshot, setSnapshot] = useState<HistorySnapshot>(emptySnapshot);
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [tab, setTab] = useState<Tab>("versions");
@@ -93,7 +94,7 @@ export function History() {
       setError(`Could not load history. ${String(cause)}`);
       setLoadState("error");
     }
-  }, [projectRoot]);
+  }, [projectRoot, invoke]);
 
   useEffect(() => {
     void load();

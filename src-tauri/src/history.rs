@@ -10,6 +10,7 @@ use crate::{
     ledger::{self, LedgerRow, OperationState},
 };
 
+#[cfg(test)]
 use crate::harness::claude::ClaudeCodeHarness;
 
 #[derive(Debug, Clone, Serialize)]
@@ -114,7 +115,7 @@ struct TargetScope {
 /// harness targets enter the versions list; every ledger row remains in logs.
 /// Old app-owned payloads are cleaned by the same validated, idempotent rule
 /// used by the explicit cleanup command.
-pub fn load(harness: &ClaudeCodeHarness, project: &Path) -> Result<HistorySnapshot, String> {
+pub fn load(harness: &impl Harness, project: &Path) -> Result<HistorySnapshot, String> {
     cleanup_legacy(harness)?;
     let project = std::fs::canonicalize(project).map_err(|error| error.to_string())?;
     if !plain_metadata(&project)?.is_dir() {
@@ -222,7 +223,7 @@ pub fn load(harness: &ClaudeCodeHarness, project: &Path) -> Result<HistorySnapsh
 /// the current checksum returned by `load`; all target changes are checked
 /// again while holding the existing mutation lock.
 pub fn restore(
-    harness: &ClaudeCodeHarness,
+    harness: &impl Harness,
     project: &Path,
     id: &str,
     expected_current_checksum: Option<&str>,
@@ -312,7 +313,7 @@ pub fn restore(
 
 /// Delete only the exact payload named by a complete ledger row. The audit
 /// row remains in place and shared payloads cannot be removed independently.
-pub fn delete(harness: &ClaudeCodeHarness, id: &str) -> Result<(), String> {
+pub fn delete(harness: &impl Harness, id: &str) -> Result<(), String> {
     let rows = ledger::read(harness.config_root())?;
     let row = row_by_operation(&rows, id)?;
     if !reservation_is_complete(row) {
@@ -352,7 +353,7 @@ pub fn delete(harness: &ClaudeCodeHarness, id: &str) -> Result<(), String> {
 /// Remove obsolete payloads only when a ledger row identifies the app-owned
 /// backup and no complete modern row shares it. Unknown orphan files are left
 /// untouched because their ownership cannot be established.
-pub fn cleanup_legacy(harness: &ClaudeCodeHarness) -> Result<CleanupReport, String> {
+pub fn cleanup_legacy(harness: &impl Harness) -> Result<CleanupReport, String> {
     let backup_root = ledger::backup_root(harness.config_root());
     let _guard = atomic::lock_mutations(&backup_root).map_err(|error| error.to_string())?;
     let rows = ledger::read(harness.config_root())?;
@@ -444,7 +445,7 @@ pub fn cleanup_legacy(harness: &ClaudeCodeHarness) -> Result<CleanupReport, Stri
 }
 
 fn restore_directory(
-    harness: &ClaudeCodeHarness,
+    harness: &impl Harness,
     project: &Path,
     row: &LedgerRow,
     target: &Path,
@@ -568,7 +569,7 @@ fn reservation_is_complete(row: &LedgerRow) -> bool {
 }
 
 fn target_scope(
-    harness: &ClaudeCodeHarness,
+    harness: &impl Harness,
     project: &Path,
     row: &LedgerRow,
     target: &Path,
@@ -578,6 +579,9 @@ fn target_scope(
     let canonical_target = canonical_location(target)?;
     let target = canonical_target.as_path();
     let kind = row.resource_kind.as_str();
+    if harness.id() == crate::harness::CODEX {
+        return codex_target_scope(harness, project, kind, target);
+    }
     let global_path = |path: PathBuf, version_kind| {
         (target == path).then(|| TargetScope {
             scope: HistoryScope::Global,
@@ -602,10 +606,9 @@ fn target_scope(
         }
     }
     if kind == "mcpserver" {
-        if let Some(scope) = global_path(
-            canonical_location(&harness.claude_json_path())?,
-            VersionKind::File,
-        ) {
+        if let Some(scope) =
+            global_path(canonical_location(&harness.mcp_path())?, VersionKind::File)
+        {
             return Some(scope);
         }
     }
@@ -681,6 +684,108 @@ fn target_scope(
                 id: project.to_string_lossy().into_owned(),
                 label: format!("Project memory · {}", project_label(project)),
                 kind: VersionKind::File,
+            });
+        }
+    }
+    None
+}
+
+fn codex_target_scope(
+    harness: &impl Harness,
+    project: &Path,
+    resource: &str,
+    target: &Path,
+) -> Option<TargetScope> {
+    let config = canonical_location(harness.config_root())?;
+    let home = canonical_location(harness.user_home()?)?;
+    let file = |scope, id: &str, label: &str| TargetScope {
+        scope,
+        id: id.into(),
+        label: label.into(),
+        kind: VersionKind::File,
+    };
+    if matches!(resource, "settings" | "mcpserver") {
+        if target == config.join("config.toml") || target == config.join("hooks.json") {
+            return Some(file(HistoryScope::Global, "global", "Global configuration"));
+        }
+        if target == project.join(".codex/config.toml")
+            || target == project.join(".codex/hooks.json")
+        {
+            return Some(file(
+                HistoryScope::Project,
+                &project.to_string_lossy(),
+                &project_label(project),
+            ));
+        }
+    }
+    if matches!(resource, "globalinstructions" | "projectinstructions") {
+        if ["AGENTS.md", "AGENTS.override.md"]
+            .iter()
+            .any(|name| target == config.join(name))
+        {
+            return Some(file(
+                HistoryScope::Global,
+                "global-instructions",
+                "User instructions",
+            ));
+        }
+        let codex = crate::harness::codex::CodexHarness::new(config.clone(), home.clone());
+        let mut names = vec!["AGENTS.md".to_owned(), "AGENTS.override.md".to_owned()];
+        names.extend(crate::harness::codex::memories::fallback_filenames(&codex).ok()?);
+        if names.iter().any(|name| target == project.join(name)) {
+            return Some(file(
+                HistoryScope::Project,
+                &project.to_string_lossy(),
+                &project_label(project),
+            ));
+        }
+    }
+    if resource == "skill" {
+        for (root, scope, id, label) in [
+            (
+                home.join(".agents/skills"),
+                HistoryScope::Global,
+                "global-skills".to_owned(),
+                "User skills".to_owned(),
+            ),
+            (
+                config.join("skills"),
+                HistoryScope::Global,
+                "legacy-skills".to_owned(),
+                "Codex skills".to_owned(),
+            ),
+            (
+                project.join(".agents/skills"),
+                HistoryScope::Project,
+                project.to_string_lossy().into_owned(),
+                project_label(project),
+            ),
+        ] {
+            let relative = target.strip_prefix(root).ok();
+            let Some(relative) = relative else {
+                continue;
+            };
+            let components: Vec<_> = relative.components().collect();
+            if components.is_empty()
+                || !components
+                    .iter()
+                    .all(|part| matches!(part, Component::Normal(_)))
+                || components[0].as_os_str() == ".system"
+            {
+                continue;
+            }
+            let kind = if components.len() == 1 {
+                VersionKind::Directory
+            } else if target.file_name().is_some_and(|name| name == "SKILL.md") {
+                VersionKind::File
+            } else {
+                continue;
+            };
+            return Some(TargetScope {
+                scope,
+                id,
+                label,
+                kind,
             });
         }
     }
@@ -964,7 +1069,7 @@ fn plain_metadata(path: &Path) -> Result<std::fs::Metadata, String> {
 }
 
 fn ensure_plain_target_parent(
-    harness: &ClaudeCodeHarness,
+    harness: &impl Harness,
     project: &Path,
     target: &Path,
 ) -> Result<(), String> {
@@ -972,13 +1077,19 @@ fn ensure_plain_target_parent(
         canonical_location(harness.config_root()).ok_or("configuration root cannot be resolved")?;
     let config_root = canonical_config.as_path();
     let claude_json =
-        canonical_location(&harness.claude_json_path()).ok_or("state path cannot be resolved")?;
+        canonical_location(&harness.mcp_path()).ok_or("state path cannot be resolved")?;
     let canonical_target = canonical_location(target).ok_or("history target cannot be resolved")?;
     let target = canonical_target.as_path();
     let root = if target.starts_with(config_root) {
         config_root.to_path_buf()
     } else if target.starts_with(project) {
         project.to_path_buf()
+    } else if let Some(home) = harness
+        .user_home()
+        .and_then(canonical_location)
+        .filter(|home| target.starts_with(home.join(".agents/skills")))
+    {
+        home
     } else if target == claude_json {
         claude_json
             .parent()
@@ -1101,6 +1212,83 @@ mod tests {
             config_root,
         });
         (dir, harness, project)
+    }
+
+    #[test]
+    fn codex_history_restores_deleted_fallback_instructions_and_user_skills() {
+        use crate::harness::codex::{memories, CodexHarness};
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let config = home.join(".codex");
+        let project = home.join("project");
+        let skill = home.join(".agents/skills/alpha");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            config.join("config.toml"),
+            "project_doc_fallback_filenames = ['TEAM.md']\n",
+        )
+        .unwrap();
+        std::fs::write(project.join("TEAM.md"), "Project instructions.\n").unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: alpha\ndescription: Test skill\n---\nSkill body.\n",
+        )
+        .unwrap();
+        let harness = CodexHarness::new(config, home.clone());
+        let catalog = memories::catalog(&harness, &project).unwrap();
+        let instruction = catalog
+            .files
+            .iter()
+            .find(|entry| Path::new(&entry.path) == project.join("TEAM.md"))
+            .unwrap();
+        memories::delete(&harness, &project, &instruction.id, &instruction.content).unwrap();
+        let snapshot = load(&harness, &project).unwrap();
+        let version = snapshot
+            .versions
+            .iter()
+            .find(|entry| entry.scope == HistoryScope::Project)
+            .unwrap();
+        restore(
+            &harness,
+            &project,
+            &version.id,
+            version.current_checksum.as_deref(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(project.join("TEAM.md")).unwrap(),
+            "Project instructions.\n"
+        );
+
+        let target = skill.join("SKILL.md");
+        let original = std::fs::read(&target).unwrap();
+        let backup = ledger::backup_path(harness.config_root(), "alpha", "edit");
+        ledger::write(
+            harness.config_root(),
+            ResourceKind::Skill,
+            "alpha",
+            "edit",
+            &target,
+            atomic::RecordedWrite::Restore(Sha256::digest(&original).into(), b"Edited skill.\n"),
+            Some(&backup),
+        )
+        .unwrap();
+        let snapshot = load(&harness, &project).unwrap();
+        let version = snapshot
+            .versions
+            .iter()
+            .find(|entry| entry.target == target && entry.scope == HistoryScope::Global)
+            .unwrap();
+        restore(
+            &harness,
+            &project,
+            &version.id,
+            version.current_checksum.as_deref(),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(target).unwrap(), original);
     }
 
     #[test]

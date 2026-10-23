@@ -470,7 +470,7 @@ fn credential_flag(text: &str) -> bool {
         && credentials::secret_name(flag)
 }
 
-fn mask_entry(entry: &Value) -> Value {
+pub(crate) fn mask_entry(entry: &Value) -> Value {
     mask_visit("", entry, false)
 }
 
@@ -482,7 +482,7 @@ fn mask_entry(entry: &Value) -> Value {
 /// Arrays are refused when they hold a mask: elements carry no name identity,
 /// so a positional match could rebind one stored credential to a different
 /// element after a reorder. The caller surfaces the refusal instead of saving.
-fn preserve_masked_credentials(stored: &Value, edited: &mut Value) -> Result<()> {
+pub(crate) fn preserve_masked_credentials(stored: &Value, edited: &mut Value) -> Result<()> {
     credentials::restore_masked(stored, edited).map_err(|_| HarnessError::Write {
         path: PathBuf::from("mcpServers"),
         source: std::io::Error::new(
@@ -493,7 +493,7 @@ fn preserve_masked_credentials(stored: &Value, edited: &mut Value) -> Result<()>
     })
 }
 
-fn test_stdio(config: &StdioEntry) -> std::result::Result<BenchResult, String> {
+pub(crate) fn test_stdio(config: &StdioEntry) -> std::result::Result<BenchResult, String> {
     let started = Instant::now();
     let mut command = Command::new(&config.command);
     command
@@ -502,6 +502,9 @@ fn test_stdio(config: &StdioEntry) -> std::result::Result<BenchResult, String> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(cwd) = config.extra.get("cwd").and_then(Value::as_str) {
+        command.current_dir(cwd);
+    }
     let mut child = ChildTree::spawn(&mut command)
         .map_err(|error| format!("Could not start MCP server: {error}"))?;
     let stderr_log = child
@@ -682,7 +685,7 @@ fn write_rpc(input: &mut impl Write, value: Value) -> std::result::Result<(), St
         .map_err(|_| "Could not send MCP request".to_string())
 }
 
-fn test_http(config: &HttpEntry) -> std::result::Result<BenchResult, String> {
+pub(crate) fn test_http(config: &HttpEntry) -> std::result::Result<BenchResult, String> {
     if !config.url.starts_with("https://") && !is_loopback_http(&config.url) {
         return Err("Remote MCP servers require HTTPS; use https:// or a loopback address".into());
     }

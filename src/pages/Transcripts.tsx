@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useHarness } from "../HarnessContext";
 import { open } from "@tauri-apps/plugin-dialog";
 
 type Session = {
@@ -58,6 +58,7 @@ const PAGE_SIZE = 100;
 const SEARCH_LIMIT = 50;
 
 export function Transcripts() {
+  const { invoke, client, label } = useHarness();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionState, setSessionState] = useState<
     "loading" | "ready" | "error"
@@ -70,7 +71,7 @@ export function Transcripts() {
   const [searched, setSearched] = useState(false);
   const [pending, setPending] = useState(false);
   const [notice, setNotice] = useState(
-    "Index the configured Claude Code projects directory to browse sessions.",
+    `Index the configured ${label} sessions directory to browse chats.`,
   );
   const selectedSession = thread?.sessionId ?? null;
   const messages = thread?.messages ?? [];
@@ -91,7 +92,7 @@ export function Transcripts() {
       setSessionState("error");
       throw error;
     }
-  }, []);
+  }, [invoke]);
 
   useEffect(() => {
     void refreshSessions().catch((error) =>
@@ -270,7 +271,7 @@ export function Transcripts() {
       const destination = await open({
         directory: true,
         multiple: false,
-        title: "Choose where to save the Claude session archive",
+        title: `Choose where to save the ${label} session archive`,
       });
       if (typeof destination !== "string") return;
       const report = await invoke<ArchiveReport>("transcript_export_directory", {
@@ -291,7 +292,7 @@ export function Transcripts() {
       const source = await open({
         directory: true,
         multiple: false,
-        title: "Choose a Claude session archive",
+        title: `Choose a ${label} session archive`,
       });
       if (typeof source !== "string") return;
       const projectRoot = await invoke<string | null>("project_choose");
@@ -325,8 +326,7 @@ export function Transcripts() {
           <p className="eyebrow">LOCAL HISTORY</p>
           <h2 id="transcripts-title">Transcripts</h2>
           <p className="supporting-copy">
-            Browse Claude Code sessions, follow branches, and export a readable
-            record.
+            Browse {label} sessions, search messages, and export native chat archives.
           </p>
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -336,7 +336,7 @@ export function Transcripts() {
             onClick={() => void importArchive()}
             disabled={busy}
           >
-            Import Claude archive
+            Import {client === "codex" ? "Codex" : "Claude"} archive
           </button>
           <button
             className="primary-action"
@@ -438,7 +438,7 @@ export function Transcripts() {
                   onClick={() => void exportArchive()}
                   disabled={busy}
                 >
-                  Export Claude archive
+                  Export {client === "codex" ? "Codex" : "Claude"} archive
                 </button>
                 <button
                   type="button"

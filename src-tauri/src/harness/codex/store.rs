@@ -6,7 +6,7 @@ use toml_edit::DocumentMut;
 
 use super::CodexHarness;
 use crate::{
-    harness::{Harness, ResourceKind, atomic},
+    harness::{atomic, Harness, ResourceKind},
     ledger,
 };
 

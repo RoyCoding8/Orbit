@@ -20,15 +20,16 @@ pub struct SkillEntry {
     pub path: PathBuf,
     pub content: String,
     pub state: SkillOverride,
+    pub editable: bool,
 }
 
 #[derive(Debug, Clone, Default)]
-struct Frontmatter {
-    name: Option<String>,
-    description: Option<String>,
+pub(crate) struct Frontmatter {
+    pub(crate) name: Option<String>,
+    pub(crate) description: Option<String>,
 }
 
-fn parse_frontmatter(content: &str, fallback_name: &str) -> Frontmatter {
+pub(crate) fn parse_frontmatter(content: &str, fallback_name: &str) -> Frontmatter {
     let mut lines = content.lines();
     if lines.next() != Some("---") {
         return Frontmatter {
@@ -99,6 +100,7 @@ pub fn inventory(harness: &ClaudeCodeHarness) -> Result<Vec<SkillEntry>, String>
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or(SkillOverride::On);
         skills.push(SkillEntry {
+            editable: true,
             id: resource.id,
             name: metadata.name.unwrap_or_default(),
             description: metadata.description,
@@ -389,7 +391,7 @@ pub fn install(harness: &ClaudeCodeHarness, source: &Path) -> Result<String, Str
     Ok(id)
 }
 
-fn copy_dir(source: &Path, destination: &Path) -> Result<(), String> {
+pub(crate) fn copy_dir(source: &Path, destination: &Path) -> Result<(), String> {
     std::fs::create_dir(destination).map_err(|error| error.to_string())?;
     for entry in std::fs::read_dir(source).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -427,17 +429,17 @@ fn copy_dir(source: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn read_plain_file(path: &Path) -> Result<String, String> {
+pub(crate) fn read_plain_file(path: &Path) -> Result<String, String> {
     ensure_plain_file_if_present(path)?;
     std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))
 }
 
-fn safe_directory_checksum(path: &Path) -> Result<String, String> {
+pub(crate) fn safe_directory_checksum(path: &Path) -> Result<String, String> {
     validate_plain_tree(path)?;
     ledger::directory_checksum(path)
 }
 
-fn validate_plain_tree(path: &Path) -> Result<(), String> {
+pub(crate) fn validate_plain_tree(path: &Path) -> Result<(), String> {
     let metadata = plain_metadata(path)?;
     if !metadata.is_dir() {
         return Err(format!("expected a plain directory: {}", path.display()));
@@ -458,7 +460,7 @@ fn validate_plain_tree(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn ensure_plain_directory(path: &Path) -> Result<(), String> {
+pub(crate) fn ensure_plain_directory(path: &Path) -> Result<(), String> {
     let metadata = plain_metadata(path)?;
     if metadata.is_dir() {
         Ok(())
@@ -467,7 +469,7 @@ fn ensure_plain_directory(path: &Path) -> Result<(), String> {
     }
 }
 
-fn ensure_plain_file_if_present(path: &Path) -> Result<(), String> {
+pub(crate) fn ensure_plain_file_if_present(path: &Path) -> Result<(), String> {
     match plain_metadata(path) {
         Ok(metadata) if metadata.is_file() => Ok(()),
         Ok(_) => Err(format!("expected a plain file: {}", path.display())),
@@ -476,12 +478,12 @@ fn ensure_plain_file_if_present(path: &Path) -> Result<(), String> {
     }
 }
 
-fn ensure_plain_parent(path: &Path) -> Result<(), String> {
+pub(crate) fn ensure_plain_parent(path: &Path) -> Result<(), String> {
     let parent = path.parent().ok_or("path has no parent")?;
     ensure_plain_components(parent)
 }
 
-fn plain_metadata(path: &Path) -> Result<std::fs::Metadata, String> {
+pub(crate) fn plain_metadata(path: &Path) -> Result<std::fs::Metadata, String> {
     ensure_plain_components(path)?;
     let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
     if is_link_or_reparse(&metadata) {
@@ -493,7 +495,7 @@ fn plain_metadata(path: &Path) -> Result<std::fs::Metadata, String> {
     Ok(metadata)
 }
 
-fn ensure_plain_components(path: &Path) -> Result<(), String> {
+pub(crate) fn ensure_plain_components(path: &Path) -> Result<(), String> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -504,7 +506,10 @@ fn ensure_plain_components(path: &Path) -> Result<(), String> {
     let mut current = PathBuf::new();
     for component in absolute.components() {
         match component {
-            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            Component::Prefix(prefix) => {
+                current.push(prefix.as_os_str());
+                continue;
+            }
             Component::RootDir => current.push(component.as_os_str()),
             Component::Normal(name) => current.push(name),
             Component::CurDir => continue,
@@ -530,7 +535,7 @@ fn ensure_plain_components(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn path_exists_no_follow(path: &Path) -> Result<bool, String> {
+pub(crate) fn path_exists_no_follow(path: &Path) -> Result<bool, String> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -538,12 +543,12 @@ fn path_exists_no_follow(path: &Path) -> Result<bool, String> {
     }
 }
 
-fn canonical_existing_dir(path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn canonical_existing_dir(path: &Path) -> Result<PathBuf, String> {
     ensure_plain_directory(path)?;
     std::fs::canonicalize(path).map_err(|error| error.to_string())
 }
 
-fn ensure_backup_path(config_root: &Path, backup: &Path) -> Result<(), String> {
+pub(crate) fn ensure_backup_path(config_root: &Path, backup: &Path) -> Result<(), String> {
     ensure_plain_directory(backup)?;
     let backup_root = ledger::backup_root(config_root);
     ensure_plain_directory(&backup_root)?;

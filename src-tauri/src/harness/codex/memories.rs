@@ -57,6 +57,12 @@ pub fn catalog(harness: &CodexHarness, project: &Path) -> Result<MemoryCatalog, 
                 &mut candidates,
             )?;
         }
+        add_group(
+            &mut groups,
+            "user-instructions",
+            "Global Codex instructions",
+            MemorySource::UserInstructions,
+        );
         add_instruction_files(
             &[
                 config_root.join("AGENTS.override.md"),
@@ -64,10 +70,8 @@ pub fn catalog(harness: &CodexHarness, project: &Path) -> Result<MemoryCatalog, 
             ],
             config_root,
             "user-instructions",
-            "Global Codex instructions",
             MemorySource::UserInstructions,
             true,
-            &mut groups,
             &mut candidates,
         )?;
     }
@@ -109,10 +113,8 @@ pub fn catalog(harness: &CodexHarness, project: &Path) -> Result<MemoryCatalog, 
             &paths,
             &scope_root,
             project_group,
-            &format!("Project instructions · {}", directory.display()),
             MemorySource::ProjectInstructions,
             editable,
-            &mut groups,
             &mut candidates,
         )?;
     }
@@ -276,13 +278,10 @@ fn add_instruction_files(
     paths: &[PathBuf],
     boundary: &Path,
     group: &str,
-    label: &str,
     source: MemorySource,
     editable: bool,
-    groups: &mut BTreeMap<String, MemoryGroup>,
     candidates: &mut BTreeMap<PathBuf, Candidate>,
 ) -> Result<(), String> {
-    add_group(groups, group, label, source);
     let selected = selected_instruction(paths)?;
     for path in paths {
         if !path_exists_no_follow(path)? {
@@ -301,16 +300,19 @@ fn add_instruction_files(
         } else {
             "Not loaded: a higher-priority nonempty instruction filename applies in this directory."
         };
-        add_candidate_if_plain(
-            path,
-            boundary,
-            group,
-            source,
-            MemoryRole::Instruction,
-            editable,
-            load_behavior,
-            candidates,
-        )?;
+        if canonical.starts_with(boundary) {
+            candidates.insert(
+                canonical.clone(),
+                Candidate {
+                    path: canonical,
+                    group_id: group.to_owned(),
+                    source,
+                    role: MemoryRole::Instruction,
+                    editable,
+                    load_behavior: load_behavior.to_owned(),
+                },
+            );
+        }
     }
     Ok(())
 }
@@ -327,38 +329,6 @@ fn selected_instruction(paths: &[PathBuf]) -> Result<Option<PathBuf>, String> {
         }
     }
     Ok(None)
-}
-
-fn add_candidate_if_plain(
-    path: &Path,
-    boundary: &Path,
-    group_id: &str,
-    source: MemorySource,
-    role: MemoryRole,
-    editable: bool,
-    load_behavior: &str,
-    out: &mut BTreeMap<PathBuf, Candidate>,
-) -> Result<(), String> {
-    if !path_exists_no_follow(path)? {
-        return Ok(());
-    }
-    ensure_plain_file(path)?;
-    let canonical = std::fs::canonicalize(path).map_err(|error| error.to_string())?;
-    if !canonical.starts_with(boundary) {
-        return Ok(());
-    }
-    out.insert(
-        canonical.clone(),
-        Candidate {
-            path: canonical,
-            group_id: group_id.to_owned(),
-            source,
-            role,
-            editable,
-            load_behavior: load_behavior.to_owned(),
-        },
-    );
-    Ok(())
 }
 
 fn collect_markdown(

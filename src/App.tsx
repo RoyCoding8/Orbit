@@ -7,6 +7,7 @@ import { Transcripts } from "./pages/Transcripts";
 import { Hooks } from "./pages/Hooks";
 import { Memories } from "./pages/Memories";
 import { History } from "./pages/History";
+import { HarnessProvider, type Client } from "./HarnessContext";
 import "@m3e/web/theme";
 import "@m3e/web/button";
 import "./app.css";
@@ -36,6 +37,8 @@ const views = {
 
 export function App() {
   const [page, setPage] = useState<Page>("overview");
+  const [client, setClient] = useState<Client>("claude-code");
+  const clientLabel = client === "codex" ? "Codex" : "Claude Code";
   const SelectedPage = page === "overview" ? null : views[page];
 
   return (
@@ -49,7 +52,16 @@ export function App() {
               <h1>Orbit</h1>
             </div>
           </div>
-          <div className="connection-state">Claude Code</div>
+          <label className="connection-state">
+            Coding agent
+            <select aria-label="Coding agent" value={client} onChange={event => {
+              const value = event.target.value;
+              if (value === "claude-code" || value === "codex") setClient(value);
+            }}>
+              <option value="claude-code">Claude Code</option>
+              <option value="codex">Codex</option>
+            </select>
+          </label>
         </header>
         <main className="workspace">
           <aside className="rail" aria-label="Main navigation">
@@ -59,6 +71,7 @@ export function App() {
               </button>
             ))}
           </aside>
+          <HarnessProvider client={client} key={client}>
           {SelectedPage ? <SelectedPage /> : (
             <section className="content-pane" aria-labelledby="welcome-title">
               <div className="pane-heading">
@@ -69,8 +82,8 @@ export function App() {
                 </div>
               </div>
               <div className="empty-panel">
-                <p className="eyebrow">CLAUDE CODE</p>
-                <h3 id="empty-title">Your Claude Code setup</h3>
+                <p className="eyebrow">{clientLabel.toUpperCase()}</p>
+                <h3 id="empty-title">Your {clientLabel} setup</h3>
                 <p className="empty-copy">Manage skills, project memories, MCP servers, hooks, settings, and chats. Review changes and restore saved versions in History.</p>
                 <div className="card-actions">
                   <M3eButton variant="filled" onClick={() => setPage("skills")}>Open skills</M3eButton>
@@ -80,6 +93,7 @@ export function App() {
               <footer className="pane-footer"><span>LOCAL FIRST</span><span>Changes stay on this device</span></footer>
             </section>
           )}
+          </HarnessProvider>
         </main>
       </div>
     </m3e-theme>

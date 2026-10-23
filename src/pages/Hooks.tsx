@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useHarness } from "../HarnessContext";
 
 type Layer = "user" | "project";
 type Hook = {
@@ -9,6 +9,8 @@ type Hook = {
   commands: string[];
   enabled: boolean;
   layer: Layer;
+  source_path: string;
+  editable: boolean;
 };
 type TestResult = {
   stdout: string;
@@ -31,6 +33,7 @@ const destructive =
   /(?:\brm\b|\brmdir\b|\bdel\b|\berase\b|\bformat(?:\.com)?\b|\bRemove-Item\b|\bshutdown\b|\bmkfs\b|\bdd\s+if=)/i;
 
 export function Hooks() {
+  const { invoke, client, label } = useHarness();
   const [hooks, setHooks] = useState<Hook[]>([]);
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">(
     "loading",
@@ -47,26 +50,38 @@ export function Hooks() {
   const [result, setResult] = useState<TestResult | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const loadSequence = useRef(0);
 
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
     setLoadState("loading");
     try {
-      setHooks(await invoke<Hook[]>("hooks_list", { projectRoot }));
+      const loaded = await invoke<Hook[]>("hooks_list", { projectRoot });
+      if (sequence !== loadSequence.current) return;
+      setHooks(loaded);
       setError("");
       setLoadState("ready");
     } catch (cause) {
+      if (sequence !== loadSequence.current) return;
       setError(String(cause));
       setLoadState("error");
     }
-  }, [projectRoot]);
+  }, [projectRoot, invoke]);
   useEffect(() => {
     void load();
+    return () => { loadSequence.current++; };
   }, [load]);
 
   const chooseProject = async () => {
     try {
       const selected = await invoke<string | null>("project_choose");
-      if (selected !== null) setProjectRoot(selected);
+      if (selected !== null && selected !== projectRoot) {
+        setEditing(null);
+        setCommand("");
+        setMatcher("");
+        setResult(null);
+        setProjectRoot(selected);
+      }
     } catch (cause) {
       setError(String(cause));
     }
@@ -75,7 +90,7 @@ export function Hooks() {
     if (
       destructive.test(command) &&
       !window.confirm(
-        "This command looks destructive and will be saved to Claude Code settings. Save it anyway?",
+        `This command looks destructive and will be saved to ${label} settings. Save it anyway?`,
       )
     )
       return;
@@ -83,11 +98,13 @@ export function Hooks() {
     setError("");
     try {
       await invoke("hooks_save", {
-        layer,
-        event,
-        matcher: matcher.trim() || null,
-        command,
-        editId: editing?.id ?? null,
+        draft: {
+          layer,
+          event,
+          matcher: matcher.trim() || null,
+          command,
+          editId: editing?.id ?? null,
+        },
         projectRoot,
       });
       setCommand("");
@@ -171,7 +188,7 @@ export function Hooks() {
     <section className="hooks-page" aria-labelledby="hooks-title">
       <div className="pane-heading">
         <div>
-          <p className="eyebrow">CLAUDE CODE</p>
+          <p className="eyebrow">{label.toUpperCase()}</p>
           <h2 id="hooks-title">Hooks</h2>
           <p className="supporting-copy">
             Build event hooks, test them with sample JSON, and manage their
@@ -197,6 +214,7 @@ export function Hooks() {
           </button>
         </div>
       </div>
+      {client === "codex" && <p className="supporting-copy">Codex reviews hook definitions before running them. Use /hooks in Codex to approve, enable or disable hooks. Editing a definition requires a new review.</p>}
       <div className="hooks-layout">
         <section className="config-editor" aria-label="Hook builder">
           <h3>{editing ? "Edit hook" : "Add hook"}</h3>
@@ -215,7 +233,7 @@ export function Hooks() {
             <option value="project">Project</option>
           </select>
           <p className="layer-path">
-            {layer === "user"
+            {client === "codex" ? (layer === "user" ? "User hooks in CODEX_HOME/config.toml and hooks.json" : projectRoot ? `${projectRoot}/.codex/config.toml and hooks.json` : "Choose a project to edit its .codex hooks") : layer === "user"
               ? "User settings.json in the configured Claude Code directory"
               : projectRoot
                 ? `${projectRoot}/.claude/settings.json`
@@ -230,7 +248,7 @@ export function Hooks() {
             disabled={busy}
             onChange={(e) => setEvent(e.target.value)}
           >
-            {[...new Set([...events, ...hooks.map((hook) => hook.event)])].map(
+            {[...new Set([...(client === "codex" ? ["PreToolUse", "PermissionRequest", "PostToolUse", "PreCompact", "PostCompact", "SessionStart", "SessionEnd", "SubagentStart", "SubagentStop", "UserPromptSubmit", "Stop", "Interrupt"] : events), ...hooks.map((hook) => hook.event)])].map(
               (name) => (
                 <option key={name}>{name}</option>
               ),
@@ -353,12 +371,13 @@ export function Hooks() {
                       <span
                         className={`state-badge${hook.enabled ? "" : " state-off"}`}
                       >
-                        {hook.enabled ? "Enabled" : "Disabled"}
+                        {client === "codex" ? "Configured" : hook.enabled ? "Enabled" : "Disabled"}
                       </span>
                     </div>
                     <p className="hook-meta">
                       {hook.layer} scope · matcher: {hook.matcher || "all"}
                     </p>
+                    {hook.source_path && <p className="layer-path">{hook.source_path}{!hook.editable && " · Inherited, read-only"}</p>}
                     {hook.commands.map((value, i) => (
                       <code className="hook-command" key={`${hook.id}-${i}`}>
                         {value}
@@ -370,7 +389,7 @@ export function Hooks() {
                       <button
                         className="action-button"
                         type="button"
-                        disabled={busy || hook.commands.length !== 1}
+                        disabled={busy || !hook.editable || hook.commands.length !== 1}
                         title={
                           hook.commands.length !== 1
                             ? "Use Settings to edit hooks with multiple commands or other hook types."
@@ -381,19 +400,19 @@ export function Hooks() {
                         Edit
                       </button>
                     )}
-                    <button
+                    {client === "claude-code" && <button
                       className="action-button"
                       type="button"
                       disabled={busy}
                       onClick={() => void toggle(hook)}
                     >
                       {hook.enabled ? "Disable" : "Enable"}
-                    </button>
+                    </button>}
                     {hook.enabled && (
                       <button
                         className="action-button danger"
                         type="button"
-                        disabled={busy}
+                        disabled={busy || !hook.editable || (client === "codex" && hook.commands.length === 0)}
                         onClick={() => void remove(hook)}
                       >
                         Delete

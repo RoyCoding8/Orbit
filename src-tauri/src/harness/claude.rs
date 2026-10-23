@@ -14,10 +14,10 @@ use super::{
 };
 
 pub mod config;
-mod credentials;
+use super::credentials;
 pub mod hooks;
 pub mod memories;
-mod process_lifetime;
+use super::process_lifetime;
 pub mod skills;
 
 /// Environment variable Claude Code honors to relocate its config directory.
@@ -68,6 +68,10 @@ impl Harness for ClaudeCodeHarness {
 
     fn config_root(&self) -> &Path {
         &self.paths.config_root
+    }
+
+    fn mcp_path(&self) -> PathBuf {
+        self.claude_json_path()
     }
 
     fn list(&self, kind: InventoryKind) -> Result<Vec<ResourceRef>> {

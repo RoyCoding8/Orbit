@@ -102,11 +102,14 @@ describe("App shell", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save hook" }));
 
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("hooks_save", {
-      layer: "project",
-      event: "PreToolUse",
-      matcher: null,
-      command: "echo checked",
-      editId: null,
+      client: "claude-code",
+      draft: {
+        layer: "project",
+        event: "PreToolUse",
+        matcher: null,
+        command: "echo checked",
+        editId: null,
+      },
       projectRoot: "D:/demo-project",
     }));
   });
@@ -130,5 +133,51 @@ describe("App shell", () => {
     expect(screen.getByRole("tab", { name: "Local" })).toBeTruthy();
     expect(await screen.findByText('"sonnet"')).toBeTruthy();
     expect(screen.getByText("user")).toBeTruthy();
+  });
+
+  it("switches clients without retaining settings or an unfinished hook edit", async () => {
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "config_load") {
+        const model = args && "client" in args && args.client === "codex" ? "gpt-5-codex" : "sonnet";
+        return { layers: [{ name: "user", path: "config", values: { model } }], effective: { model: { value: model, source: "user" } } };
+      }
+      return [];
+    });
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Settings/ }));
+    expect(await screen.findByText('"sonnet"')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Coding agent"), { target: { value: "codex" } });
+    expect(await screen.findByText('"gpt-5-codex"')).toBeInTheDocument();
+    expect(screen.queryByText('"sonnet"')).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Local" })).toBeNull();
+    expect(invoke).toHaveBeenCalledWith("config_load", { client: "codex", projectRoot: null });
+
+    fireEvent.click(screen.getByRole("button", { name: "Hooks" }));
+    fireEvent.change(screen.getByLabelText("Command"), { target: { value: "echo draft" } });
+    fireEvent.change(screen.getByLabelText("Coding agent"), { target: { value: "claude-code" } });
+    expect(screen.getByLabelText("Command")).toHaveValue("");
+  });
+
+  it("leaves Codex hook trust and generated memory under Codex ownership", async () => {
+    vi.mocked(invoke).mockImplementation(async command => {
+      if (command === "hooks_list") return [{ id: "hook", event: "Stop", matcher: null, commands: ["echo done"], enabled: true, layer: "user", source_path: "D:/codex/hooks.json", editable: true }];
+      if (command === "memory_catalog") return {
+        projectRoot: "D:/project", excludedCustomMemoryDirectory: null,
+        groups: [{ id: "generated", label: "Generated memory", role: "globalAutoMemory" }],
+        files: [{ id: "memory", groupId: "generated", name: "memory_summary.md", path: "D:/codex/memories/memory_summary.md", source: "globalAutoMemory", role: "index", loadBehavior: "Managed by Codex", editable: false, content: "Generated summary.", references: [] }],
+      };
+      return [];
+    });
+    render(<App />);
+    fireEvent.change(screen.getByLabelText("Coding agent"), { target: { value: "codex" } });
+    fireEvent.click(screen.getByRole("button", { name: "Hooks" }));
+    expect(await screen.findByText("echo done")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Disable" })).toBeNull();
+    expect(screen.getByRole("option", { name: "Interrupt" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Memories" }));
+    expect(await screen.findByLabelText("Markdown content")).toBeDisabled();
+    expect(screen.getByLabelText("Markdown content")).toHaveValue("Generated summary.");
+    expect(screen.getByRole("button", { name: "Delete file" })).toBeDisabled();
+    expect(invoke).toHaveBeenCalledWith("memory_catalog", { client: "codex", projectRoot: null });
   });
 });

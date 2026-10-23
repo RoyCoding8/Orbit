@@ -6,13 +6,13 @@ use std::{
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use super::{CodexHarness, config, store};
+use super::{config, store, CodexHarness};
 use crate::harness::{
-    Harness, ResourceKind,
     claude::{
         config::SettingsLayer,
         hooks::{self, HookTestResult, HookView},
     },
+    Harness, ResourceKind,
 };
 
 const EVENTS: &[&str] = &[
@@ -631,18 +631,16 @@ mod tests {
         )
         .unwrap();
         assert!(list(&h, &project).unwrap().is_empty());
-        assert!(
-            save(
-                &h,
-                &project,
-                SettingsLayer::Project,
-                "Stop",
-                None,
-                "echo no".into(),
-                None
-            )
-            .is_err()
-        );
+        assert!(save(
+            &h,
+            &project,
+            SettingsLayer::Project,
+            "Stop",
+            None,
+            "echo no".into(),
+            None
+        )
+        .is_err());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -681,11 +679,9 @@ mod tests {
                 .unwrap()
                 .to_string_lossy()
         );
-        assert!(
-            delete(&h, &nested, SettingsLayer::Project, &inherited.id)
-                .unwrap_err()
-                .contains("read-only")
-        );
+        assert!(delete(&h, &nested, SettingsLayer::Project, &inherited.id)
+            .unwrap_err()
+            .contains("read-only"));
         assert_eq!(list(&h, &nested).unwrap().len(), 2);
         let _ = fs::remove_dir_all(root);
     }
