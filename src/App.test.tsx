@@ -158,14 +158,16 @@ describe("App shell", () => {
     expect(screen.getByLabelText("Command")).toHaveValue("");
   });
 
-  it("leaves Codex hook trust and generated memory under Codex ownership", async () => {
+  it("leaves Codex hook trust native and saves generated memory through the Codex client", async () => {
+    let content = "Generated summary.";
     vi.mocked(invoke).mockImplementation(async command => {
       if (command === "hooks_list") return [{ id: "hook", event: "Stop", matcher: null, commands: ["echo done"], enabled: true, layer: "user", source_path: "D:/codex/hooks.json", editable: true }];
       if (command === "memory_catalog") return {
         projectRoot: "D:/project", excludedCustomMemoryDirectory: null,
         groups: [{ id: "generated", label: "Generated memory", role: "globalAutoMemory" }],
-        files: [{ id: "memory", groupId: "generated", name: "memory_summary.md", path: "D:/codex/memories/memory_summary.md", source: "globalAutoMemory", role: "index", loadBehavior: "Managed by Codex", editable: false, content: "Generated summary.", references: [] }],
+        files: [{ id: "memory", groupId: "generated", name: "memory_summary.md", path: "D:/codex/memories/memory_summary.md", source: "globalAutoMemory", role: "summary", loadBehavior: "High-level overview of saved memories.", editable: true, content, references: [] }],
       };
+      if (command === "memory_edit") content = "Corrected summary.";
       return [];
     });
     render(<App />);
@@ -175,9 +177,17 @@ describe("App shell", () => {
     expect(screen.queryByRole("button", { name: "Disable" })).toBeNull();
     expect(screen.getByRole("option", { name: "Interrupt" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Memories" }));
-    expect(await screen.findByLabelText("Markdown content")).toBeDisabled();
+    expect(await screen.findByLabelText("Markdown content")).toBeEnabled();
     expect(screen.getByLabelText("Markdown content")).toHaveValue("Generated summary.");
-    expect(screen.getByRole("button", { name: "Delete file" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Delete file" })).toBeEnabled();
+    expect(screen.getByRole("note")).toHaveTextContent("Codex may regenerate this file");
     expect(invoke).toHaveBeenCalledWith("memory_catalog", { client: "codex", projectRoot: null });
+    fireEvent.change(screen.getByLabelText("Markdown content"), { target: { value: "Corrected summary." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("memory_edit", {
+      client: "codex", projectRoot: "D:/project", id: "memory", expectedContent: "Generated summary.", content: "Corrected summary.",
+    }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled());
+    expect(screen.getByLabelText("Markdown content")).toHaveValue("Corrected summary.");
   });
 });

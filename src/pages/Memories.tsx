@@ -3,7 +3,7 @@ import { useHarness } from "../HarnessContext";
 import "./Memories.css";
 
 export type MemorySource = "projectAutoMemory" | "globalAutoMemory" | "projectInstructions" | "userInstructions";
-export type MemoryRole = "index" | "topic" | "instruction" | "rule";
+export type MemoryRole = "index" | "topic" | "instruction" | "rule" | "summary" | "raw" | "evidence";
 export type MemoryReference = {
   target: string;
   kind: "markdownLink" | "import";
@@ -122,7 +122,7 @@ export function Memories() {
         <div>
           <p className="eyebrow">{label.toUpperCase()}</p>
           <h2 id="memories-title">Memories & instructions</h2>
-          <p className="supporting-copy">{client === "codex" ? "Edit AGENTS.md instructions in their native scope. Codex generated memories are global and shown read-only; Codex manages their lifecycle through /memories." : "Edit the project-scoped memory and instruction files Claude Code reads. Auto-memory files are project-specific even when stored under the Claude config directory."}</p>
+          <p className="supporting-copy">{client === "codex" ? "Edit Codex memory Markdown and AGENTS.md instructions. Memories are shared across projects; instructions keep their native scope. Each saved edit has a restorable version in History." : "Edit the project-scoped memory and instruction files Claude Code reads. Auto-memory files are project-specific even when stored under the Claude config directory."}</p>
         </div>
         <div className="memory-header-actions">
           <button className="action-button" onClick={() => void load()} disabled={busy || loadState.kind === "loading"}>Refresh</button>
@@ -162,7 +162,8 @@ export function Memories() {
                     <button className="action-button primary" onClick={() => void save()} disabled={busy || !selected.editable || draft === selected.content}>Save changes</button>
                   </div>
                 </div>
-                <p className="memory-load-behavior"><strong>{label} loading:</strong> {selected.loadBehavior}</p>
+                <p className="memory-load-behavior"><strong>{selected.source === "globalAutoMemory" ? "About this file:" : `${label} loading:`}</strong> {selected.loadBehavior}</p>
+                {selected.source === "globalAutoMemory" && <p className="memory-boundary-note" role="note">Codex may regenerate this file and replace your edits. Use /memories in Codex to control memory use and generation.</p>}
                 <label className="memory-content-label" htmlFor="memory-content">Markdown content</label>
                 <textarea id="memory-content" className="memory-content" spellCheck={false} value={draft} onChange={(event) => setDraft(event.target.value)} disabled={busy || !selected.editable} />
                 <section className="memory-connections" aria-label="Memory connections">
@@ -179,7 +180,7 @@ export function Memories() {
                     {incoming.length ? <ul>{incoming.map(({ file, reference }) => <li key={file.id + reference.kind + reference.target}><button className="memory-link known" onClick={() => selectFile(file)}>{file.name}</button><small>{reference.kind === "import" ? "Context import" : "Markdown link"}</small></li>)}</ul> : <p>No known backlinks.</p>}
                   </div>
                 </section>
-                {selected.role === "index" && <section className="memory-unlinked" aria-label="Unlinked topic files"><h4>Topic files not linked from this index <span className="count">{unlinkedTopics.length}</span></h4>{unlinkedTopics.length ? <ul>{unlinkedTopics.map((file) => <li key={file.id}><button className="memory-link known" onClick={() => selectFile(file)}>{file.name}</button><small>Same project auto-memory group</small></li>)}</ul> : <p>Every topic file in this project group is linked from the index.</p>}</section>}
+                {selected.role === "index" && <section className="memory-unlinked" aria-label="Unlinked topic files"><h4>Topic files not linked from this index <span className="count">{unlinkedTopics.length}</span></h4>{unlinkedTopics.length ? <ul>{unlinkedTopics.map((file) => <li key={file.id}><button className="memory-link known" onClick={() => selectFile(file)}>{file.name}</button><small>Same memory group</small></li>)}</ul> : <p>Every topic file in this group is linked from the index.</p>}</section>}
               </> : <div className="empty-panel"><h3>No memory files found</h3><p className="empty-copy">Choose a project or add a {label} instruction file to see it here.</p></div>}
             </main>
           </div>
@@ -195,13 +196,16 @@ function roleLabel(role: MemoryRole): string {
     case "topic": return "Auto-memory topic";
     case "instruction": return "Instruction";
     case "rule": return "Rule";
+    case "summary": return "Memory summary";
+    case "raw": return "Raw memories";
+    case "evidence": return "Chat evidence";
   }
 }
 
 function sourceHint(source: MemorySource): string {
   switch (source) {
     case "projectAutoMemory": return "Project-scoped learned context; startup loading is limited to the index.";
-    case "globalAutoMemory": return "Generated Codex memory shared across projects. Codex owns extraction and consolidation; use /memories to control it.";
+    case "globalAutoMemory": return "Shared Codex memories: index, summary, raw inputs, and supporting notes. Markdown files can be edited here.";
     case "projectInstructions": return "Project instructions. Loading order and scope are shown for each file.";
     case "userInstructions": return "User-level instructions shared across projects.";
   }

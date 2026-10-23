@@ -1,7 +1,7 @@
 //! Native Codex instruction and auto-memory files.
 //!
-//! Generated auto-memory is displayed for inspection but is not an editing
-//! surface. AGENTS files are ordinary instructions and remain user-editable.
+//! Markdown edits use checked writes and restorable backups. Codex may later
+//! regenerate its memory files.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -47,15 +47,7 @@ pub fn catalog(harness: &CodexHarness, project: &Path) -> Result<MemoryCatalog, 
                 "Codex generated memory",
                 MemorySource::GlobalAutoMemory,
             );
-            collect_markdown(
-                &auto_memory,
-                config_root,
-                "global-auto-memory",
-                MemorySource::GlobalAutoMemory,
-                false,
-                "Generated Codex memory; relevant contents may be used when memories are enabled. Use /memories to control it; read-only here.",
-                &mut candidates,
-            )?;
+            collect_memory_files(&auto_memory, &auto_memory, &mut candidates)?;
         }
         add_group(
             &mut groups,
@@ -190,7 +182,7 @@ pub fn edit(
         .files
         .iter()
         .find(|file| file.id == id && file.editable)
-        .ok_or("instruction file is no longer available for editing")?;
+        .ok_or("memory or instruction file is no longer available for editing")?;
     edit_file(harness, file, expected_content, content)
 }
 
@@ -205,10 +197,10 @@ pub fn delete(
         .files
         .iter()
         .find(|file| file.id == id && file.editable)
-        .ok_or("instruction file is no longer available for deletion")?;
+        .ok_or("memory or instruction file is no longer available for deletion")?;
     if file.content != expected_content {
         return Err(
-            "Instruction file changed since this editor opened. Refresh the catalog and try again."
+            "Memory or instruction file changed since this editor opened. Refresh the catalog and try again."
                 .into(),
         );
     }
@@ -222,7 +214,7 @@ pub fn delete(
         if content != source.content {
             edit_file(harness, source, &source.content, &content).map_err(|error| {
                 format!(
-                    "Could not remove references from {}. The instruction was not deleted. {error}",
+                    "Could not remove references from {}. The file was not deleted. {error}",
                     source.name
                 )
             })?;
@@ -266,7 +258,7 @@ fn edit_file(
     .map_err(|error| {
         let message = error.to_string();
         if message.contains("did not hold the expected state") {
-            "Instruction file changed since this editor opened. Refresh the catalog and try again."
+            "Memory or instruction file changed since this editor opened. Refresh the catalog and try again."
                 .to_owned()
         } else {
             message
@@ -331,45 +323,54 @@ fn selected_instruction(paths: &[PathBuf]) -> Result<Option<PathBuf>, String> {
     Ok(None)
 }
 
-fn collect_markdown(
+fn collect_memory_files(
     root: &Path,
-    boundary: &Path,
-    group_id: &str,
-    source: MemorySource,
-    editable: bool,
-    load_behavior: &str,
+    memory_root: &Path,
     out: &mut BTreeMap<PathBuf, Candidate>,
 ) -> Result<(), String> {
     for path in safe_entries(root)? {
+        if path
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case(".git"))
+        {
+            continue;
+        }
         let metadata = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
         if atomic::is_link_or_reparse(&metadata) {
             continue;
         }
         if metadata.is_dir() {
-            collect_markdown(
-                &path,
-                boundary,
-                group_id,
-                source,
-                editable,
-                load_behavior,
-                out,
-            )?;
-        } else if metadata.is_file()
-            && path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
-        {
+            collect_memory_files(&path, memory_root, out)?;
+        } else if metadata.is_file() && is_memory_file(memory_root, &path) {
             let canonical = std::fs::canonicalize(&path).map_err(|error| error.to_string())?;
-            if canonical.starts_with(boundary) {
+            if is_memory_file(memory_root, &canonical) {
+                let (role, load_behavior) =
+                    match canonical.strip_prefix(memory_root).unwrap().to_str() {
+                        Some("MEMORY.md") => (
+                            MemoryRole::Index,
+                            "Consolidated memory entries and references to supporting files.",
+                        ),
+                        Some("memory_summary.md") => (
+                            MemoryRole::Summary,
+                            "High-level overview of saved memories.",
+                        ),
+                        Some("raw_memories.md") => (
+                            MemoryRole::Raw,
+                            "Recent memory inputs used during consolidation.",
+                        ),
+                        _ if canonical.starts_with(memory_root.join("rollout_summaries")) => {
+                            (MemoryRole::Evidence, "Supporting notes from a prior chat.")
+                        }
+                        _ => (MemoryRole::Topic, "Additional memory or extension notes."),
+                    };
                 out.insert(
                     canonical.clone(),
                     Candidate {
                         path: canonical,
-                        group_id: group_id.to_owned(),
-                        source,
-                        role: MemoryRole::Topic,
-                        editable,
+                        group_id: "global-auto-memory".to_owned(),
+                        source: MemorySource::GlobalAutoMemory,
+                        role,
+                        editable: true,
                         load_behavior: load_behavior.to_owned(),
                     },
                 );
@@ -377,6 +378,16 @@ fn collect_markdown(
         }
     }
     Ok(())
+}
+
+pub(crate) fn is_memory_file(memory_root: &Path, path: &Path) -> bool {
+    path.strip_prefix(memory_root).is_ok_and(|relative| {
+        relative.components().all(|part| {
+            matches!(part, std::path::Component::Normal(name) if !name.eq_ignore_ascii_case(".git"))
+        })
+    }) && path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
 }
 
 fn add_group(
@@ -541,12 +552,30 @@ mod tests {
     }
 
     #[test]
-    fn catalog_separates_generated_memory_from_editable_instructions_and_indexes_links() {
+    fn catalog_identifies_editable_memory_types_excludes_git_and_indexes_instruction_links() {
         let (_temp, harness, project) = fixture();
-        let generated = harness.config_root().join("memories/notes/topic.md");
-        std::fs::create_dir_all(generated.parent().unwrap()).unwrap();
-        std::fs::write(&generated, "Generated notes.").unwrap();
-        let generated = std::fs::canonicalize(generated).unwrap();
+        let memory_root = harness.config_root().join("memories");
+        let memory_types = [
+            ("MEMORY.md", MemoryRole::Index),
+            ("memory_summary.md", MemoryRole::Summary),
+            ("raw_memories.md", MemoryRole::Raw),
+            ("rollout_summaries/chat.md", MemoryRole::Evidence),
+            ("extensions/ad_hoc/notes/topic.md", MemoryRole::Topic),
+        ];
+        for (relative, _) in &memory_types {
+            let path = memory_root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "Generated notes.").unwrap();
+        }
+        for relative in [
+            ".git/internal.md",
+            "extensions/.git/internal.md",
+            "state.sqlite",
+        ] {
+            let path = memory_root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "Not a memory.").unwrap();
+        }
         let root_instruction = project.join("AGENTS.md");
         let nested = project.join("child");
         std::fs::create_dir_all(&nested).unwrap();
@@ -559,21 +588,21 @@ mod tests {
         let root_instruction = std::fs::canonicalize(root_instruction).unwrap();
 
         let catalog = catalog(&harness, &nested).unwrap();
-        let generated_entry = catalog
+        let generated: Vec<_> = catalog
             .files
             .iter()
-            .find(|file| file.path == generated.to_string_lossy())
-            .unwrap();
-        assert_eq!(generated_entry.source, MemorySource::GlobalAutoMemory);
-        assert!(!generated_entry.editable);
-        assert!(edit(
-            &harness,
-            &nested,
-            &generated_entry.id,
-            "Generated notes.",
-            "changed"
-        )
-        .is_err());
+            .filter(|file| file.source == MemorySource::GlobalAutoMemory)
+            .collect();
+        assert_eq!(generated.len(), memory_types.len());
+        for (relative, role) in memory_types {
+            let path = std::fs::canonicalize(memory_root.join(relative)).unwrap();
+            let file = generated
+                .iter()
+                .find(|file| Path::new(&file.path) == path)
+                .unwrap();
+            assert_eq!(file.role, role);
+            assert!(file.editable);
+        }
         let link_file = catalog
             .files
             .iter()

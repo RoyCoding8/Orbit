@@ -61,6 +61,9 @@ pub enum MemoryRole {
     Topic,
     Instruction,
     Rule,
+    Summary,
+    Raw,
+    Evidence,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -617,6 +620,9 @@ fn role_order(role: MemoryRole) -> u8 {
         MemoryRole::Topic => 1,
         MemoryRole::Instruction => 2,
         MemoryRole::Rule => 3,
+        MemoryRole::Summary => 4,
+        MemoryRole::Raw => 5,
+        MemoryRole::Evidence => 6,
     }
 }
 

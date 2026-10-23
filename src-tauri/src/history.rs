@@ -704,6 +704,15 @@ fn codex_target_scope(
         label: label.into(),
         kind: VersionKind::File,
     };
+    if resource == "memory"
+        && crate::harness::codex::memories::is_memory_file(&config.join("memories"), target)
+    {
+        return Some(file(
+            HistoryScope::Global,
+            "global-auto-memory",
+            "Codex generated memory",
+        ));
+    }
     if matches!(resource, "settings" | "mcpserver") {
         if target == config.join("config.toml") || target == config.join("hooks.json") {
             return Some(file(HistoryScope::Global, "global", "Global configuration"));
@@ -1212,6 +1221,112 @@ mod tests {
             config_root,
         });
         (dir, harness, project)
+    }
+
+    #[test]
+    fn codex_memory_edits_and_deletions_have_restorable_global_versions() {
+        use crate::harness::codex::{memories, CodexHarness};
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let config = home.join("codex");
+        let project = home.join("project");
+        let memory_root = config.join("memories");
+        let topic = memory_root.join("notes/topic.md");
+        let index = memory_root.join("MEMORY.md");
+        std::fs::create_dir_all(topic.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(&index, "See [topic](notes/topic.md).\n").unwrap();
+        std::fs::write(&topic, "Original memory.\n").unwrap();
+        let harness = CodexHarness::new(config, home);
+        let catalog = memories::catalog(&harness, &project).unwrap();
+        let file = catalog
+            .files
+            .iter()
+            .find(|file| Path::new(&file.path) == topic)
+            .unwrap();
+
+        memories::edit(
+            &harness,
+            &project,
+            &file.id,
+            &file.content,
+            "Corrected memory.\n",
+        )
+        .unwrap();
+        let row_count = ledger::read(harness.config_root()).unwrap().len();
+        assert!(
+            memories::edit(&harness, &project, &file.id, &file.content, "Stale draft.")
+                .unwrap_err()
+                .contains("changed since")
+        );
+        assert_eq!(
+            ledger::read(harness.config_root()).unwrap().len(),
+            row_count
+        );
+        assert_eq!(
+            std::fs::read_to_string(&topic).unwrap(),
+            "Corrected memory.\n"
+        );
+
+        let snapshot = load(&harness, &project).unwrap();
+        let version = snapshot
+            .versions
+            .iter()
+            .find(|version| version.target == topic)
+            .unwrap();
+        assert_eq!(version.scope, HistoryScope::Global);
+        restore(
+            &harness,
+            &project,
+            &version.id,
+            version.current_checksum.as_deref(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&topic).unwrap(),
+            "Original memory.\n"
+        );
+
+        memories::delete(&harness, &project, &file.id, &file.content).unwrap();
+        assert!(!topic.exists());
+        assert_eq!(std::fs::read_to_string(&index).unwrap(), "See .\n");
+        let snapshot = load(&harness, &project).unwrap();
+        for (target, action) in [(&topic, "delete"), (&index, "edit")] {
+            let version = snapshot
+                .versions
+                .iter()
+                .find(|version| &version.target == target && version.action == action)
+                .unwrap();
+            restore(
+                &harness,
+                &project,
+                &version.id,
+                version.current_checksum.as_deref(),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            std::fs::read_to_string(&topic).unwrap(),
+            "Original memory.\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&index).unwrap(),
+            "See [topic](notes/topic.md).\n"
+        );
+        assert!(codex_target_scope(
+            &harness,
+            &project,
+            "memory",
+            &memory_root.join(".git/internal.md")
+        )
+        .is_none());
+        assert!(codex_target_scope(
+            &harness,
+            &project,
+            "memory",
+            &memory_root.join("state.sqlite")
+        )
+        .is_none());
     }
 
     #[test]
