@@ -37,6 +37,12 @@ struct Document {
     lines: usize,
 }
 
+pub(super) fn stage_conversion(root: &Path, id: &str, bytes: &[u8]) -> Result<(), String> {
+    let manifest = json!({"format": FORMAT, "version": 1, "sessionId": id,
+        "sha256": atomic::hex(&Sha256::digest(bytes))});
+    super::conversion::stage_archive(root, "session.jsonl", bytes, &manifest)
+}
+
 pub fn ingest(
     config: &Path,
     cache: &Path,

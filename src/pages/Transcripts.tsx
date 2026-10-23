@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useHarness } from "../HarnessContext";
 import { open } from "@tauri-apps/plugin-dialog";
+import { ChatConversion } from "./ChatConversion";
 
 type Session = {
   sessionId: string;
@@ -71,6 +72,7 @@ export function Transcripts() {
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [searched, setSearched] = useState(false);
   const [pending, setPending] = useState(false);
+  const [converting, setConverting] = useState<string | null>(null);
   const [notice, setNotice] = useState(
     `Index the configured ${label} sessions directory to browse chats.`,
   );
@@ -443,6 +445,8 @@ export function Transcripts() {
             </h3>
             {selectedSession && (
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button type="button" className="secondary-action" disabled={busy}
+                  onClick={() => setConverting(selectedSession)}>Convert chat</button>
                 <button
                   type="button"
                   className="secondary-action"
@@ -516,6 +520,7 @@ export function Transcripts() {
           )}
         </div>
       </div>
+      {converting && <ChatConversion sessionId={converting} onClose={() => setConverting(null)} onConverted={setNotice} />}
     </section>
   );
 }

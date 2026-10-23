@@ -599,6 +599,47 @@ async fn transcript_import_directory(
 }
 
 #[tauri::command]
+async fn transcript_conversion_preview(
+    app: tauri::AppHandle,
+    session_id: String,
+    client: Option<Client>,
+) -> Result<transcript::conversion::Preview, String> {
+    run_blocking(move || {
+        transcript::conversion::preview(
+            &SelectedHarness::from_env(client),
+            &app_data_dir(&app)?,
+            &session_id,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn transcript_convert(
+    app: tauri::AppHandle,
+    session_id: String,
+    target_client: Client,
+    project_roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+    client: Option<Client>,
+) -> Result<transcript::conversion::ConversionReport, String> {
+    let roots = project_roots.inner().clone();
+    run_blocking(move || {
+        let project = project_root
+            .map(|path| roots.resolve(Some(path)))
+            .transpose()?;
+        transcript::conversion::convert(
+            &SelectedHarness::from_env(client),
+            &SelectedHarness::from_env(Some(target_client)),
+            &app_data_dir(&app)?,
+            &session_id,
+            project.as_deref(),
+        )
+    })
+    .await
+}
+
+#[tauri::command]
 async fn config_load(
     project_roots: State<'_, ProjectRoots>,
     project_root: Option<String>,
@@ -721,7 +762,9 @@ pub fn run() {
             transcript_search,
             transcript_export_markdown,
             transcript_export_directory,
-            transcript_import_directory
+            transcript_import_directory,
+            transcript_conversion_preview,
+            transcript_convert
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

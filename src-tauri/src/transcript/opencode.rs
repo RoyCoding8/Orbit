@@ -49,6 +49,16 @@ struct NativeSessionListItem {
     title: Option<String>,
 }
 
+pub(super) fn stage_conversion(root: &Path, id: &str, bytes: &[u8]) -> Result<(), String> {
+    let manifest = Manifest {
+        version: ARCHIVE_VERSION,
+        source_session_id: id.into(),
+        data_file: DATA_FILE.into(),
+        sha256: format!("{:x}", Sha256::digest(bytes)),
+    };
+    super::conversion::stage_archive(root, DATA_FILE, bytes, &manifest)
+}
+
 pub fn ingest(app_data_dir: &Path, project: &Path) -> Result<IngestReport, TranscriptError> {
     ingest_in_project(app_data_dir, Some(project), &CliEnvironment::default())
 }
@@ -646,7 +656,7 @@ fn native_cli(
     run_bounded_cli(command)
 }
 
-fn native_executable() -> Result<PathBuf, String> {
+pub(super) fn native_executable() -> Result<PathBuf, String> {
     static EXECUTABLE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     EXECUTABLE
         .get_or_init(resolve_and_check_native_executable)

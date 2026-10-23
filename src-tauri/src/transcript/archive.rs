@@ -73,6 +73,43 @@ struct SourceFamily {
     directories: Vec<String>,
 }
 
+pub(super) fn stage_claude_conversion(root: &Path, id: &str, bytes: &[u8]) -> Result<(), String> {
+    let file = format!("{id}.jsonl");
+    let manifest = Manifest {
+        version: MANIFEST_VERSION,
+        source_session_id: format!("converted/{file}"),
+        source_project_key: "converted".into(),
+        session_file: file.clone(),
+        family_directory: id.into(),
+        directories: vec![],
+        files: vec![ManifestFile {
+            path: file.clone(),
+            sha256: format!("{:x}", Sha256::digest(bytes)),
+        }],
+    };
+    super::conversion::stage_archive(root, &file, bytes, &manifest)
+}
+
+pub(super) fn stage_codex_conversion(
+    root: &Path,
+    id: &str,
+    title: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let manifest = CodexManifest {
+        version: MANIFEST_VERSION,
+        source_session_id: id.into(),
+        title: title.into(),
+        rollout_file: "rollout.jsonl".into(),
+        files: vec![ManifestFile {
+            path: "rollout.jsonl".into(),
+            sha256: format!("{:x}", Sha256::digest(bytes)),
+        }],
+        attachments: vec![],
+    };
+    super::conversion::stage_archive(root, "rollout.jsonl", bytes, &manifest)
+}
+
 /// Copy one native Claude Code session and its session-stem directory into a
 /// new directory under `destination`. The archive preserves file bytes; the
 /// manifest contains only relative paths and checksums.
@@ -437,13 +474,23 @@ fn checked_codex_rollout(home: &Path, source: &Path) -> Result<PathBuf, String> 
     Ok(path)
 }
 
-fn read_codex_rollout(path: &Path) -> Result<String, String> {
-    let mut reader = open_codex_rollout_reader(path)?;
-    let mut contents = String::new();
-    reader
-        .read_to_string(&mut contents)
+pub(super) fn read_codex_rollout(path: &Path) -> Result<String, String> {
+    read_codex_rollout_bounded(path, 256 * 1024 * 1024)
+}
+
+fn read_codex_rollout_bounded(path: &Path, max_bytes: u64) -> Result<String, String> {
+    let mut contents = Vec::new();
+    open_codex_rollout_reader(path)?
+        .take(max_bytes + 1)
+        .read_to_end(&mut contents)
         .map_err(|error| format!("Could not read Codex rollout contents: {error}"))?;
-    Ok(contents)
+    if contents.len() as u64 > max_bytes {
+        return Err(format!(
+            "Codex rollout exceeds the {max_bytes}-byte uncompressed size limit."
+        ));
+    }
+    String::from_utf8(contents)
+        .map_err(|error| format!("Could not read Codex rollout contents: {error}"))
 }
 
 fn open_codex_rollout_reader(path: &Path) -> Result<Box<dyn BufRead>, String> {
@@ -740,7 +787,7 @@ fn remove_codex_import(rollout: &Path, attachment_root: &Path, attachment_stage:
     let _ = fs::remove_dir_all(attachment_stage);
 }
 
-fn current_codex_timestamp() -> (String, (String, String, String), String) {
+pub(super) fn current_codex_timestamp() -> (String, (String, String, String), String) {
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -1680,6 +1727,29 @@ mod tests {
     use super::*;
     use std::path::Path;
     use tempfile::tempdir;
+
+    #[test]
+    fn codex_rollout_limit_applies_to_decompressed_bytes() {
+        let temp = tempdir().unwrap();
+        let contents = "a".repeat(4096) + "雪";
+        for (name, bytes) in [
+            ("rollout.jsonl", contents.as_bytes().to_vec()),
+            (
+                "rollout.jsonl.zst",
+                zstd::stream::encode_all(contents.as_bytes(), 1).unwrap(),
+            ),
+        ] {
+            let path = temp.path().join(name);
+            fs::write(&path, bytes).unwrap();
+            assert_eq!(
+                read_codex_rollout_bounded(&path, contents.len() as u64).unwrap(),
+                contents
+            );
+            assert!(read_codex_rollout_bounded(&path, contents.len() as u64 - 1)
+                .unwrap_err()
+                .contains("uncompressed size limit"));
+        }
+    }
 
     #[test]
     fn interrupted_install_removes_its_partial_file_without_overwriting_existing_files() {

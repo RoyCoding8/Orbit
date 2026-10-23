@@ -20,7 +20,7 @@ Choose the coding agent in the header. Claude Code is selected initially. Orbit 
 | <img src="assets/icons/mcp.svg" alt="" width="24" /> | **MCP servers** | Manage local stdio and remote HTTP servers, then test their connections. |
 | <img src="assets/icons/hooks.svg" alt="" width="24" /> | **Hooks** | Inspect user, project, and inherited hooks. Edit supported command hooks and test commands with sample JSON input. |
 | <img src="assets/icons/settings.svg" alt="" width="24" /> | **Settings** | Inspect configuration layers, edit one key at a time, and undo a recorded change when the file has not changed since. |
-| <img src="assets/icons/transcripts.svg" alt="" width="24" /> | **Transcripts** | Index sessions, search messages, follow conversation branches, and export or import native chat archives to a chosen project. Markdown export is also available. |
+| <img src="assets/icons/transcripts.svg" alt="" width="24" /> | **Transcripts** | Index sessions, search messages, follow conversation branches, export or import native archives, and convert chats between supported agents. Keep the original working directory or choose another. Markdown export is also available. |
 | | **History** | Browse saved versions separately from operation logs, restore a version, or delete a saved backup. |
 
 Support follows each agent's native formats:
@@ -33,6 +33,7 @@ Support follows each agent's native formats:
 | Hooks | Command hooks, enable/disable, test | Command hooks and test; approval in Codex | V2 agent hooks and V3 hooks; Markdown profiles read-only | Native JavaScript plugins; configure their list in Settings | Native JavaScript/TypeScript extensions; configure their list in Settings |
 | Settings | User/project/local | User/trusted project TOML | User/project CLI JSON | User/project JSON or JSONC, preserving comments | User/project JSON; nested values merge and resource lists combine |
 | Transcripts | Search and native archive import/export | Search and native archive import/export | V2 ACP search and source backup export | Index selected projects, search, native CLI archive import/export | Index selected projects, search branches, native v3 JSONL archive import/export |
+| Chat conversion | Source and destination | Source and destination | V2 ACP source only | Source and destination through native v2 CLI | Source and destination for v3 JSONL sessions |
 | History | Versions, restore, backup deletion, separate logs | Same | Same for supported local resources | Same for supported local resources | Same for supported local resources |
 
 Kiro's learned memories belong to its account service. OpenCode and Pi have no built-in generated-memory file catalog. Kiro, OpenCode, and Pi have no native per-skill enable switch, so Orbit offers editing and removal with restorable backups. Inherited skills and instructions outside the selected project are read-only. MCP editing currently covers user configuration; project and agent overrides can change the running session.
@@ -42,6 +43,10 @@ Kiro V3, terminal, and cloud transcripts are not indexed. V2 ACP source backups 
 For OpenCode, choose a project on the Transcripts page before indexing. Chats from previously indexed projects remain searchable. Imports use the selected destination project and add a numeric suffix when a chat title already exists. Archives preserve the native session payload; external files referenced by a chat are not bundled.
 
 Pi also indexes the selected project's chats and retains previously indexed projects for search. Its archives preserve native tree records, unknown entry fields, and inline images. Import assigns a fresh session ID, changes the working directory, preserves entry links, and suffixes duplicate titles. Session paths follow Pi's environment override, project/user `sessionDir`, or default project directory. Explicit CLI session-directory overrides are outside Orbit's settings preview.
+
+To convert a chat, select it in Transcripts and choose **Convert chat**. Choose the destination agent and optionally change the working directory. Leaving it unchanged uses the directory recorded in the source chat, rather than Orbit's launch folder. Conversion creates a separate native chat and leaves the source intact. Duplicate destination titles receive numeric suffixes.
+
+Conversion preserves conversation text and inline images on the latest active branch. Historical tool calls and results become text; they are not replayed as tools. Signed reasoning, source system/developer instructions, and runtime state do not transfer. External attachments remain references, while available Codex image archive assets are embedded. Alternate branches stay in the source. The dialog reports conversion details, and unresolved partial OpenCode revert boundaries must be resolved in OpenCode first. Kiro has no verified transcript creation API and cannot be a destination. Use native archives when you need to preserve an agent's full original session structure.
 
 Pi project trust, package expansion, and resource filters determine what Pi actually loads. Orbit discovers local skill files and literal configured paths; it does not evaluate package or glob rules. Extension code, trust decisions, and authentication state stay with Pi. MCP tests refuse OAuth, dynamic environment/command references, and relative working directories that need Pi's runtime context.
 
@@ -53,7 +58,7 @@ Pi project trust, package expansion, and resource filters determine what Pi actu
 - Codex CLI on `PATH` for Codex skill discovery. Native skill discovery and imported chat resume are verified against Codex 0.163.0.
 - OpenCode v2 CLI on `PATH` for its transcript features. Native format checks target OpenCode v2.1.3; v1 is not supported.
 - Kiro native file adapters target CLI 2.32.0, including V2 and opt-in V3 hook formats.
-- Pi adapters target the [v1.4.0 native formats](https://github.com/earendil-works/pi/tree/v1.4.0/packages/coding-agent/docs), including v3 sessions. Fixture checks pass locally; live Pi acceptance remains unverified because Pi is not installed in this environment.
+- Pi adapters target the [v1.4.0 native formats](https://github.com/earendil-works/pi/tree/v1.4.0/packages/coding-agent/docs), including v3 sessions. Native Pi 1.4.0 cold-loads converted chats through RPC and preserves text, inline images, titles, and original or overridden working directories. Checks run offline without a model prompt.
 
 On Ubuntu, Tauri's native build dependencies include WebKitGTK 4.1, GTK 3, and Ayatana AppIndicator. Install the packages before building:
 
@@ -108,6 +113,12 @@ The OpenCode native archive test requires an installed v2 CLI. It uses temporary
 
 ```sh
 cargo test --manifest-path src-tauri/Cargo.toml native_v2_cli_accepts_isolated_api_fixture_and_roundtrips_archive_collision --lib -- --ignored --nocapture
+```
+
+The optional conversion checks cold-read/resume converted chats in Codex and Pi and import/re-export one in OpenCode v2. They use disposable homes and storage and send no model prompt:
+
+```sh
+cargo test --manifest-path src-tauri/Cargo.toml transcript::conversion::tests::native_ --lib -- --ignored --nocapture
 ```
 
 GitHub Actions runs these checks on Ubuntu, macOS, and Windows for pushes and pull requests. The Windows workflow also builds the NSIS installer with:
