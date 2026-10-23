@@ -102,11 +102,3 @@ impl Harness for CodexHarness {
         })
     }
 }
-
-#[derive(Debug, Default, Clone, Copy, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Client {
-    #[default]
-    ClaudeCode,
-    Codex,
-}

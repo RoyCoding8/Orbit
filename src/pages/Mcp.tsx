@@ -227,7 +227,7 @@ export function McpPage() {
   };
 
   return (
-    <section className="content-pane mcp-page" aria-labelledby="mcp-title">
+    <section className="content-pane mcp-page" aria-labelledby="mcp-title" tabIndex={0}>
       <div className="pane-heading">
         <div>
           <p className="eyebrow">HARNESS CONFIGURATION</p>
@@ -274,7 +274,7 @@ export function McpPage() {
           </p>
         </div>
       ) : (
-        <div className="mcp-list">
+        <div className="mcp-list" role="region" tabIndex={0} aria-label="MCP servers">
           {servers.map((server) => (
             <article className="mcp-card" key={server.name}>
               <div className="mcp-card-heading">
@@ -322,19 +322,22 @@ export function McpPage() {
                   </button>
                 </div>
               </div>
-              <p className="mcp-summary">
+              <p className="mcp-summary" tabIndex={0}>
                 {server.kind === "stdio"
                   ? `${String(server.entry.command ?? "")} ${Array.isArray(server.entry.args) ? server.entry.args.join(" ") : ""}`
                   : String(server.entry.url ?? server.entry.serverUrl ?? "")}
               </p>
               {server.entry.env || server.entry.headers ? (
-                <pre className="mcp-secrets">
-                  {JSON.stringify(
-                    server.entry.env ?? server.entry.headers,
-                    null,
-                    2,
-                  )}
-                </pre>
+                <details className="mcp-details">
+                  <summary>Connection details (masked)</summary>
+                  <pre className="mcp-secrets" tabIndex={0}>
+                    {JSON.stringify(
+                      server.entry.env ?? server.entry.headers,
+                      null,
+                      2,
+                    )}
+                  </pre>
+                </details>
               ) : null}
               {bench?.name === server.name && (
                 <div className="mcp-bench" aria-live="polite">
@@ -344,11 +347,14 @@ export function McpPage() {
                         {bench.result.tools.length} tools ·{" "}
                         {bench.result.latency_ms} ms
                       </strong>
-                      <ul>
-                        {bench.result.tools.map((tool) => (
-                          <li key={tool}>{tool}</li>
-                        ))}
-                      </ul>
+                      <details>
+                        <summary>Tool names ({bench.result.tools.length})</summary>
+                        <ul tabIndex={0}>
+                          {bench.result.tools.map((tool) => (
+                            <li key={tool}>{tool}</li>
+                          ))}
+                        </ul>
+                      </details>
                     </>
                   ) : bench.error ? (
                     <p className="mcp-error">{bench.error}</p>

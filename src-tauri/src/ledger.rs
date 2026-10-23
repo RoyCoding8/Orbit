@@ -286,6 +286,30 @@ pub(crate) fn write(
     })
 }
 
+pub(crate) fn write_text(
+    config_root: &Path,
+    kind: ResourceKind,
+    id: &str,
+    action: &str,
+    path: &Path,
+    expected: &str,
+    content: &str,
+) -> Result<(), LedgerWriteError> {
+    write(
+        config_root,
+        kind,
+        id,
+        action,
+        path,
+        atomic::RecordedWrite::Restore(
+            Sha256::digest(expected.as_bytes()).into(),
+            content.as_bytes(),
+        ),
+        Some(&backup_path(config_root, id, action)),
+    )
+    .map(|_| ())
+}
+
 pub fn remove_file(
     config_root: &Path,
     kind: ResourceKind,

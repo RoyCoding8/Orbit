@@ -58,8 +58,9 @@ const PAGE_SIZE = 100;
 const SEARCH_LIMIT = 50;
 
 export function Transcripts() {
-  const { invoke, client, label } = useHarness();
+  const { invoke, label, profile } = useHarness();
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [projectRoot, setProjectRoot] = useState<string | null>(null);
   const [sessionState, setSessionState] = useState<
     "loading" | "ready" | "error"
   >("loading");
@@ -115,7 +116,7 @@ export function Transcripts() {
     setPending(true);
     setNotice("Reading transcript files into the local index…");
     try {
-      const report = await invoke<IngestReport>("transcript_ingest");
+      const report = await invoke<IngestReport>("transcript_ingest", profile.transcripts.scope === "project" ? { projectRoot } : undefined);
       const nextSessions = await refreshSessions();
       const skipped = [
         report.malformedLines > 0
@@ -320,23 +321,31 @@ export function Transcripts() {
     <section
       className="content-pane transcript-pane"
       aria-labelledby="transcripts-title"
+      tabIndex={0}
     >
       <div className="pane-heading">
         <div>
           <p className="eyebrow">LOCAL HISTORY</p>
           <h2 id="transcripts-title">Transcripts</h2>
           <p className="supporting-copy">
-            Browse {label} sessions, search messages, and export native chat archives.
+            Browse {label} sessions and search messages.{profile.transcripts.archive === "migration" && " Export native chat archives for migration."}
           </p>
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {profile.transcripts.scope === "project" && <button
+            className="secondary-action" type="button" disabled={busy}
+            onClick={() => void invoke<string | null>("project_choose").then(selected => {
+              if (selected) setProjectRoot(selected);
+            }).catch(error => setNotice(`Could not choose a project. ${String(error)}`))}
+          >Choose project</button>}
           <button
             className="secondary-action"
             type="button"
             onClick={() => void importArchive()}
-            disabled={busy}
+            disabled={busy || profile.transcripts.archive !== "migration"}
+            title={profile.transcripts.archive === "migration" ? undefined : profile.transcripts.note}
           >
-            Import {client === "codex" ? "Codex" : "Claude"} archive
+            Import {profile.archiveLabel} archive
           </button>
           <button
             className="primary-action"
@@ -348,6 +357,8 @@ export function Transcripts() {
           </button>
         </div>
       </div>
+      {profile.transcripts.note && <p className="supporting-copy">{profile.transcripts.note}</p>}
+      {profile.transcripts.scope === "project" && <p className="quiet-copy">Indexing project: {projectRoot ?? "Launch folder"}</p>}
       <p className="transcript-notice" role="status">
         {notice}
       </p>
@@ -369,7 +380,7 @@ export function Transcripts() {
         </div>
       </form>
       <div className="transcript-layout">
-        <aside className="session-list" aria-label="Transcript sessions">
+        <aside className="session-list" aria-label="Transcript sessions" tabIndex={0}>
           <h3>
             Sessions <span>{sessions.length}</span>
           </h3>
@@ -437,8 +448,9 @@ export function Transcripts() {
                   className="secondary-action"
                   onClick={() => void exportArchive()}
                   disabled={busy}
+                  title={profile.transcripts.archive === "backup" ? profile.transcripts.note : undefined}
                 >
-                  Export {client === "codex" ? "Codex" : "Claude"} archive
+                  Export {profile.archiveLabel} {profile.transcripts.archive === "backup" ? "source backup" : "archive"}
                 </button>
                 <button
                   type="button"
@@ -456,7 +468,7 @@ export function Transcripts() {
               Choose a session or search the indexed history.
             </p>
           )}
-          <div className="thread-list">
+          <div className="thread-list" role="region" tabIndex={0} aria-label="Transcript messages">
             {messages.map((message) => (
               <article
                 className="message-card"
@@ -473,17 +485,17 @@ export function Transcripts() {
                       : ""}
                   </span>
                 </header>
-                {message.text && <pre>{message.text}</pre>}
+                {message.text && <pre tabIndex={0}>{message.text}</pre>}
                 {message.attachment && (
                   <details>
                     <summary>Attachment</summary>
-                    <pre>{message.attachment}</pre>
+                    <pre tabIndex={0}>{message.attachment}</pre>
                   </details>
                 )}
                 {message.toolResult && (
-                  <details open>
+                  <details>
                     <summary>Tool result</summary>
-                    <pre>{message.toolResult}</pre>
+                    <pre tabIndex={0}>{message.toolResult}</pre>
                   </details>
                 )}
                 {message.toolResultNote && (

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { Memories, type MemoryCatalog } from "./Memories";
+import { HarnessProvider } from "../HarnessContext";
 
 const catalog: MemoryCatalog = {
   projectRoot: "D:/workspace/orbit",
@@ -54,11 +55,69 @@ function installCatalog(initial = catalog) {
 }
 
 describe("Memories", () => {
+  it("edits project sections within one checked file while retaining other sections and CRLF", async () => {
+    const first = "# Task Group: First\r\napplies_to: cwd=D:\\Projects\\One\r\n\r\nFirst stays.\r\n\r\n";
+    const second = "# Task Group: Second\r\napplies_to: cwd=D:\\Projects\\Two\r\n\r\nSecond changes.\r\n\r\n";
+    const shared = "# Shared preferences\r\n\r\nShared stays.\r\n";
+    const original = first + second + shared;
+    let persisted = original;
+    const ipc = vi.fn((command: string, args?: unknown) => {
+      if (command === "memory_catalog") return {
+        ...catalog, groups: [{ id: "global", label: "Codex generated memory", role: "globalAutoMemory" }],
+        files: [{ ...catalog.files[0], groupId: "global", source: "globalAutoMemory", content: persisted }],
+      };
+      if (command === "memory_edit" && args && typeof args === "object" && "content" in args && typeof args.content === "string") {
+        persisted = args.content;
+        return null;
+      }
+      throw new Error("Unexpected command " + command);
+    });
+    mockIPC(ipc);
+    render(<HarnessProvider client="codex"><Memories /></HarnessProvider>);
+    const navigation = await screen.findByRole("navigation", { name: "Memory sections" });
+    expect(within(navigation).getByRole("heading", { name: "D:\\Projects\\One" })).toBeInTheDocument();
+    expect(within(navigation).getByRole("heading", { name: "D:\\Projects\\Two" })).toBeInTheDocument();
+    expect(within(navigation).getByRole("heading", { name: "Project not stated" })).toBeInTheDocument();
+    fireEvent.click(within(navigation).getByRole("button", { name: "Task Group: Second" }));
+    const editor = screen.getByLabelText(/Markdown content/);
+    expect(editor).toHaveValue(second.replace(/\r\n/g, "\n"));
+    fireEvent.change(editor, { target: { value: "# Renamed second\napplies_to: cwd=D:\\Projects\\Two\n\nRevised." } });
+    fireEvent.change(editor, { target: { value: "# Renamed second\napplies_to: cwd=D:\\Projects\\Two\n\nRevised again.\n\n" } });
+    fireEvent.click(within(navigation).getByRole("button", { name: "Task Group: First" }));
+    expect(screen.getByLabelText(/Markdown content/)).toHaveValue(first.replace(/\r\n/g, "\n"));
+    fireEvent.click(within(navigation).getByRole("button", { name: "Whole file" }));
+    const expected = first + "# Renamed second\r\napplies_to: cwd=D:\\Projects\\Two\r\n\r\nRevised again.\r\n\r\n" + shared;
+    expect(screen.getByLabelText(/Markdown content/)).toHaveValue(expected.replace(/\r\n/g, "\n"));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled());
+    expect(screen.getByLabelText(/Markdown content/)).toHaveValue(expected.replace(/\r\n/g, "\n"));
+    expect(persisted).toBe(expected);
+    expect(ipc).toHaveBeenCalledWith("memory_edit", { client: "codex", projectRoot: catalog.projectRoot, id: "index", expectedContent: original, content: expected });
+  });
+
+  it("retains whole-file access after removing a section heading and rejecting a stale save", async () => {
+    const content = "# One\nOriginal.\n\n# Two\nUnchanged.\n";
+    mockIPC((command: string) => {
+      if (command === "memory_catalog") return { ...catalog, files: [{ ...catalog.files[0], source: "globalAutoMemory", content }] };
+      if (command === "memory_edit") throw new Error("Memory changed since this editor opened.");
+      throw new Error("Unexpected command " + command);
+    });
+    render(<HarnessProvider client="codex"><Memories /></HarnessProvider>);
+    const editor = await screen.findByLabelText(/Markdown content/);
+    fireEvent.change(editor, { target: { value: "My draft survives without a heading.\n\n" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Memory changed since");
+    expect(screen.getByLabelText(/Markdown content/)).toHaveValue("My draft survives without a heading.\n\n");
+    fireEvent.click(screen.getByRole("button", { name: "Whole file" }));
+    expect(screen.getByLabelText(/Markdown content/)).toHaveValue("My draft survives without a heading.\n\n# Two\nUnchanged.\n");
+  });
+
   it("groups project-scoped auto memory, distinguishes load behavior, and navigates known links only", async () => {
     installCatalog();
     render(<Memories />);
     expect(await screen.findByText("Project auto memory · orbit-project")).toBeInTheDocument();
     expect(screen.getByText(/First 200 lines or 25 KB/)).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Connections"));
     expect(screen.getByText(/Context import/)).toBeInTheDocument();
     expect(screen.getAllByText(/^Markdown link ·/)).toHaveLength(2);
     fireEvent.click(screen.getByRole("button", { name: /architecture\.md Auto-memory topic/ }));
@@ -106,6 +165,7 @@ describe("Memories", () => {
     });
     expect(screen.getByLabelText("Markdown content")).toHaveValue("Only remaining [outside](../private.md).");
     expect(screen.queryByRole("button", { name: /architecture\.md Auto-memory topic/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("Connections"));
     expect(within(screen.getByRole("region", { name: "Memory connections" })).getByText("../private.md")).toBeInTheDocument();
   });
 

@@ -77,7 +77,7 @@ pub(super) fn spawn_capture<R: Read + Send + 'static>(
 /// Owns a spawned child and its descendants until protocol handling finishes.
 /// Dropping the guard tears down the process tree even when a caller returns
 /// early through an error path.
-pub(super) struct ChildTree {
+pub(crate) struct ChildTree {
     child: Child,
     cleaned: bool,
     #[cfg(windows)]
@@ -85,7 +85,7 @@ pub(super) struct ChildTree {
 }
 
 impl ChildTree {
-    pub(super) fn spawn(command: &mut Command) -> io::Result<Self> {
+    pub(crate) fn spawn(command: &mut Command) -> io::Result<Self> {
         #[cfg(unix)]
         {
             command.process_group(0);
@@ -109,13 +109,13 @@ impl ChildTree {
         }
     }
 
-    pub(super) fn child_mut(&mut self) -> &mut Child {
+    pub(crate) fn child_mut(&mut self) -> &mut Child {
         &mut self.child
     }
 
     /// Stop descendants as well as the direct child, including after the
     /// direct child has exited and left a process group or inherited pipe open.
-    pub(super) fn cleanup(&mut self) -> Option<ExitStatus> {
+    pub(crate) fn cleanup(&mut self) -> Option<ExitStatus> {
         if self.cleaned {
             return self.child.try_wait().ok().flatten();
         }

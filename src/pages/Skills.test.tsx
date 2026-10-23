@@ -31,6 +31,7 @@ it("restores the unconsumed backup after repeated uninstall cycles", async () =>
   });
   mockIPC(ipc);
   render(<Skills />);
+  fireEvent.click(await screen.findByText(/Recently uninstalled/));
   const restore = await screen.findByRole("button", { name: "Restore" });
   fireEvent.click(restore);
   await waitFor(() => expect(ipc).toHaveBeenCalledWith("skill_restore", { id: "alpha", backup: "new-backup" }));

@@ -3,7 +3,7 @@ pub mod history;
 pub mod ledger;
 pub mod transcript;
 
-use harness::{codex::Client, selected::SelectedHarness, Harness as _};
+use harness::{selected::SelectedHarness, Client, Harness as _};
 use serde_json::Value;
 use std::{
     collections::HashSet,
@@ -170,8 +170,22 @@ async fn hooks_list(
 }
 
 #[tauri::command]
+async fn hooks_sources(
+    project_roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+    client: Option<Client>,
+) -> Result<Vec<harness::kiro::hooks::HookSource>, String> {
+    let roots = project_roots.inner().clone();
+    run_blocking(move || {
+        let project = roots.resolve(project_root)?;
+        SelectedHarness::from_env(client).hooks_sources(&project)
+    })
+    .await
+}
+
+#[tauri::command]
 async fn hooks_save(
-    draft: harness::selected::HookDraft,
+    draft: harness::HookDraft,
     project_roots: State<'_, ProjectRoots>,
     project_root: Option<String>,
     client: Option<Client>,
@@ -207,6 +221,7 @@ async fn hooks_disable(
 async fn hooks_enable(
     app: tauri::AppHandle,
     id: String,
+    layer: Option<harness::claude::config::SettingsLayer>,
     project_roots: State<'_, ProjectRoots>,
     project_root: Option<String>,
     client: Option<Client>,
@@ -218,7 +233,7 @@ async fn hooks_enable(
         harness.hooks_set_enabled(
             &project,
             &app_data_dir(&app)?,
-            harness::claude::config::SettingsLayer::User,
+            layer.unwrap_or(harness::claude::config::SettingsLayer::User),
             &id,
             true,
         )
@@ -464,11 +479,14 @@ async fn skills_ledger(client: Option<Client>) -> Result<Vec<ledger::LedgerRow>,
 #[tauri::command]
 async fn transcript_ingest(
     app: tauri::AppHandle,
+    project_roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
     client: Option<Client>,
 ) -> Result<transcript::ingest::IngestReport, String> {
+    let roots = project_roots.inner().clone();
     run_blocking(move || {
         let harness = SelectedHarness::from_env(client);
-        harness.transcript_ingest(&app_data_dir(&app)?)
+        harness.transcript_ingest(&app_data_dir(&app)?, &roots.resolve(project_root)?)
     })
     .await
 }
@@ -684,6 +702,7 @@ pub fn run() {
             config_apply,
             config_undo,
             hooks_list,
+            hooks_sources,
             hooks_save,
             hooks_disable,
             hooks_enable,

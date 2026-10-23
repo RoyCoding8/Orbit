@@ -15,7 +15,7 @@ const layerNames: LayerName[] = ["user", "project", "local"];
 const emptySnapshot: Snapshot = { layers: [], effective: {} };
 
 export function Config() {
-  const { invoke, client, label } = useHarness();
+  const { invoke, label, profile } = useHarness();
   const [snapshot, setSnapshot] = useState<Snapshot>(emptySnapshot);
   const [activeLayer, setActiveLayer] = useState<LayerName>("user");
   const [projectRoot, setProjectRoot] = useState<string | null>(null);
@@ -120,7 +120,7 @@ export function Config() {
   };
 
   return (
-    <section className="config-page" aria-labelledby="config-title">
+    <section className="config-page" aria-labelledby="config-title" tabIndex={0}>
       <div className="pane-heading">
         <div>
           <p className="eyebrow">{label.toUpperCase()}</p>
@@ -154,7 +154,7 @@ export function Config() {
             role="tablist"
             aria-label="Settings layers"
           >
-            {layerNames.filter(layer => client !== "codex" || layer !== "local").map((layer) => (
+            {layerNames.filter(layer => profile.localSettings || layer !== "local").map((layer) => (
               <button
                 key={layer}
                 type="button"
@@ -194,7 +194,7 @@ export function Config() {
             onChange={(event) => setValueText(event.target.value)}
             rows={6}
             spellCheck={false}
-            placeholder={client === "codex" ? '"gpt-5-codex"' : '"sonnet"'}
+            placeholder={profile.modelExample}
           />
           <M3eButton
             variant="filled"
@@ -223,13 +223,13 @@ export function Config() {
             <div>
               <p className="eyebrow">RESOLVED SETTINGS</p>
               <h3 id="effective-title">Effective configuration</h3>
-              {client === "codex" && <p className="supporting-copy">Preview of user settings and trusted project files from the repository root to the selected folder. Profiles, command-line flags, environment and system overrides are not resolved here.</p>}
+              {profile.configNote && <p className="supporting-copy">{profile.configNote}</p>}
             </div>
             <span className="setting-count">
               {Object.keys(snapshot.effective).length} keys
             </span>
           </div>
-          {client === "codex" && snapshot.layers.some(layer => layer.name === "project_parent") && (
+          {snapshot.layers.some(layer => layer.name === "project_parent") && (
             <details>
               <summary>Inherited project files</summary>
               {snapshot.layers.filter(layer => layer.name === "project_parent").map(layer => <p key={layer.path} className="layer-path">{layer.path}</p>)}
@@ -251,7 +251,7 @@ export function Config() {
               No settings found in the available layers.
             </p>
           ) : (
-            <div className="effective-table-wrap">
+            <div className="effective-table-wrap" role="region" tabIndex={0} aria-label="Effective settings table">
               <table className="effective-table">
                 <thead>
                   <tr>
@@ -274,7 +274,7 @@ export function Config() {
                           </button>
                         </th>
                         <td>
-                          <code>{JSON.stringify(entry.value)}</code>
+                          <code tabIndex={0}>{JSON.stringify(entry.value)}</code>
                         </td>
                         <td>
                           <span

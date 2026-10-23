@@ -10,7 +10,7 @@
 .history-tabs button { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border: 0; border-radius: 999px; color: inherit; background: transparent; font: inherit; cursor: pointer; }
 .history-tabs button.selected { background: var(--md-sys-color-secondary-container, #e8def8); font-weight: 600; }
 .history-tabs button span, .history-group-heading > span { color: var(--md-sys-color-on-surface-variant, #49454f); font-size: 11px; }
-.history-panel { display: grid; gap: 20px; min-width: 0; }
+.history-panel { display: grid; flex-shrink: 0; gap: 20px; min-width: 0; min-height: 0; max-height: min(58vh, 640px); overflow: auto; overscroll-behavior: contain; padding: 2px; }
 .history-group { display: grid; gap: 10px; }
 .history-group-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--md-sys-color-outline-variant, #cac4d0); }
 .history-group-heading h3 { font-size: 16px; font-weight: 600; }

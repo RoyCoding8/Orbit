@@ -582,6 +582,12 @@ fn target_scope(
     if harness.id() == crate::harness::CODEX {
         return codex_target_scope(harness, project, kind, target);
     }
+    if matches!(
+        harness.id(),
+        crate::harness::KIRO | crate::harness::OPENCODE | crate::harness::PI
+    ) {
+        return native_target_scope(harness, project, row, target);
+    }
     let global_path = |path: PathBuf, version_kind| {
         (target == path).then(|| TargetScope {
             scope: HistoryScope::Global,
@@ -801,7 +807,146 @@ fn codex_target_scope(
     None
 }
 
-fn canonical_location(path: &Path) -> Option<PathBuf> {
+fn native_target_scope(
+    harness: &impl Harness,
+    project: &Path,
+    row: &LedgerRow,
+    target: &Path,
+) -> Option<TargetScope> {
+    let resource = row.resource_kind.as_str();
+    let config = canonical_location(harness.config_root())?;
+    let project = canonical_location(project)?;
+    let is_kiro = harness.id() == crate::harness::KIRO;
+    let is_pi = harness.id() == crate::harness::PI;
+    let scope = |kind| {
+        let is_global = !target.starts_with(&project)
+            || (target.starts_with(&config)
+                && !(project != config && project.starts_with(&config)));
+        TargetScope {
+            scope: if is_global {
+                HistoryScope::Global
+            } else {
+                HistoryScope::Project
+            },
+            id: if is_global {
+                "global".into()
+            } else {
+                project.to_string_lossy().into_owned()
+            },
+            label: if is_global {
+                "User resources".into()
+            } else {
+                project_label(&project)
+            },
+            kind,
+        }
+    };
+    if matches!(resource, "settings" | "mcpserver") {
+        let owned = if is_kiro {
+            [&config, &project.join(".kiro")].into_iter().any(|root| {
+                target == root.join("settings/cli.json")
+                    || target == root.join("settings/mcp.json")
+                    || ["agents", "hooks"]
+                        .iter()
+                        .any(|folder| single_file_below(&root.join(folder), target, "json"))
+            })
+        } else if is_pi {
+            [&config, &project.join(".pi")]
+                .into_iter()
+                .any(|root| target == root.join("settings.json") || target == root.join("mcp.json"))
+        } else {
+            [&config, &project, &project.join(".opencode")]
+                .into_iter()
+                .any(|root| {
+                    target == root.join("opencode.json") || target == root.join("opencode.jsonc")
+                })
+        };
+        return owned.then(|| scope(VersionKind::File));
+    }
+    if matches!(resource, "globalinstructions" | "projectinstructions") {
+        let owned = if is_kiro {
+            markdown_below(&config.join("steering"), target)
+                || crate::harness::kiro::memories::allowed_instruction_path(
+                    &crate::harness::kiro::KiroHarness::new(config.clone()),
+                    &project,
+                    target,
+                )
+        } else if is_pi {
+            let home = canonical_location(harness.user_home()?)?;
+            crate::harness::pi::memories::allowed_instruction_path(
+                &crate::harness::pi::PiHarness::new(config.clone(), home),
+                &project,
+                target,
+            )
+        } else {
+            let home = canonical_location(harness.user_home()?)?;
+            crate::harness::opencode::memories::allowed_instruction_path(
+                &crate::harness::opencode::OpenCodeHarness::new(config.clone(), home),
+                &project,
+                target,
+            )
+        };
+        return owned.then(|| scope(VersionKind::File));
+    }
+    if resource == "skill" {
+        let owned = if is_kiro {
+            [&config.join("skills"), &project.join(".kiro/skills")]
+                .into_iter()
+                .any(|root| {
+                    target.strip_prefix(root).is_ok_and(|relative| {
+                        let parts = relative.components().collect::<Vec<_>>();
+                        parts
+                            .iter()
+                            .all(|part| matches!(part, Component::Normal(_)))
+                            && (parts.len() == 1
+                                || (parts.len() == 2
+                                    && target.file_name().is_some_and(|name| name == "SKILL.md")))
+                    })
+                })
+        } else if is_pi {
+            let home = canonical_location(harness.user_home()?)?;
+            crate::harness::pi::skills::allowed_skill_path(
+                &crate::harness::pi::PiHarness::new(config.clone(), home),
+                &project,
+                target,
+            )
+        } else {
+            let home = canonical_location(harness.user_home()?)?;
+            crate::harness::opencode::skills::allowed_skill_path(
+                &crate::harness::opencode::OpenCodeHarness::new(config.clone(), home),
+                &project,
+                target,
+            )
+        };
+        return owned.then(|| {
+            scope(
+                if row
+                    .before_checksum
+                    .as_deref()
+                    .or(row.after_checksum.as_deref())
+                    .is_some_and(|checksum| checksum.starts_with("tree-v2-sha256:"))
+                {
+                    VersionKind::Directory
+                } else {
+                    VersionKind::File
+                },
+            )
+        });
+    }
+    None
+}
+
+fn single_file_below(root: &Path, target: &Path, extension: &str) -> bool {
+    target.strip_prefix(root).is_ok_and(|relative| {
+        relative.components().count() == 1
+            && relative
+                .components()
+                .all(|part| matches!(part, Component::Normal(_)))
+            && target.extension().is_some_and(|ext| ext == extension)
+    })
+}
+
+pub(crate) fn canonical_location(path: &Path) -> Option<PathBuf> {
     for ancestor in path.ancestors() {
         if let Ok(root) = ancestor.canonicalize() {
             let relative = path.strip_prefix(ancestor).ok()?;
@@ -1096,7 +1241,11 @@ fn ensure_plain_target_parent(
     } else if let Some(home) = harness
         .user_home()
         .and_then(canonical_location)
-        .filter(|home| target.starts_with(home.join(".agents/skills")))
+        .filter(|home| {
+            target.starts_with(home.join(".agents/skills"))
+                || (harness.id() == crate::harness::OPENCODE
+                    && target.starts_with(home.join(".claude/skills")))
+        })
     {
         home
     } else if target == claude_json {
@@ -1221,6 +1370,127 @@ mod tests {
             config_root,
         });
         (dir, harness, project)
+    }
+
+    #[test]
+    fn native_harness_history_restores_instructions_settings_and_uninstalled_skills() {
+        use crate::harness::{
+            claude::config::SettingsLayer, kiro::KiroHarness, opencode::OpenCodeHarness,
+            pi::PiHarness, selected::SelectedHarness,
+        };
+        for client in ["kiro", "opencode", "pi"] {
+            let kiro = client == "kiro";
+            let dir = tempfile::tempdir().unwrap();
+            let home = dir.path().canonicalize().unwrap();
+            let project = home.join("project");
+            let config = home.join(match client {
+                "kiro" => ".kiro",
+                "pi" => ".pi/agent",
+                _ => ".config/opencode",
+            });
+            let skill = if client == "pi" {
+                config.join("skills/nested/review.md")
+            } else if kiro {
+                config.join("skills/review.md")
+            } else {
+                home.join(".claude/skills/review")
+            };
+            let global = config.join(if kiro {
+                "steering/global.md"
+            } else {
+                "AGENTS.md"
+            });
+            std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+            std::fs::create_dir_all(&project).unwrap();
+            std::fs::create_dir_all(&skill).unwrap();
+            std::fs::write(&global, "User instructions.\n").unwrap();
+            std::fs::write(project.join("AGENTS.md"), "Project instructions.\n").unwrap();
+            let skill_content =
+                "---\nname: review\ndescription: Review changes\n---\nRead changes.\n";
+            std::fs::write(skill.join("SKILL.md"), skill_content).unwrap();
+            let harness = if kiro {
+                SelectedHarness::Kiro(KiroHarness::new(config))
+            } else if client == "pi" {
+                SelectedHarness::Pi(PiHarness::new(config, home))
+            } else {
+                SelectedHarness::Opencode(OpenCodeHarness::new(config, home))
+            };
+            for (path, expected_scope) in [
+                (&global, HistoryScope::Global),
+                (&project.join("AGENTS.md"), HistoryScope::Project),
+            ] {
+                let catalog = harness.memory_catalog(&project).unwrap();
+                let file = catalog
+                    .files
+                    .iter()
+                    .find(|file| Path::new(&file.path) == path)
+                    .unwrap();
+                harness
+                    .memory_delete(&project, &file.id, &file.content)
+                    .unwrap();
+                assert!(!path.exists());
+                let snapshot = load(&harness, &project).unwrap();
+                let version = snapshot
+                    .versions
+                    .iter()
+                    .find(|version| &version.target == path)
+                    .unwrap();
+                assert_eq!(version.scope, expected_scope);
+                assert!(version.restorable);
+                restore(&harness, &project, &version.id, None).unwrap();
+                assert_eq!(std::fs::read_to_string(path).unwrap(), file.content);
+            }
+            let entry = harness
+                .skills_inventory(&project)
+                .unwrap()
+                .into_iter()
+                .find(|entry| Path::new(&entry.path) == skill.join("SKILL.md"))
+                .unwrap();
+            harness.skill_uninstall(&project, &entry.id).unwrap();
+            assert!(!skill.exists());
+            let snapshot = load(&harness, &project).unwrap();
+            let version = snapshot
+                .versions
+                .iter()
+                .find(|version| version.target == skill)
+                .unwrap();
+            assert_eq!(version.kind, VersionKind::Directory);
+            assert_eq!(version.scope, HistoryScope::Global);
+            restore(&harness, &project, &version.id, None).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(skill.join("SKILL.md")).unwrap(),
+                skill_content
+            );
+            for value in ["first", "second"] {
+                harness
+                    .config_apply(
+                        &project,
+                        SettingsLayer::Project,
+                        "model",
+                        serde_json::json!(value),
+                    )
+                    .unwrap();
+            }
+            let snapshot = load(&harness, &project).unwrap();
+            let version = snapshot
+                .versions
+                .iter()
+                .find(|version| {
+                    version.resource_kind == "settings" && version.scope == HistoryScope::Project
+                })
+                .unwrap();
+            restore(
+                &harness,
+                &project,
+                &version.id,
+                version.current_checksum.as_deref(),
+            )
+            .unwrap();
+            assert_eq!(
+                harness.config_load(&project).unwrap().effective["model"].value,
+                "first"
+            );
+        }
     }
 
     #[test]

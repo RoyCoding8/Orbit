@@ -18,21 +18,23 @@ type TestResult = {
   exit_code: number | null;
   timed_out: boolean;
 };
-const events = [
-  "PreToolUse",
-  "PostToolUse",
-  "Notification",
-  "UserPromptSubmit",
-  "Stop",
-  "SubagentStop",
-  "PreCompact",
-  "SessionStart",
-  "SessionEnd",
-];
+type HookSource = { id: string; label: string; layer: Layer; events: string[]; canToggle: boolean };
+type HookPolicy = Extract<ReturnType<typeof useHarness>["profile"]["hooks"], { kind: "commands" }>;
 const destructive =
   /(?:\brm\b|\brmdir\b|\bdel\b|\berase\b|\bformat(?:\.com)?\b|\bRemove-Item\b|\bshutdown\b|\bmkfs\b|\bdd\s+if=)/i;
 
 export function Hooks() {
+  const { profile, label } = useHarness();
+  if (profile.hooks.kind === "plugins") return (
+    <section className="content-pane" aria-labelledby="hooks-title">
+      <div className="pane-heading"><div><p className="eyebrow">{label.toUpperCase()}</p><h2 id="hooks-title">Hooks</h2></div></div>
+      <p className="supporting-copy">{profile.hooks.reason}</p>
+    </section>
+  );
+  return <CommandHooks policy={profile.hooks} />;
+}
+
+function CommandHooks({ policy }: { policy: HookPolicy }) {
   const { invoke, client, label } = useHarness();
   const [hooks, setHooks] = useState<Hook[]>([]);
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">(
@@ -40,7 +42,9 @@ export function Hooks() {
   );
   const [layer, setLayer] = useState<Layer>("user");
   const [projectRoot, setProjectRoot] = useState<string | null>(null);
-  const [event, setEvent] = useState(events[0]);
+  const [event, setEvent] = useState(policy.events[0] ?? "");
+  const [sources, setSources] = useState<HookSource[]>([]);
+  const [sourceId, setSourceId] = useState("");
   const [matcher, setMatcher] = useState("");
   const [command, setCommand] = useState("");
   const [editing, setEditing] = useState<Hook | null>(null);
@@ -51,14 +55,24 @@ export function Hooks() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const loadSequence = useRef(0);
+  const source = sources.find(item => item.id === sourceId);
+  const events = source?.events ?? policy.events;
+  useEffect(() => {
+    if (!events.includes(event)) setEvent(events[0] ?? "");
+  }, [event, events]);
 
   const load = useCallback(async () => {
     const sequence = ++loadSequence.current;
     setLoadState("loading");
     try {
-      const loaded = await invoke<Hook[]>("hooks_list", { projectRoot });
+      const [loaded, nativeSources] = await Promise.all([
+        invoke<Hook[]>("hooks_list", { projectRoot }),
+        client === "kiro" ? invoke<HookSource[]>("hooks_sources", { projectRoot }) : Promise.resolve([]),
+      ]);
       if (sequence !== loadSequence.current) return;
       setHooks(loaded);
+      setSources(nativeSources);
+      setSourceId(current => nativeSources.some(item => item.id === current) ? current : nativeSources[0]?.id ?? "");
       setError("");
       setLoadState("ready");
     } catch (cause) {
@@ -66,7 +80,7 @@ export function Hooks() {
       setError(String(cause));
       setLoadState("error");
     }
-  }, [projectRoot, invoke]);
+  }, [projectRoot, invoke, client]);
   useEffect(() => {
     void load();
     return () => { loadSequence.current++; };
@@ -99,11 +113,12 @@ export function Hooks() {
     try {
       await invoke("hooks_save", {
         draft: {
-          layer,
+          layer: source?.layer ?? layer,
           event,
           matcher: matcher.trim() || null,
           command,
           editId: editing?.id ?? null,
+          ...(client === "kiro" ? { sourceId } : {}),
         },
         projectRoot,
       });
@@ -128,7 +143,7 @@ export function Hooks() {
           id: hook.id,
           projectRoot,
         });
-      } else await invoke("hooks_enable", { id: hook.id, projectRoot });
+      } else await invoke("hooks_enable", { id: hook.id, layer: hook.layer, projectRoot });
       await load();
     } catch (cause) {
       setError(String(cause));
@@ -140,6 +155,8 @@ export function Hooks() {
     if (!hook.enabled) return;
     setEditing(hook);
     setLayer(hook.layer);
+    const owner = sources.find(item => item.id === hook.source_path);
+    if (owner) setSourceId(owner.id);
     setEvent(hook.event);
     setMatcher(hook.matcher ?? "");
     setCommand(hook.commands[0] ?? "");
@@ -185,7 +202,7 @@ export function Hooks() {
   };
 
   return (
-    <section className="hooks-page" aria-labelledby="hooks-title">
+    <section className="hooks-page" aria-labelledby="hooks-title" tabIndex={0}>
       <div className="pane-heading">
         <div>
           <p className="eyebrow">{label.toUpperCase()}</p>
@@ -214,17 +231,28 @@ export function Hooks() {
           </button>
         </div>
       </div>
-      {client === "codex" && <p className="supporting-copy">Codex reviews hook definitions before running them. Use /hooks in Codex to approve, enable or disable hooks. Editing a definition requires a new review.</p>}
+      {policy.note && <p className="supporting-copy">{policy.note}</p>}
       <div className="hooks-layout">
         <section className="config-editor" aria-label="Hook builder">
           <h3>{editing ? "Edit hook" : "Add hook"}</h3>
+          {client === "kiro" && <>
+            <label className="field-label" htmlFor="hook-source">Hook source</label>
+            <select id="hook-source" value={sourceId} disabled={busy || editing !== null} onChange={e => {
+              setSourceId(e.target.value);
+              const owner = sources.find(item => item.id === e.target.value);
+              if (owner) setLayer(owner.layer);
+            }}>
+              {!sources.length && <option value="">No native hook sources available</option>}
+              {sources.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
+            </select>
+          </>}
           <label className="field-label" htmlFor="hook-layer">
             Settings scope
           </label>
           <select
             id="hook-layer"
-            value={layer}
-            disabled={busy}
+            value={source?.layer ?? layer}
+            disabled={busy || client === "kiro"}
             onChange={(e) =>
               setLayer(e.target.value === "project" ? "project" : "user")
             }
@@ -233,11 +261,7 @@ export function Hooks() {
             <option value="project">Project</option>
           </select>
           <p className="layer-path">
-            {client === "codex" ? (layer === "user" ? "User hooks in CODEX_HOME/config.toml and hooks.json" : projectRoot ? `${projectRoot}/.codex/config.toml and hooks.json` : "Choose a project to edit its .codex hooks") : layer === "user"
-              ? "User settings.json in the configured Claude Code directory"
-              : projectRoot
-                ? `${projectRoot}/.claude/settings.json`
-                : "Choose a project to edit its .claude/settings.json"}
+            {source?.label ?? (layer === "user" ? policy.userPath : projectRoot ? `${projectRoot}/${policy.projectPath}` : `Choose a project to edit ${policy.projectPath}`)}
           </p>
           <label className="field-label" htmlFor="hook-event">
             Event
@@ -248,7 +272,7 @@ export function Hooks() {
             disabled={busy}
             onChange={(e) => setEvent(e.target.value)}
           >
-            {[...new Set([...(client === "codex" ? ["PreToolUse", "PermissionRequest", "PostToolUse", "PreCompact", "PostCompact", "SessionStart", "SessionEnd", "SubagentStart", "SubagentStop", "UserPromptSubmit", "Stop", "Interrupt"] : events), ...hooks.map((hook) => hook.event)])].map(
+            {[...new Set([...events, ...(editing ? [editing.event] : [])])].map(
               (name) => (
                 <option key={name}>{name}</option>
               ),
@@ -306,6 +330,8 @@ export function Hooks() {
                 busy ||
                 loadState !== "ready" ||
                 !command.trim() ||
+                !event ||
+                (client === "kiro" && !source) ||
                 (layer === "project" && !projectRoot)
               }
             >
@@ -332,10 +358,14 @@ export function Hooks() {
                   ? "Timed out"
                   : `Exit code ${result.exit_code ?? "unknown"}`}
               </strong>
-              <p>stdout</p>
-              <pre>{result.stdout || "(empty)"}</pre>
-              <p>stderr</p>
-              <pre>{result.stderr || "(empty)"}</pre>
+              <details>
+                <summary>stdout</summary>
+                <pre tabIndex={0}>{result.stdout || "(empty)"}</pre>
+              </details>
+              <details>
+                <summary>stderr</summary>
+                <pre tabIndex={0}>{result.stderr || "(empty)"}</pre>
+              </details>
             </div>
           )}
         </section>
@@ -362,7 +392,7 @@ export function Hooks() {
               No hooks found in the user or selected project settings.
             </p>
           ) : (
-            <div className="hook-list">
+            <div className="hook-list" role="region" tabIndex={0} aria-label="Configured hooks">
               {hooks.map((hook) => (
                 <article className="hook-card" key={hook.id}>
                   <div className="hook-copy">
@@ -379,7 +409,7 @@ export function Hooks() {
                     </p>
                     {hook.source_path && <p className="layer-path">{hook.source_path}{!hook.editable && " · Inherited, read-only"}</p>}
                     {hook.commands.map((value, i) => (
-                      <code className="hook-command" key={`${hook.id}-${i}`}>
+                      <code className="hook-command" key={`${hook.id}-${i}`} tabIndex={0}>
                         {value}
                       </code>
                     ))}
@@ -400,7 +430,7 @@ export function Hooks() {
                         Edit
                       </button>
                     )}
-                    {client === "claude-code" && <button
+                    {(sources.find(item => item.id === hook.source_path)?.canToggle ?? policy.canToggle) && <button
                       className="action-button"
                       type="button"
                       disabled={busy}

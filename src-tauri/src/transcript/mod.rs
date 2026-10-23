@@ -1,6 +1,10 @@
 pub mod archive;
 pub mod codex;
 pub mod ingest;
+mod jsonl;
+pub mod kiro;
+pub mod opencode;
+pub mod pi;
 pub mod spine;
 
 use serde::Serialize;

@@ -183,7 +183,7 @@ export function History() {
   }, [visibleVersions]);
 
   return (
-    <section className="content-pane history-page" aria-labelledby="history-title">
+    <section className="content-pane history-page" aria-labelledby="history-title" tabIndex={0}>
       <div className="pane-heading">
         <div>
           <p className="eyebrow">LOCAL CHANGE RECORD</p>
@@ -265,6 +265,7 @@ export function History() {
           className="history-panel"
           role="tabpanel"
           aria-labelledby="history-versions-tab"
+          tabIndex={0}
         >
           {loadState === "ready" && visibleVersions.length === 0 && (
             <p className="history-empty">No saved versions match this scope.</p>
@@ -321,6 +322,7 @@ export function History() {
           className="history-panel"
           role="tabpanel"
           aria-labelledby="history-logs-tab"
+          tabIndex={0}
         >
           {loadState === "ready" && visibleLogs.length === 0 && (
             <p className="history-empty">No operations match this scope.</p>

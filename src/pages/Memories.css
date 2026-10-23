@@ -5,7 +5,7 @@
 .memory-boundary-note { display: block; border-color: #d49a1f; background: #fff5d8; color: #563e04; }
 .memory-browser { display: grid; grid-template-columns: minmax(230px, 290px) minmax(0, 1fr); gap: 18px; align-items: start; min-width: 0; }
 .memory-groups, .memory-editor-area { min-width: 0; }
-.memory-groups { display: grid; gap: 12px; }
+.memory-groups { display: grid; gap: 12px; max-height: 70dvh; overflow-y: auto; overscroll-behavior: contain; }
 .memory-group, .memory-editor-area { padding: 16px; border: 1px solid var(--md-sys-color-outline-variant, #cac4d0); border-radius: 18px; background: var(--md-sys-color-surface-container-low, #f7f2fa); }
 .memory-group-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .memory-group-heading h3 { font-size: 15px; }
@@ -19,11 +19,27 @@
 .memory-editor-area { display: grid; gap: 12px; }
 .memory-file-heading { display: flex; align-items: start; justify-content: space-between; gap: 14px; }
 .memory-file-heading > div:first-child { display: grid; min-width: 0; gap: 5px; }
-.memory-file-heading h3 { font-size: 19px; }
-.memory-file-heading code { color: var(--md-sys-color-on-surface-variant, #49454f); font-size: 11px; }
+.memory-file-heading h3 { font-size: 19px; overflow-wrap: anywhere; }
+.memory-file-heading code { color: var(--md-sys-color-on-surface-variant, #49454f); font-size: 11px; max-height: 3.5em; overflow: auto; }
 .memory-load-behavior { padding: 10px 12px; border-radius: 10px; background: var(--md-sys-color-surface, #fff); color: var(--md-sys-color-on-surface-variant, #49454f); font-size: 12px; line-height: 1.5; }
 .memory-content-label { font-size: 12px; font-weight: 600; }
-.memory-content { box-sizing: border-box; width: 100%; min-height: 320px; resize: vertical; padding: 12px; border: 1px solid var(--md-sys-color-outline-variant, #cac4d0); border-radius: 12px; background: var(--md-sys-color-surface, #fff); color: inherit; font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.memory-content { box-sizing: border-box; width: 100%; height: clamp(240px, 45dvh, 560px); min-height: 180px; max-height: 60dvh; resize: vertical; padding: 12px; border: 1px solid var(--md-sys-color-outline-variant, #cac4d0); border-radius: 12px; background: var(--md-sys-color-surface, #fff); color: inherit; font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.memory-content-layout { display: grid; min-width: 0; }
+.memory-content-layout.sectioned { grid-template-columns: minmax(180px, .65fr) minmax(0, 1fr); gap: 14px; }
+.memory-draft-editor { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.memory-section-nav { display: flex; flex-direction: column; min-width: 0; max-height: calc(45dvh + 28px); gap: 8px; }
+.memory-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.memory-section-heading h4 { margin: 0; font-size: 13px; }
+.memory-section-list { min-height: 0; max-height: 45dvh; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.memory-section-list:focus-visible { outline: 2px solid var(--md-sys-color-primary, #6750a4); outline-offset: 2px; }
+.memory-section-group { margin-bottom: 14px; }
+.memory-section-group h5 { margin: 0 0 5px; overflow-wrap: anywhere; color: var(--md-sys-color-on-surface-variant, #49454f); font: 11px/1.45 ui-monospace, monospace; }
+.memory-section-button { display: grid; gap: 4px; width: 100%; padding: 9px 10px; border: 0; border-radius: 9px; text-align: left; background: transparent; color: inherit; font: inherit; font-size: 12px; line-height: 1.45; cursor: pointer; overflow-wrap: anywhere; }
+.memory-section-button:hover, .memory-section-button[aria-current] { background: var(--md-sys-color-secondary-container, #e8def8); }
+.memory-section-button small { font-size: 10px; }
+.memory-file-details summary, .memory-connection-details summary { cursor: pointer; font-size: 12px; font-weight: 600; padding: 6px 0; }
+.memory-file-details[open], .memory-connection-details[open] { max-height: 240px; overflow-y: auto; overscroll-behavior: contain; }
+.memory-file-details > p, .memory-connection-details > section { margin-top: 8px; }
 .memory-connections { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .memory-connections > p { grid-column: 1 / -1; font-size: 12px; }
 .memory-connection-column, .memory-unlinked { min-width: 0; padding: 12px; border: 1px solid var(--md-sys-color-outline-variant, #cac4d0); border-radius: 12px; background: var(--md-sys-color-surface, #fff); }
@@ -36,5 +52,6 @@ button.memory-link.known { color: var(--md-sys-color-primary, #6750a4); text-dec
 .memory-connection-column small, .memory-unlinked small { color: var(--md-sys-color-on-surface-variant, #49454f); font-size: 10px; }
 .memory-unlinked { grid-column: 1 / -1; }
 .memory-unlinked h4 { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-@media (max-width: 900px) { .memory-browser { grid-template-columns: 1fr; } .memory-groups { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); } }
+@media (max-width: 1100px) { .memory-content-layout.sectioned { grid-template-columns: 1fr; } .memory-section-list { max-height: 200px; } }
+@media (max-width: 900px) { .memory-browser { grid-template-columns: 1fr; } .memory-groups { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); max-height: 220px; } }
 @media (max-width: 600px) { .memory-heading, .memory-file-heading { align-items: flex-start; flex-direction: column; } .memory-connections { grid-template-columns: 1fr; } .memory-unlinked { grid-column: auto; } .memory-project-banner { align-items: flex-start; flex-direction: column; } }

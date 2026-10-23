@@ -95,6 +95,7 @@ describe("App shell", () => {
     await screen.findByRole("heading", { name: "Hooks" });
 
     fireEvent.change(screen.getByLabelText("Settings scope"), { target: { value: "project" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Choose project" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Choose project" }));
     expect(await screen.findByText("D:/demo-project/.claude/settings.json")).toBeTruthy();
 
@@ -180,6 +181,7 @@ describe("App shell", () => {
     expect(await screen.findByLabelText("Markdown content")).toBeEnabled();
     expect(screen.getByLabelText("Markdown content")).toHaveValue("Generated summary.");
     expect(screen.getByRole("button", { name: "Delete file" })).toBeEnabled();
+    fireEvent.click(screen.getByText("File details"));
     expect(screen.getByRole("note")).toHaveTextContent("Codex may regenerate this file");
     expect(invoke).toHaveBeenCalledWith("memory_catalog", { client: "codex", projectRoot: null });
     fireEvent.change(screen.getByLabelText("Markdown content"), { target: { value: "Corrected summary." } });
@@ -189,5 +191,62 @@ describe("App shell", () => {
     }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled());
     expect(screen.getByLabelText("Markdown content")).toHaveValue("Corrected summary.");
+  });
+
+  it("uses Kiro's native hook owner and hides unavailable skill and archive controls", async () => {
+    vi.mocked(invoke).mockImplementation(async command => {
+      if (command === "skills_inventory") return [{ id: "kiro-skill", name: "Kiro skill", description: "Native skill", path: "D:/kiro/skills/review/SKILL.md", content: "Review", state: "on", editable: true }];
+      if (command === "hooks_sources") return [{ id: "D:/kiro/agents/reviewer.json", label: "Reviewer agent", layer: "user", events: ["userPromptSubmit"], canToggle: false }];
+      return [];
+    });
+    render(<App />);
+    fireEvent.change(screen.getByLabelText("Coding agent"), { target: { value: "kiro" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Skills$/ }));
+    expect(await screen.findByText("Kiro skill")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Enable kiro-skill")).toBeNull();
+    expect(screen.queryByLabelText("Visibility for kiro-skill")).toBeNull();
+    expect(screen.getByRole("button", { name: "Edit" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Hooks" }));
+    expect(await screen.findByRole("option", { name: "Reviewer agent" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Command"), { target: { value: "echo checked" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save hook" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Save hook" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("hooks_save", {
+      client: "kiro", projectRoot: null,
+      draft: { layer: "user", event: "userPromptSubmit", matcher: null, command: "echo checked", editId: null, sourceId: "D:/kiro/agents/reviewer.json" },
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "Transcripts" }));
+    expect(screen.getByRole("button", { name: "Import Kiro archive" })).toBeDisabled();
+    expect(screen.getByText(/V3, terminal and cloud sessions are not indexed/)).toBeInTheDocument();
+  });
+
+  it.each([
+    { client: "opencode", label: "OpenCode", hookText: /@opencode\/plugin/ },
+    { client: "pi", label: "Pi", hookText: /TypeScript or JavaScript extensions/ },
+  ])("routes $label settings, extensions and project archives", async ({ client, label, hookText }) => {
+    vi.mocked(invoke).mockImplementation(async command => {
+      if (command === "config_load") return { layers: [{ name: "user", path: "D:/config/opencode.jsonc", values: { model: "openai/example" } }], effective: { model: { value: "openai/example", source: "user" } } };
+      if (command === "project_choose") return "D:/chosen-project";
+      if (command === "transcript_ingest") return { sessions: 0, messagesIndexed: 0, linesRead: 0, skippedFiles: 0, skippedStateLines: 0, malformedLines: 0 };
+      return [];
+    });
+    render(<App />);
+    fireEvent.change(screen.getByLabelText("Coding agent"), { target: { value: client } });
+    fireEvent.click(screen.getByRole("button", { name: /Settings/ }));
+    expect(await screen.findByText('"openai/example"')).toBeInTheDocument();
+    expect(invoke).toHaveBeenCalledWith("config_load", { client, projectRoot: null });
+    expect(screen.queryByRole("tab", { name: "Local" })).toBeNull();
+    vi.mocked(invoke).mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Hooks" }));
+    expect(screen.getByText(hookText)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Command")).toBeNull();
+    expect(invoke).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Transcripts" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: `Import ${label} archive` })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Choose project" }));
+    expect(await screen.findByText("Indexing project: D:/chosen-project")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Index transcripts" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("transcript_ingest", { client, projectRoot: "D:/chosen-project" }));
+    expect(await screen.findByText("Indexed 0 messages from 0 sessions.")).toBeInTheDocument();
   });
 });

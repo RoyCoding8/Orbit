@@ -8,6 +8,7 @@ import { Hooks } from "./pages/Hooks";
 import { Memories } from "./pages/Memories";
 import { History } from "./pages/History";
 import { HarnessProvider, type Client } from "./HarnessContext";
+import { clients, harnesses, isClient } from "./harnesses";
 import "@m3e/web/theme";
 import "@m3e/web/button";
 import "./app.css";
@@ -38,7 +39,7 @@ const views = {
 export function App() {
   const [page, setPage] = useState<Page>("overview");
   const [client, setClient] = useState<Client>("claude-code");
-  const clientLabel = client === "codex" ? "Codex" : "Claude Code";
+  const clientLabel = harnesses[client].label;
   const SelectedPage = page === "overview" ? null : views[page];
 
   return (
@@ -56,10 +57,9 @@ export function App() {
             Coding agent
             <select aria-label="Coding agent" value={client} onChange={event => {
               const value = event.target.value;
-              if (value === "claude-code" || value === "codex") setClient(value);
+              if (isClient(value)) setClient(value);
             }}>
-              <option value="claude-code">Claude Code</option>
-              <option value="codex">Codex</option>
+              {clients.map(id => <option key={id} value={id}>{harnesses[id].label}</option>)}
             </select>
           </label>
         </header>

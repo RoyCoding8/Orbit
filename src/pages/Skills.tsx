@@ -27,10 +27,10 @@ type LoadState =
   | { kind: "error"; message: string };
 
 export function Skills() {
-  const { invoke: request, client, label } = useHarness();
+  const { invoke: request, label, profile } = useHarness();
   const [projectRoot, setProjectRoot] = useState<string | null>(null);
   const invoke = useCallback(<T,>(command: string, args?: Record<string, unknown>) =>
-    request<T>(command, client === "codex" ? { ...args, projectRoot } : args), [request, client, projectRoot]);
+    request<T>(command, profile.projectSkills ? { ...args, projectRoot } : args), [request, profile.projectSkills, projectRoot]);
   const [skills, setSkills] = useState<Skill[]>([]);
   const [ledger, setLedger] = useState<LedgerRow[]>([]);
   const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
@@ -133,6 +133,7 @@ export function Skills() {
     <section
       className="content-pane skills-pane"
       aria-labelledby="skills-title"
+      tabIndex={0}
     >
       <div className="pane-heading">
         <div>
@@ -144,7 +145,7 @@ export function Skills() {
           </p>
         </div>
         <div className="skills-header-actions">
-          {client === "codex" && <button className="action-button" disabled={busy} onClick={() => {
+          {profile.projectSkills && <button className="action-button" disabled={busy} onClick={() => {
             void request<string | null>("project_choose").then(selected => {
               if (selected) setProjectRoot(selected);
             }).catch(reason => setError(String(reason)));
@@ -165,7 +166,7 @@ export function Skills() {
           </button>
         </div>
       </div>
-      {client === "codex" && <p className="supporting-copy">Project: {projectRoot ?? "Current project"}. Codex loads repository and user skills. Restart Codex after changing skill availability.</p>}
+      {profile.projectSkills && <p className="supporting-copy">Project: {projectRoot ?? "Current project"}. {profile.skillsNote}</p>}
       {error && (
         <p className="inline-error" role="alert">
           {error}
@@ -203,7 +204,7 @@ export function Skills() {
               </button>
             </div>
           ) : (
-            <div className="skill-list">
+            <div className="skill-list" role="region" tabIndex={0} aria-label="Available skills">
               {skills.map((skill) => (
                 <article className="skill-card" key={skill.id}>
                   <div className="skill-copy">
@@ -214,16 +215,16 @@ export function Skills() {
                       </span>
                     </div>
                     <p className="skill-id">{skill.id}</p>
-                    <p className="supporting-copy">
+                    <p className="supporting-copy" tabIndex={0}>
                       {skill.description || "No description in frontmatter."}
                     </p>
                   </div>
-                  <label className="state-toggle">
+                  {profile.skillModes.length > 0 && <><label className="state-toggle">
                     <input
                       type="checkbox"
                       aria-label={`Enable ${skill.id}`}
                       checked={skill.state !== "off"}
-                      disabled={!canMutate}
+                      disabled={!canMutate || profile.skillModes.length === 0}
                       onChange={(event) =>
                         void update(() =>
                           invoke("skill_set_override", {
@@ -240,7 +241,7 @@ export function Skills() {
                     <select
                       aria-label={`Visibility for ${skill.id}`}
                       value={skill.state}
-                      disabled={!canMutate}
+                      disabled={!canMutate || profile.skillModes.length === 0}
                       onChange={(event) =>
                         void update(() =>
                           invoke("skill_set_override", {
@@ -250,14 +251,9 @@ export function Skills() {
                         )
                       }
                     >
-                      <option value="on">On</option>
-                      {client === "claude-code" && <option value="name-only">Name only</option>}
-                      {client === "claude-code" && <option value="user-invocable-only">
-                        User invocable only
-                      </option>}
-                      <option value="off">Off</option>
+                      {profile.skillModes.map(mode => <option key={mode} value={mode}>{({ on: "On", off: "Off", "name-only": "Name only", "user-invocable-only": "User invocable only" })[mode]}</option>)}
                     </select>
-                  </label>
+                  </label></>}
                   <div className="card-actions">
                     <button
                       className="action-button"
@@ -287,9 +283,9 @@ export function Skills() {
             </div>
           )}
           {restorable.length > 0 && (
-            <div className="restore-section">
+            <details className="restore-section">
+              <summary>Recently uninstalled ({restorable.length})</summary>
               <p className="eyebrow">BACKUPS</p>
-              <h3>Recently uninstalled</h3>
               {restorable.map((row) => (
                 <div className="restore-row" key={`${row.timestamp}-${row.id}`}>
                   <span>{row.id}</span>
@@ -309,7 +305,7 @@ export function Skills() {
                   </button>
                 </div>
               ))}
-            </div>
+            </details>
           )}
         </>
       )}

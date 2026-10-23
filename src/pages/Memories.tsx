@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useHarness } from "../HarnessContext";
+import { parseMemorySections, type MemorySection } from "./memorySections";
 import "./Memories.css";
 
 export type MemorySource = "projectAutoMemory" | "globalAutoMemory" | "projectInstructions" | "userInstructions";
@@ -31,17 +32,46 @@ export type MemoryCatalog = {
 };
 
 type LoadState = { kind: "loading" } | { kind: "ready" } | { kind: "error"; message: string };
+type EditorView = { kind: "file" } | { kind: "section"; start: number; trailingLength: number };
+
+function sectionView(section: MemorySection, content: string): EditorView {
+  return { kind: "section", start: section.start, trailingLength: content.length - section.end };
+}
+
+function initialView(file: MemoryFile | null): EditorView {
+  const sections = file?.source === "globalAutoMemory" ? parseMemorySections(file.content) : [];
+  return file && sections.length > 1 ? sectionView(sections[0], file.content) : { kind: "file" };
+}
 
 export function Memories() {
-  const { invoke, client, label } = useHarness();
+  const { invoke, label, profile } = useHarness();
   const [catalog, setCatalog] = useState<MemoryCatalog | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const [view, setView] = useState<EditorView>({ kind: "file" });
   const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const selected = catalog?.files.find((file) => file.id === selectedId) ?? null;
   const dirty = !!selected && draft !== selected.content;
+  const sections = useMemo(() => selected?.source === "globalAutoMemory" ? parseMemorySections(draft) : [], [selected?.source, draft]);
+  const sectionGroups = useMemo(() => {
+    const groups = new Map<string, MemorySection[]>();
+    for (const section of sections) {
+      const group = section.projects.length === 1 ? section.projects[0] : section.projects.length > 1 ? "Multiple projects" : "Project not stated";
+      const entries = groups.get(group) ?? [];
+      entries.push(section);
+      groups.set(group, entries);
+    }
+    return [...groups];
+  }, [sections]);
+  const editorStart = view.kind === "section" ? view.start : 0;
+  const editorEnd = view.kind === "section" ? draft.length - view.trailingLength : draft.length;
+  const showSections = sections.length > 1 || view.kind === "section";
+  const editContent = (value: string) => {
+    const newline = draft.slice(editorStart, editorEnd).includes("\r\n") ? "\r\n" : "\n";
+    setDraft(draft.slice(0, editorStart) + value.replace(/\r?\n/g, newline) + draft.slice(editorEnd));
+  };
 
   const confirmDiscard = () => !dirty || window.confirm("Discard your unsaved memory changes?");
 
@@ -54,8 +84,10 @@ export function Memories() {
       const active = next.files.find((file) => file.id === selectedId) ?? next.files[0] ?? null;
       setSelectedId(active?.id ?? null);
       setDraft(active?.content ?? "");
+      setView(initialView(active));
       setError("");
       setLoadState({ kind: "ready" });
+      return active;
     } catch (reason) {
       setLoadState({ kind: "error", message: String(reason) });
     }
@@ -87,7 +119,8 @@ export function Memories() {
     setError("");
     try {
       await invoke("memory_edit", { projectRoot: catalog.projectRoot, id: selected.id, expectedContent: selected.content, content: draft });
-      await load(catalog.projectRoot, true);
+      const saved = await load(catalog.projectRoot, true);
+      if (saved?.id === selected.id && saved.content === draft) setView(view);
     } catch (reason) { setError(String(reason)); }
     finally { setBusy(false); }
   };
@@ -96,6 +129,7 @@ export function Memories() {
     if (!busy && file.id !== selectedId && confirmDiscard()) {
       setSelectedId(file.id);
       setDraft(file.content);
+      setView(initialView(file));
     }
   };
   const removeFile = async () => {
@@ -122,7 +156,7 @@ export function Memories() {
         <div>
           <p className="eyebrow">{label.toUpperCase()}</p>
           <h2 id="memories-title">Memories & instructions</h2>
-          <p className="supporting-copy">{client === "codex" ? "Edit Codex memory Markdown and AGENTS.md instructions. Memories are shared across projects; instructions keep their native scope. Each saved edit has a restorable version in History." : "Edit the project-scoped memory and instruction files Claude Code reads. Auto-memory files are project-specific even when stored under the Claude config directory."}</p>
+          <p className="supporting-copy">{profile.memoriesNote}</p>
         </div>
         <div className="memory-header-actions">
           <button className="action-button" onClick={() => void load()} disabled={busy || loadState.kind === "loading"}>Refresh</button>
@@ -162,12 +196,35 @@ export function Memories() {
                     <button className="action-button primary" onClick={() => void save()} disabled={busy || !selected.editable || draft === selected.content}>Save changes</button>
                   </div>
                 </div>
-                <p className="memory-load-behavior"><strong>{selected.source === "globalAutoMemory" ? "About this file:" : `${label} loading:`}</strong> {selected.loadBehavior}</p>
-                {selected.source === "globalAutoMemory" && <p className="memory-boundary-note" role="note">Codex may regenerate this file and replace your edits. Use /memories in Codex to control memory use and generation.</p>}
-                <label className="memory-content-label" htmlFor="memory-content">Markdown content</label>
-                <textarea id="memory-content" className="memory-content" spellCheck={false} value={draft} onChange={(event) => setDraft(event.target.value)} disabled={busy || !selected.editable} />
-                <section className="memory-connections" aria-label="Memory connections">
-                  <p>{client === "codex" ? "Codex combines AGENTS.md instructions from the repository root to the working directory. Ordinary Markdown links do not import context." : "Claude Code follows @file imports in instruction files up to four levels. Ordinary Markdown links do not import context."}</p>
+                <details className="memory-file-details">
+                  <summary>File details</summary>
+                  <p className="memory-load-behavior"><strong>{selected.source === "globalAutoMemory" ? "About this file:" : `${label} loading:`}</strong> {selected.loadBehavior}</p>
+                  {selected.source === "globalAutoMemory" && <p className="memory-boundary-note" role="note">Codex may regenerate this file and replace your edits. Use /memories in Codex to control memory use and generation.</p>}
+                </details>
+                <div className={showSections ? "memory-content-layout sectioned" : "memory-content-layout"}>
+                  {showSections && <nav className="memory-section-nav" aria-label="Memory sections">
+                    <div className="memory-section-heading"><h4>Sections</h4><button className="text-button" aria-pressed={view.kind === "file"} onClick={() => setView({ kind: "file" })} disabled={busy}>Whole file</button></div>
+                    <p className="memory-source-hint">Grouped by project details stated in the text. Codex memories remain shared.</p>
+                    <div className="memory-section-list" tabIndex={0}>
+                      {sectionGroups.map(([group, entries]) => <section className="memory-section-group" key={group}>
+                        <h5>{group}</h5>
+                        {entries.map((entry) => <button key={entry.start} className="memory-section-button" aria-current={view.kind === "section" && view.start === entry.start ? "true" : undefined} onClick={() => setView(sectionView(entry, draft))} disabled={busy}>
+                          <span>{entry.title}</span>
+                          {entry.projects.length > 1 && <small>{entry.projects.join(" · ")}</small>}
+                        </button>)}
+                      </section>)}
+                    </div>
+                  </nav>}
+                  <div className="memory-draft-editor">
+                    <label className="memory-content-label" htmlFor="memory-content">Markdown content{view.kind === "section" && <span className="memory-source-hint"> · Selected section</span>}</label>
+                    <textarea id="memory-content" className="memory-content" spellCheck={false} value={draft.slice(editorStart, editorEnd)} onChange={(event) => editContent(event.target.value)} disabled={busy || !selected.editable} />
+                    {dirty && <p className="memory-source-hint" role="status">Unsaved changes. Save changes applies your edits to {selected.name}.</p>}
+                  </div>
+                </div>
+                <details className="memory-connection-details">
+                  <summary>Connections</summary>
+                  <section className="memory-connections" aria-label="Memory connections">
+                  <p>{profile.connectionsNote}</p>
                   <div className="memory-connection-column">
                     <h4>Outgoing links <span className="count">{selected.references.length}</span></h4>
                     {selected.references.length ? <ul>{selected.references.map((reference, index) => <li key={reference.kind + reference.target + index}>
@@ -179,8 +236,9 @@ export function Memories() {
                     <h4>Linked from <span className="count">{incoming.length}</span></h4>
                     {incoming.length ? <ul>{incoming.map(({ file, reference }) => <li key={file.id + reference.kind + reference.target}><button className="memory-link known" onClick={() => selectFile(file)}>{file.name}</button><small>{reference.kind === "import" ? "Context import" : "Markdown link"}</small></li>)}</ul> : <p>No known backlinks.</p>}
                   </div>
-                </section>
+                  </section>
                 {selected.role === "index" && <section className="memory-unlinked" aria-label="Unlinked topic files"><h4>Topic files not linked from this index <span className="count">{unlinkedTopics.length}</span></h4>{unlinkedTopics.length ? <ul>{unlinkedTopics.map((file) => <li key={file.id}><button className="memory-link known" onClick={() => selectFile(file)}>{file.name}</button><small>Same memory group</small></li>)}</ul> : <p>Every topic file in this group is linked from the index.</p>}</section>}
+                </details>
               </> : <div className="empty-panel"><h3>No memory files found</h3><p className="empty-copy">Choose a project or add a {label} instruction file to see it here.</p></div>}
             </main>
           </div>

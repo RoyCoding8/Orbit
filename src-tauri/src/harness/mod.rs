@@ -4,9 +4,15 @@ pub mod atomic;
 pub mod claude;
 pub mod codex;
 pub(crate) mod credentials;
+pub(crate) mod instruction_store;
+pub(crate) mod json_store;
+pub mod kiro;
 pub(crate) mod memory_links;
+pub mod opencode;
+pub mod pi;
 pub(crate) mod process_lifetime;
 pub mod selected;
+pub(crate) mod skill_store;
 
 use std::path::PathBuf;
 
@@ -33,6 +39,31 @@ pub struct HarnessId(pub &'static str);
 pub const CODEX: HarnessId = HarnessId("codex");
 
 pub const CLAUDE_CODE: HarnessId = HarnessId("claude-code");
+pub const KIRO: HarnessId = HarnessId("kiro");
+pub const OPENCODE: HarnessId = HarnessId("opencode");
+pub const PI: HarnessId = HarnessId("pi");
+
+#[derive(Debug, Default, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Client {
+    #[default]
+    ClaudeCode,
+    Codex,
+    Kiro,
+    Opencode,
+    Pi,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HookDraft {
+    pub layer: claude::config::SettingsLayer,
+    pub event: String,
+    pub matcher: Option<String>,
+    pub command: String,
+    pub edit_id: Option<String>,
+    pub source_id: Option<String>,
+}
 
 /// A resource found inside one harness's configuration tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
