@@ -54,6 +54,45 @@ describe("Config project selection", () => {
   });
 });
 
+describe("effective settings search", () => {
+  it("matches keys, sources, and nested JSON values while leaving the editor draft intact", async () => {
+    const snapshot = {
+      ...SNAPSHOT,
+      effective: {
+        model: { value: "sonnet", source: "user" },
+        permissions: { value: { allow: ["Read", "Write"] }, source: "project" },
+      },
+    };
+    mockIPC(ipcFor(() => snapshot));
+    render(<Config />);
+
+    const search = await screen.findByRole("searchbox", { name: "Search effective settings" });
+    fireEvent.click(screen.getByRole("button", { name: "permissions" }));
+    fireEvent.change(screen.getByLabelText("JSON value"), { target: { value: '{"allow":["Read"]}' } });
+    fireEvent.change(search, { target: { value: "Write" } });
+
+    expect(screen.getByRole("button", { name: "permissions" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "model" })).not.toBeInTheDocument();
+    expect(screen.getByText("1 of 2 keys")).toBeInTheDocument();
+    expect(screen.getByLabelText("JSON value")).toHaveValue('{"allow":["Read"]}');
+
+    fireEvent.change(search, { target: { value: "project" } });
+    expect(screen.getByRole("button", { name: "permissions" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "model" })).not.toBeInTheDocument();
+    fireEvent.change(search, { target: { value: "no-such-setting" } });
+    expect(screen.getByRole("status")).toHaveTextContent('No effective settings match "no-such-setting".');
+    expect(screen.getByLabelText("JSON value")).toHaveValue('{"allow":["Read"]}');
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear settings search" }));
+    expect(screen.getByRole("button", { name: "model" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "permissions" })).toBeInTheDocument();
+    expect(screen.getByLabelText("JSON value")).toHaveValue('{"allow":["Read"]}');
+    fireEvent.change(search, { target: { value: "model" } });
+    expect(screen.getByRole("button", { name: "model" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "permissions" })).not.toBeInTheDocument();
+  });
+});
+
 describe("Config undo", () => {
   it("restores the selected key and layer through the native command", async () => {
     let undone = false;

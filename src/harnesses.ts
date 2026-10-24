@@ -56,7 +56,7 @@ export const harnesses: Record<Client, HarnessProfile> = {
     memoriesNote: "Edit OpenCode v2 AGENTS.md and configured instruction files. OpenCode has no native generated-memory file catalog; plugin storage belongs to each plugin.",
     connectionsNote: "OpenCode v2 loads AGENTS.md and configured instructions. Ordinary Markdown links do not import context.",
     configNote: "Preview of local configuration files. Remote, system, environment and runtime plugin configuration can affect the running session. JSONC comments are preserved when saving.", modelExample: '"openai/gpt-5"',
-    transcripts: { archive: "migration", scope: "project", note: "OpenCode v2 indexes chats for the selected project through its native CLI. Choose a project and index it; previously indexed projects remain searchable. OpenCode must be installed to index, export or import chats." },
+    transcripts: { archive: "migration", scope: "all", note: "Chats are discovered across projects known to OpenCode v2, including child sessions, using its installed native CLI. Deleting a parent with child sessions is unavailable because native deletion would also remove the children." },
     hooks: { kind: "plugins", reason: "OpenCode v2 hooks are JavaScript plugins using @opencode/plugin. Orbit's command-hook builder cannot edit or test plugin code. Manage the native plugins setting on the Settings page." },
   },
   pi: {
@@ -66,7 +66,7 @@ export const harnesses: Record<Client, HarnessProfile> = {
     connectionsNote: "Pi loads one context file per directory, with AGENTS.override.md taking precedence. Ordinary Markdown links are navigation links.",
     configNote: "Preview of local user and project files. Pi merges nested settings and combines resource lists. Project trust, packages, extensions and command-line options can change runtime behavior. Orbit does not edit trust or authentication state.",
     modelExample: '"gpt-5"',
-    transcripts: { archive: "migration", scope: "project", note: "Index Pi version 3 JSONL sessions, including branches. Choose a project to include its configured session directory. Archives preserve native records and inline images. External files referenced by a chat are not bundled." },
+    transcripts: { archive: "migration", scope: "project", note: "Discover Pi version 3 JSONL chats across its default session folders. Choose a project to also include its custom session directory. Archives preserve native records and inline images. External files referenced by a chat are not bundled." },
     hooks: { kind: "plugins", reason: "Pi lifecycle hooks are TypeScript or JavaScript extensions. Orbit's command-hook builder cannot edit or test extension code. Manage the native extensions list on the Settings page." },
   },
 };

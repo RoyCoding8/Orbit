@@ -26,6 +26,23 @@ async function openEditor(name: string) {
 }
 
 describe("MCP transport switching", () => {
+  it("searches public server fields and keeps connection details collapsible", async () => {
+    const longUrl = "https://example.test/mcp/with/a/long/path/that/needs/expansion/for/this/server";
+    mockIPC(command => command === "mcp_list" ? [{ ...HTTP_SERVER, entry: { ...HTTP_SERVER.entry, url: longUrl } }, STDIO_SERVER] : null);
+    render(<McpPage />);
+    const search = await screen.findByRole("searchbox", { name: "Search MCP servers" });
+    fireEvent.change(search, { target: { value: "needs/expansion" } });
+    expect(screen.getByRole("heading", { name: "remote" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "local" })).not.toBeInTheDocument();
+    expect(screen.getByText("Showing 1 of 2 MCP servers")).toBeInTheDocument();
+    const details = screen.getByText("Command and URL").closest("details");
+    expect(details).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByText("Command and URL"));
+    expect(details).toHaveAttribute("open");
+    fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
+    expect(screen.getByRole("heading", { name: "local" })).toBeInTheDocument();
+  });
+
   it("writes a clean stdio entry when a http server is switched to stdio", async () => {
     const ipc = vi.fn((command: string, payload?: InvokeArgs) => {
       if (command === "mcp_list") return [HTTP_SERVER];

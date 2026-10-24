@@ -10,6 +10,7 @@ type Session = {
   updatedAt: string | null;
   messageCount: number;
 };
+type SessionCatalog = { sessions: Session[]; source: string; warnings: string[] };
 type Message = {
   uuid: string;
   parentUuid: string | null;
@@ -58,9 +59,25 @@ type Thread = {
 const PAGE_SIZE = 100;
 const SEARCH_LIMIT = 50;
 
+function groupSessions(sessions: Session[]) {
+  const projects = new Map<string, { key: string; project: string; sessions: Session[] }>();
+  for (const session of sessions) {
+    const project = session.project.trim() || "Unknown project";
+    const path = project.replace(/^\\\\\?\\UNC\\/i, "//").replace(/^\\\\\?\\/, "")
+      .replaceAll("\\", "/").replace(/\/+$/, "") || "/";
+    const key = /^[a-z]:\//i.test(path) || path.startsWith("//") ? path.toLowerCase() : path;
+    const group = projects.get(key);
+    if (group) group.sessions.push(session);
+    else projects.set(key, { key, project, sessions: [session] });
+  }
+  return [...projects.values()];
+}
+
 export function Transcripts() {
   const { invoke, label, profile } = useHarness();
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [source, setSource] = useState("");
+  const [filter, setFilter] = useState("");
   const [projectRoot, setProjectRoot] = useState<string | null>(null);
   const [sessionState, setSessionState] = useState<
     "loading" | "ready" | "error"
@@ -73,39 +90,48 @@ export function Transcripts() {
   const [searched, setSearched] = useState(false);
   const [pending, setPending] = useState(false);
   const [converting, setConverting] = useState<string | null>(null);
-  const [notice, setNotice] = useState(
-    `Index the configured ${label} sessions directory to browse chats.`,
-  );
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState("");
+  const deleteDialog = useRef<HTMLDialogElement>(null);
+  const [notice, setNotice] = useState(`Finding ${label} chats…`);
   const selectedSession = thread?.sessionId ?? null;
   const messages = thread?.messages ?? [];
   const focusUuid = thread?.focusUuid;
   const busy = pending || sessionState === "loading" || thread?.loading === true;
 
-  const refreshSessions = useCallback(async () => {
+  const groups = groupSessions(sessions.filter(session =>
+    `${session.project} ${session.title ?? ""} ${session.sessionId}`.toLowerCase().includes(filter.toLowerCase().trim())));
+
+  const refreshSessions = useCallback(async (refresh = false, projectRoot: string | null = null) => {
     const request = ++sessionRequest.current;
     setSessionState("loading");
     try {
-      const result = await invoke<Session[]>("transcript_list_sessions");
-      if (request !== sessionRequest.current) return [];
-      setSessions(result);
+      const result = await invoke<SessionCatalog>("transcript_list_sessions", { refresh, projectRoot });
+      if (request !== sessionRequest.current) return;
+      setSessions(result.sessions);
+      setSource(result.source);
       setSessionState("ready");
-      return result;
+      if (refresh) setNotice(`Found ${result.sessions.length} ${label} chats.${result.warnings.length ? ` Skipped: ${result.warnings.join(", ")}.` : " Choose a project below."}`);
+      return result.sessions;
     } catch (error) {
-      if (request !== sessionRequest.current) return [];
+      if (request !== sessionRequest.current) return;
       setSessionState("error");
       throw error;
     }
-  }, [invoke]);
+  }, [invoke, label]);
 
   useEffect(() => {
-    void refreshSessions().catch((error) =>
-      setNotice(`Could not load indexed sessions. ${String(error)}`),
-    );
+    void refreshSessions(true).catch(error => setNotice(`Could not find chats. ${String(error)}`));
     return () => {
       sessionRequest.current += 1;
       threadRequest.current += 1;
     };
-  }, [refreshSessions]);
+  }, [refreshSessions, label]);
+  useEffect(() => {
+    setDeleteError("");
+    if (deleting) deleteDialog.current?.showModal();
+    else deleteDialog.current?.close();
+  }, [deleting]);
   useEffect(() => {
     if (focusUuid)
       document
@@ -139,7 +165,7 @@ export function Transcripts() {
       if (
         !selectedSession &&
         selection === threadRequest.current &&
-        nextSessions[0]
+        nextSessions?.[0]
       )
         await selectSession(nextSessions[0].sessionId);
     } catch (error) {
@@ -319,6 +345,28 @@ export function Transcripts() {
     }
   };
 
+  const deleteSession = async () => {
+    if (!deleting) return;
+    setDeleteError("");
+    setPending(true);
+    try {
+      const backupDirectory = await open({ directory: true, multiple: false,
+        title: "Choose where to save the chat before deleting it" });
+      if (typeof backupDirectory !== "string") return;
+      const report = await invoke<{ path: string; deletedSessions: string[]; warning: string | null }>("transcript_delete", {
+        sessionId: deleting, backupDirectory,
+      });
+      threadRequest.current += 1;
+      setThread(null);
+      setHits(current => current.filter(hit => !report.deletedSessions.includes(hit.sessionId)));
+      setSessions(current => current.filter(session => !report.deletedSessions.includes(session.sessionId)));
+      setDeleting(null);
+      setNotice(`Deleted chat. Restore it with Import ${profile.archiveLabel} archive from ${report.path}.${report.warning ? ` ${report.warning}` : ""}`);
+    } catch (error) {
+      setDeleteError(`Could not delete chat. ${String(error)}`);
+    } finally { setPending(false); }
+  };
+
   return (
     <section
       className="content-pane transcript-pane"
@@ -328,9 +376,9 @@ export function Transcripts() {
       <div className="pane-heading">
         <div>
           <p className="eyebrow">LOCAL HISTORY</p>
-          <h2 id="transcripts-title">Transcripts</h2>
+          <h2 id="transcripts-title">Chats</h2>
           <p className="supporting-copy">
-            Browse {label} sessions and search messages.{profile.transcripts.archive === "migration" && " Export native chat archives for migration."}
+            Browse {label} chats by project and search messages.{profile.transcripts.archive === "migration" && " Export, import or convert native chats."}
           </p>
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -355,11 +403,12 @@ export function Transcripts() {
             onClick={() => void indexSource()}
             disabled={busy}
           >
-            {pending ? "Working…" : "Index transcripts"}
+            {pending ? "Working…" : "Refresh chats"}
           </button>
         </div>
       </div>
       {profile.transcripts.note && <p className="supporting-copy">{profile.transcripts.note}</p>}
+      {source && <p className="quiet-copy">Chat source: {source}</p>}
       {profile.transcripts.scope === "project" && <p className="quiet-copy">Indexing project: {projectRoot ?? "Launch folder"}</p>}
       <p className="transcript-notice" role="status">
         {notice}
@@ -383,17 +432,21 @@ export function Transcripts() {
       </form>
       <div className="transcript-layout">
         <aside className="session-list" aria-label="Transcript sessions" tabIndex={0}>
-          <h3>
-            Sessions <span>{sessions.length}</span>
-          </h3>
+          <h3>Projects {sessionState === "ready" && <span>{groups.length} · {sessions.length} chats</span>}</h3>
+          <label className="chat-filter">Filter projects and chats
+            <input value={filter} onChange={event => setFilter(event.target.value)} placeholder="Project, chat name or ID" />
+          </label>
           {sessionState === "loading" ? (
             <p className="quiet-copy" role="status">
-              Loading sessions…
+              Finding chats…
             </p>
           ) : sessionState === "error" ? null : sessions.length === 0 ? (
-            <p className="quiet-copy">No sessions indexed yet.</p>
+            <p className="quiet-copy">No chats found in this source.</p>
           ) : (
-            sessions.map((session) => (
+            groups.map(group => <details className="chat-project" key={group.key} open>
+              <summary><strong>{group.project.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || group.project}</strong><span>{group.sessions.length} chats</span></summary>
+              <p className="chat-project-path">{group.project}</p>
+              {group.sessions.map((session) => (
               <button
                 key={session.sessionId}
                 className={`session-card ${selectedSession === session.sessionId ? "selected" : ""}`}
@@ -401,12 +454,14 @@ export function Transcripts() {
               >
                 <strong>{session.title ?? session.sessionId}</strong>
                 <span>
-                  {session.project} · {session.messageCount.toLocaleString()}{" "}
+                  {session.messageCount.toLocaleString()}{" "}
                   messages
                 </span>
               </button>
-            ))
+              ))}
+            </details>)
           )}
+          {sessionState === "ready" && sessions.length > 0 && groups.length === 0 && <p className="quiet-copy">No chats match this filter.</p>}
         </aside>
         <div className="transcript-results">
           {searched && (
@@ -447,6 +502,9 @@ export function Transcripts() {
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <button type="button" className="secondary-action" disabled={busy}
                   onClick={() => setConverting(selectedSession)}>Convert chat</button>
+                <button type="button" className="secondary-action" disabled={busy || profile.transcripts.archive !== "migration"}
+                  title={profile.transcripts.archive === "migration" ? undefined : "Deletion requires a chat archive that Orbit can restore."}
+                  onClick={() => setDeleting(selectedSession)}>Delete chat</button>
                 <button
                   type="button"
                   className="secondary-action"
@@ -521,6 +579,18 @@ export function Transcripts() {
         </div>
       </div>
       {converting && <ChatConversion sessionId={converting} onClose={() => setConverting(null)} onConverted={setNotice} />}
+      <dialog ref={deleteDialog} className="edit-dialog" aria-labelledby="delete-chat-title"
+        onCancel={event => { event.preventDefault(); if (!pending) setDeleting(null); }}>
+        <h3 id="delete-chat-title">Delete this chat?</h3>
+        <p>{sessions.find(session => session.sessionId === deleting)?.title ?? deleting}</p>
+        <p>Save a native archive first, then remove the chat from {label}. To restore it later, import that archive and choose its project.</p>
+        <p>Close this chat in {label} before deleting it.</p>
+        {deleteError && <p className="inline-error" role="alert">{deleteError}</p>}
+        <div className="dialog-actions">
+          <button type="button" disabled={pending} onClick={() => setDeleting(null)}>Cancel</button>
+          <button type="button" disabled={pending} onClick={() => void deleteSession()}>Save archive and delete</button>
+        </div>
+      </dialog>
     </section>
   );
 }

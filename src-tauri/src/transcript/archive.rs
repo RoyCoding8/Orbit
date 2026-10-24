@@ -5,7 +5,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 use super::{ingest::open_database, SessionTitle};
@@ -161,6 +160,76 @@ pub fn export_archive(
             Err(error)
         }
     }
+}
+
+/// Remove one Claude session family only when it still matches a completed
+/// native archive for that exact indexed session.
+pub(super) fn delete_exported_source(
+    app_data_dir: &Path,
+    projects_root: &Path,
+    session_id: &str,
+    archive_path: &Path,
+) -> Result<PathBuf, String> {
+    let archive_root = checked_directory(archive_path, "Claude backup archive")?;
+    let manifest = read_and_validate_archive(&archive_root)?;
+    if manifest.source_session_id != session_id {
+        return Err("Claude backup archive belongs to a different session.".into());
+    }
+    let (project_key, source_file) = indexed_source(app_data_dir, projects_root, session_id)?;
+    if manifest.source_project_key != project_key {
+        return Err("Claude session project changed after its backup was created.".into());
+    }
+    let stem = source_file
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "The session filename has no valid session ID.".to_owned())?;
+    let family_path = source_file.with_file_name(stem);
+    let family = collect_source_family(&source_file, &family_path, stem)?;
+    let mut expected_files = manifest
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<Vec<_>>();
+    let mut actual_files = family
+        .files
+        .iter()
+        .map(|(_, relative)| relative.as_str())
+        .collect::<Vec<_>>();
+    expected_files.sort_unstable();
+    actual_files.sort_unstable();
+    if expected_files != actual_files || manifest.directories != family.directories {
+        return Err("Claude session files changed after the backup was created.".into());
+    }
+    for (source, relative) in &family.files {
+        let expected = manifest
+            .files
+            .iter()
+            .find(|file| file.path == *relative)
+            .map(|file| file.sha256.as_str())
+            .ok_or_else(|| "Claude backup archive is missing a session file.".to_owned())?;
+        if hash_file(source)?.0 != expected {
+            return Err("Claude session files changed after the backup was created.".into());
+        }
+    }
+    for (source, _) in &family.files {
+        fs::remove_file(source)
+            .map_err(|error| format!("Could not remove Claude session file: {error}"))?;
+    }
+    let mut directories = family.directories;
+    directories.sort_by_key(|path| std::cmp::Reverse(path.matches('/').count()));
+    for relative in directories {
+        let suffix = relative
+            .strip_prefix(stem)
+            .ok_or_else(|| "Claude session directory escaped its session family.".to_owned())?;
+        let path = if suffix.is_empty() {
+            family_path.clone()
+        } else {
+            family_path.join(suffix.trim_start_matches('/'))
+        };
+        fs::remove_dir(&path)
+            .map_err(|error| format!("Could not remove Claude session directory: {error}"))?;
+    }
+    Ok(source_file)
 }
 
 /// Validate a native archive completely before installing it under the
@@ -350,6 +419,41 @@ pub(super) fn export_codex_archive(
             Err(error)
         }
     }
+}
+
+pub(super) fn verify_codex_backup(
+    config: &Path,
+    cache: &Path,
+    session_id: &str,
+    archive: &Path,
+) -> Result<(), String> {
+    let home = checked_directory(config, "Codex home")?;
+    let archive = checked_directory(archive, "Codex backup")?;
+    let manifest: CodexManifest =
+        serde_json::from_slice(&fs::read(archive.join(MANIFEST_NAME)).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    validate_codex_archive(&archive, &manifest)?;
+    if manifest.source_session_id != session_id {
+        return Err("Codex backup belongs to a different session.".into());
+    }
+    let source: String = open_database(cache)
+        .map_err(|e| e.to_string())?
+        .query_row(
+            "SELECT source_path FROM sessions WHERE session_id = ?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let source = checked_codex_rollout(&home, Path::new(&source))?;
+    let expected = manifest
+        .files
+        .iter()
+        .find(|file| file.path == manifest.rollout_file)
+        .ok_or("Codex backup is missing its rollout")?;
+    if hash_file(&source)?.0 != expected.sha256 {
+        return Err("Codex session changed after the backup was created.".into());
+    }
+    Ok(())
 }
 
 pub(super) fn import_codex_archive(
@@ -1507,23 +1611,9 @@ fn project_key_for_directory(path: &Path) -> Result<String, String> {
         .canonicalize()
         .map_err(|error| format!("Could not resolve the destination project path: {error}"))?;
     let path_string = claude_path_string(&canonical)?;
-    let normalized = path_string.nfc().collect::<String>();
-    let sanitized = normalized
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    if sanitized.chars().count() > 200 {
-        return Err(
-            "This project path is too long to map safely to Claude's project folder.".to_owned(),
-        );
-    }
-    Ok(sanitized)
+    crate::harness::claude::project_key(&path_string).ok_or_else(|| {
+        "This project path is too long to map safely to Claude's project folder.".to_owned()
+    })
 }
 
 fn claude_path_string(path: &Path) -> Result<String, String> {
@@ -1725,8 +1815,8 @@ fn collect_empty_dirs(path: &Path, directories: &mut Vec<PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::tempdir;
     use std::path::Path;
-    use tempfile::tempdir;
 
     #[test]
     fn codex_rollout_limit_applies_to_decompressed_bytes() {

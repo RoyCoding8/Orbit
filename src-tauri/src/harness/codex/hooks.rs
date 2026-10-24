@@ -563,30 +563,21 @@ fn layer_name(layer: SettingsLayer) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        fs,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::fs;
 
-    fn harness() -> (PathBuf, CodexHarness, PathBuf) {
-        let root = std::env::temp_dir().join(format!(
-            "orbit-codex-hooks-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let config = root.join(".codex");
-        let project = root.join("project");
+    fn harness() -> (tempfile::TempDir, CodexHarness, PathBuf) {
+        let root = crate::test_support::tempdir().unwrap();
+        let config = root.path().join(".codex");
+        let project = root.path().join("project");
         fs::create_dir_all(&config).unwrap();
         fs::create_dir_all(&project).unwrap();
-        (root.clone(), CodexHarness::new(config, root), project)
+        let harness = CodexHarness::new(config, root.path().to_path_buf());
+        (root, harness, project)
     }
 
     #[test]
     fn command_hook_json_crud_preserves_unrelated_metadata() {
-        let (root, h, project) = harness();
+        let (_root, h, project) = harness();
         fs::write(
             h.config_root().join("hooks.json"),
             r#"{"description":"keep","other":true}"#,
@@ -618,12 +609,11 @@ mod tests {
         assert_eq!(saved["description"], "keep");
         assert_eq!(saved["other"], true);
         assert!(list(&h, &project).unwrap().is_empty());
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn untrusted_project_hooks_are_not_loaded_or_mutable() {
-        let (root, h, project) = harness();
+        let (_root, h, project) = harness();
         fs::create_dir_all(project.join(".codex")).unwrap();
         fs::write(
             project.join(".codex/hooks.json"),
@@ -641,12 +631,11 @@ mod tests {
             None
         )
         .is_err());
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn inherited_project_hooks_are_listed_read_only_with_unique_source_ids() {
-        let (root, h, project) = harness();
+        let (_root, h, project) = harness();
         let repository = project.join("repo");
         let nested = repository.join("nested");
         fs::create_dir_all(repository.join(".git")).unwrap();
@@ -683,6 +672,5 @@ mod tests {
             .unwrap_err()
             .contains("read-only"));
         assert_eq!(list(&h, &nested).unwrap().len(), 2);
-        let _ = fs::remove_dir_all(root);
     }
 }

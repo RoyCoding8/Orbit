@@ -31,7 +31,7 @@ const MANIFEST_FILE: &str = "manifest.json";
 const ARCHIVE_VERSION: u32 = 1;
 const CLI_TIMEOUT: Duration = Duration::from_secs(30);
 const CLI_OUTPUT_LIMIT: usize = 64 * 1024 * 1024;
-const SESSION_LIST_LIMIT: &str = "1000000";
+const SESSION_PAGE_SIZE: usize = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -47,6 +47,8 @@ struct Manifest {
 struct NativeSessionListItem {
     id: String,
     title: Option<String>,
+    #[serde(skip)]
+    directory: PathBuf,
 }
 
 pub(super) fn stage_conversion(root: &Path, id: &str, bytes: &[u8]) -> Result<(), String> {
@@ -59,32 +61,18 @@ pub(super) fn stage_conversion(root: &Path, id: &str, bytes: &[u8]) -> Result<()
     super::conversion::stage_archive(root, DATA_FILE, bytes, &manifest)
 }
 
-pub fn ingest(app_data_dir: &Path, project: &Path) -> Result<IngestReport, TranscriptError> {
-    ingest_in_project(app_data_dir, Some(project), &CliEnvironment::default())
+pub fn ingest(app_data_dir: &Path, _project: &Path) -> Result<IngestReport, TranscriptError> {
+    ingest_with_environment(app_data_dir, &CliEnvironment::default())
 }
 
-fn ingest_in_project(
+fn ingest_with_environment(
     app_data_dir: &Path,
-    project: Option<&Path>,
     environment: &CliEnvironment,
 ) -> Result<IngestReport, TranscriptError> {
-    let sessions = list_native_sessions(project, environment)
+    let sessions = list_native_sessions(None, environment, SESSION_PAGE_SIZE)
         .map_err(|error| TranscriptError::Io(std::io::Error::other(error)))?;
     let mut connection = open_database(app_data_dir)?;
     let mut seen_paths = Vec::with_capacity(sessions.len());
-    if let Some(project) = project {
-        let selected = project.canonicalize()?;
-        let mut statement = connection.prepare("SELECT source_path, project FROM sessions")?;
-        let rows = statement.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        for row in rows {
-            let (source, directory) = row?;
-            if Path::new(&directory).canonicalize().ok().as_deref() != Some(&selected) {
-                seen_paths.push(source);
-            }
-        }
-    }
     let mut report = IngestReport {
         sessions: 0,
         lines_read: 0,
@@ -97,7 +85,7 @@ fn ingest_in_project(
         let id = format!("opencode:{}", session.id);
         let source = PathBuf::from(format!("opencode://session/{}", session.id));
         seen_paths.push(source.to_string_lossy().into_owned());
-        match export_native(&session.id, project, environment) {
+        match export_native(&session.id, Some(&session.directory), environment) {
             Ok(bytes) => match index_export(&mut connection, &bytes, &id, &source) {
                 Ok((indexed, count)) => {
                     report.sessions += 1;
@@ -222,7 +210,7 @@ fn import_archive_with_environment(
     let selected_location = json!({ "directory": selected_directory.to_string_lossy() });
     transfer["info"]["location"] = selected_location.clone();
     transfer["location"] = selected_location;
-    let existing_sessions = list_native_sessions(Some(project), environment)?;
+    let existing_sessions = list_native_sessions(Some(project), environment, SESSION_PAGE_SIZE)?;
     let collision_ids = existing_sessions
         .iter()
         .map(|item| item.id.clone())
@@ -571,7 +559,7 @@ fn remap_session_reference_fields(
 }
 
 #[derive(Clone, Default)]
-struct CliEnvironment {
+pub(super) struct CliEnvironment {
     set: Vec<(OsString, OsString)>,
     remove: Vec<OsString>,
     temp_dir: Option<PathBuf>,
@@ -580,33 +568,83 @@ struct CliEnvironment {
 fn list_native_sessions(
     project: Option<&Path>,
     environment: &CliEnvironment,
+    page_size: usize,
 ) -> Result<Vec<NativeSessionListItem>, String> {
-    let args = vec![
-        "session",
-        "list",
-        "--format",
-        "json",
-        "--max-count",
-        SESSION_LIST_LIMIT,
-        "--standalone",
-    ];
-    if let Some(project) = project {
-        // `session list` uses the process working directory for project scope.
-        let output = native_cli(&args, Some(project), environment)?;
-        return parse_session_list(&output);
+    let scopes = if let Some(project) = project {
+        vec![(
+            format!("directory={}", project.to_string_lossy()),
+            project.to_path_buf(),
+        )]
+    } else {
+        let projects = native_api(&["project.list"], None, environment)?;
+        projects
+            .as_array()
+            .ok_or("OpenCode project list is not an array")?
+            .iter()
+            .map(|project| -> Result<_, String> {
+                let id = project["id"].as_str().ok_or("OpenCode project has no ID")?;
+                let directory = project["canonical"]
+                    .as_str()
+                    .ok_or("OpenCode project has no canonical directory")?;
+                Ok((format!("project={id}"), PathBuf::from(directory)))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut sessions = Vec::new();
+    let mut seen = HashSet::new();
+    for (scope, directory) in scopes {
+        let limit = format!("limit={page_size}");
+        let mut cursor = String::new();
+        let mut cursors = HashSet::new();
+        loop {
+            let mut args = vec!["session.list", "--param", &scope, "--param", &limit];
+            let cursor_param = format!("cursor={cursor}");
+            if !cursor.is_empty() {
+                args.extend(["--param", &cursor_param]);
+            }
+            let page = native_api(&args, None, environment)?;
+            let records = page["data"]
+                .as_array()
+                .ok_or("OpenCode session list has no data array")?;
+            for record in records {
+                let mut session: NativeSessionListItem = serde_json::from_value(record.clone())
+                    .map_err(|error| format!("OpenCode session metadata is invalid: {error}"))?;
+                session.directory = record["location"]["directory"]
+                    .as_str()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| directory.clone());
+                if seen.insert(session.id.clone()) {
+                    sessions.push(session);
+                }
+            }
+            let Some(next) = page["cursor"]["next"].as_str().filter(|s| !s.is_empty()) else {
+                break;
+            };
+            if records.is_empty() {
+                break;
+            }
+            if !cursors.insert(next.to_owned()) {
+                return Err("OpenCode returned a repeated session page cursor".into());
+            }
+            cursor = next.to_owned();
+        }
     }
-    let output = native_cli(&args, None, environment)?;
-    parse_session_list(&output)
+    Ok(sessions)
 }
 
-fn parse_session_list(output: &Output) -> Result<Vec<NativeSessionListItem>, String> {
+fn native_api(
+    args: &[&str],
+    project: Option<&Path>,
+    environment: &CliEnvironment,
+) -> Result<Value, String> {
+    let mut command = vec!["api"];
+    command.extend_from_slice(args);
+    command.push("--standalone");
+    let output = native_cli(&command, project, environment)?;
     if !output.status.success() {
-        return Err(cli_error(output));
+        return Err(cli_error(&output));
     }
-    let value: Value =
-        parse_cli_json(&output.stdout).ok_or("OpenCode session list returned invalid JSON")?;
-    serde_json::from_value(value)
-        .map_err(|error| format!("OpenCode session list has an unexpected format: {error}"))
+    parse_cli_json(&output.stdout).ok_or_else(|| "OpenCode API returned invalid JSON".to_owned())
 }
 
 fn export_native(
@@ -634,6 +672,59 @@ fn export_native(
         return Err("OpenCode session export returned an unexpected session".into());
     }
     Ok(bytes)
+}
+
+pub(super) fn session_has_children(
+    id: &str,
+    project: &Path,
+    environment: &CliEnvironment,
+) -> Result<bool, String> {
+    validate_native_session_id(id)?;
+    let parent = format!("parentID={id}");
+    let value = native_api(
+        &["session.list", "--param", &parent, "--param", "limit=1"],
+        Some(project),
+        environment,
+    )?;
+    let children = value
+        .as_array()
+        .or_else(|| value.get("data").and_then(Value::as_array))
+        .ok_or_else(|| {
+            "OpenCode child-session query returned an unexpected response.".to_owned()
+        })?;
+    Ok(!children.is_empty())
+}
+
+pub(super) fn delete_native_session(
+    id: &str,
+    project: &Path,
+    environment: &CliEnvironment,
+) -> Result<(), String> {
+    validate_native_session_id(id)?;
+    if session_has_children(id, project, environment)? {
+        return Err("OpenCode deletion refused: this chat has child sessions.".into());
+    }
+    let output = native_cli(
+        &["session", "delete", id, "--standalone"],
+        Some(project),
+        environment,
+    )?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(cli_error(&output))
+    }
+}
+
+fn validate_native_session_id(id: &str) -> Result<(), String> {
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err("OpenCode session ID is invalid.".into());
+    }
+    Ok(())
 }
 
 fn native_cli(
@@ -1006,7 +1097,7 @@ mod tests {
 
     #[test]
     fn native_user_and_assistant_fixture_indexes_as_visible_conversation() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let mut connection = open_database(temp.path()).unwrap();
         let bytes = serde_json::to_vec(&fixture()).unwrap();
         let source = Path::new("opencode://session/ses_original");
@@ -1026,7 +1117,7 @@ mod tests {
     #[test]
     #[ignore = "requires installed OpenCode V2 CLI"]
     fn native_v2_cli_accepts_isolated_api_fixture_and_roundtrips_archive_collision() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let config = temp.path().join("config");
         let data = temp.path().join("data");
         let cache = temp.path().join("cache");
@@ -1153,7 +1244,7 @@ mod tests {
         };
         let source_id = create_session("Orbit V2 fixture", &project_a);
         let duplicate_title_id = create_session("Orbit V2 fixture", &project_b);
-        for index in 0..101 {
+        for index in 0..3 {
             create_session(&format!("List pagination fixture {index}"), &project_c);
         }
         let source_info = client
@@ -1205,14 +1296,14 @@ mod tests {
         );
 
         assert_eq!(
-            list_native_sessions(Some(&project_c), &environment)
+            list_native_sessions(Some(&project_c), &environment, 2)
                 .unwrap()
                 .len(),
-            101,
-            "adapter requests beyond OpenCode's default 100-session page"
+            3,
+            "adapter follows the page cursor beyond the requested two-session page"
         );
-        let report = ingest_in_project(&app_data, Some(&project_a), &environment).unwrap();
-        assert_eq!(report.sessions, 1);
+        let report = ingest_with_environment(&app_data, &environment).unwrap();
+        assert_eq!(report.sessions, 5);
         assert_eq!(
             report.messages_indexed,
             2,
@@ -1259,15 +1350,53 @@ mod tests {
             "Orbit V2 native fixture message 1"
         );
         assert_ne!(imported_id, duplicate_title_id);
-        let report = ingest_in_project(&app_data, Some(&project_b), &environment).unwrap();
-        assert_eq!(report.sessions, 2);
+        let report = ingest_with_environment(&app_data, &environment).unwrap();
+        assert_eq!(report.sessions, 6);
         let cached = super::super::ingest::list_sessions(&app_data).unwrap();
-        assert_eq!(cached.len(), 3);
+        assert_eq!(cached.len(), 6);
         assert!(cached
             .iter()
             .any(|session| session.session_id == format!("opencode:{source_id}")));
         assert!(cached
             .iter()
             .any(|session| session.session_id == imported.session_id));
+        let all = list_native_sessions(None, &environment, 2).unwrap();
+        assert_eq!(
+            all.len(),
+            6,
+            "global discovery includes all three native projects"
+        );
+        assert!(all.iter().any(|session| session.id == source_id));
+        assert!(all.iter().any(|session| session.id == imported_id));
+        assert!(!session_has_children(&imported_id, &project_b, &environment).unwrap());
+        delete_native_session(&imported_id, &project_b, &environment).unwrap();
+        assert!(export_native(&imported_id, Some(&project_b), &environment).is_err());
+        let restored = import_archive_with_environment(&archive, &project_b, &environment).unwrap();
+        let restored_id = native_session_id(&restored.session_id).unwrap();
+        let restored_bytes = export_native(&restored_id, Some(&project_b), &environment).unwrap();
+        let restored: Value = serde_json::from_slice(&restored_bytes).unwrap();
+        assert_eq!(
+            restored["messages"][0]["text"],
+            "Orbit V2 native fixture message 0"
+        );
+        let body = json!({"title":"child fixture", "parentID":restored_id, "location":{"directory":project_b}}).to_string();
+        let child = native_api(
+            &["POST", "/api/session", "--data", &body],
+            Some(&project_b),
+            &environment,
+        )
+        .unwrap();
+        assert_eq!(child["data"]["parentID"], restored_id);
+        assert!(list_native_sessions(None, &environment, SESSION_PAGE_SIZE)
+            .unwrap()
+            .iter()
+            .any(|session| child["data"]["id"] == session.id));
+        assert!(session_has_children(&restored_id, &project_b, &environment).unwrap());
+        assert!(
+            delete_native_session(&restored_id, &project_b, &environment)
+                .unwrap_err()
+                .contains("child")
+        );
+        assert!(export_native(&restored_id, Some(&project_b), &environment).is_ok());
     }
 }

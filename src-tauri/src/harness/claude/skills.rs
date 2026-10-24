@@ -602,7 +602,7 @@ mod tests {
     use crate::harness::atomic;
 
     fn fixture() -> (tempfile::TempDir, ClaudeCodeHarness) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let root = dir.path().join("claude");
         std::fs::create_dir_all(root.join("skills").join("alpha")).unwrap();
         std::fs::write(
@@ -892,7 +892,7 @@ mod tests {
 
     #[test]
     fn copy_dir_refuses_existing_destinations_without_overwriting_them() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let source = dir.path().join("source");
         let destination = dir.path().join("destination");
         std::fs::create_dir(&source).unwrap();
@@ -912,7 +912,7 @@ mod tests {
     fn copy_dir_leaves_a_partial_destination_for_inspection_on_failure() {
         use std::os::unix::fs::symlink;
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let source = dir.path().join("source");
         let destination = dir.path().join("destination");
         std::fs::create_dir(&source).unwrap();
@@ -987,7 +987,7 @@ mod tests {
         );
         assert_ne!(original_checksum, changed_checksum);
 
-        let ledger_path = harness.config_root().join(".harness-agent/ledger.json");
+        let ledger_path = harness.config_root().join(".orbit/ledger.json");
         let mut value = atomic::read_json(&ledger_path).unwrap();
         value["rows"][0]["beforeChecksum"] = serde_json::Value::String(legacy_checksum);
         std::fs::write(&ledger_path, serde_json::to_vec(&value).unwrap()).unwrap();

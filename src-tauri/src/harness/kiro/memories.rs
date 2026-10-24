@@ -452,7 +452,7 @@ mod tests {
 
     #[test]
     fn steering_and_agents_files_have_link_graph_and_checked_delete() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir().unwrap();
         let harness = KiroHarness::new(root.path().join("home/.kiro"));
         let project = root.path().join("project");
         let steering = project.join(".kiro/steering");
@@ -558,7 +558,7 @@ mod tests {
 
     #[test]
     fn learned_memory_is_not_misrepresented_as_editable_steering() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir().unwrap();
         let harness = KiroHarness::new(root.path().join("home/.kiro"));
         let project = root.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
@@ -569,7 +569,7 @@ mod tests {
 
     #[test]
     fn instruction_discovery_stops_at_the_depth_limit() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir().unwrap();
         let harness = KiroHarness::new(root.path().join("home/.kiro"));
         let project = root.path().join("project");
         let mut directory = project.clone();

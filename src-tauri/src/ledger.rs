@@ -43,7 +43,7 @@ pub enum OperationState {
 }
 
 pub fn backup_root(config_root: &Path) -> PathBuf {
-    config_root.join(".harness-agent").join("backups")
+    config_root.join(".orbit").join("backups")
 }
 
 pub fn backup_path(config_root: &Path, id: &str, action: &str) -> PathBuf {
@@ -142,7 +142,7 @@ fn append_row_locked(
     row: &LedgerRow,
     guard: &atomic::MutationGuard,
 ) -> Result<(), String> {
-    let path = config_root.join(".harness-agent").join("ledger.json");
+    let path = config_root.join(".orbit").join("ledger.json");
     std::fs::create_dir_all(path.parent().ok_or("ledger path has no parent")?)
         .map_err(|error| error.to_string())?;
     let row_value = serde_json::to_value(row).map_err(|error| error.to_string())?;
@@ -218,7 +218,7 @@ pub(crate) fn complete_mutation(
     op: &str,
     guard: &atomic::MutationGuard,
 ) -> Result<(), String> {
-    let path = config_root.join(".harness-agent").join("ledger.json");
+    let path = config_root.join(".orbit").join("ledger.json");
     let value = atomic::read_json(&path).map_err(|error| error.to_string())?;
     let rows = value
         .get("rows")
@@ -325,7 +325,7 @@ pub fn remove_file(
 }
 
 pub fn read(config_root: &Path) -> Result<Vec<LedgerRow>, String> {
-    let value = atomic::read_json(&config_root.join(".harness-agent").join("ledger.json"))
+    let value = atomic::read_json(&config_root.join(".orbit").join("ledger.json"))
         .map_err(|error| error.to_string())?;
     serde_json::from_value(
         value
@@ -605,7 +605,7 @@ mod tests {
     use crate::harness::Harness;
 
     fn fixture() -> (tempfile::TempDir, ClaudeCodeHarness) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let root = dir.path().join("claude");
         std::fs::create_dir_all(&root).unwrap();
         let paths = crate::harness::HarnessPaths {
@@ -658,7 +658,7 @@ mod tests {
         let path = harness.settings_path();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, br#"{"ready":false}"#).unwrap();
-        let agent_dir = harness.config_root().join(".harness-agent");
+        let agent_dir = harness.config_root().join(".orbit");
         std::fs::write(&agent_dir, b"blocks ledger directory").unwrap();
 
         let failed = write(
@@ -1039,10 +1039,7 @@ mod tests {
     #[test]
     fn legacy_rows_load_but_are_not_undo_candidates() {
         let (_dir, harness) = fixture();
-        let ledger = harness
-            .config_root()
-            .join(".harness-agent")
-            .join("ledger.json");
+        let ledger = harness.config_root().join(".orbit").join("ledger.json");
         std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
         std::fs::write(&ledger, br#"{"rows":[{"timestamp":1,"resourceKind":"settings","id":"resource","action":"edit","backupPath":null,"beforeChecksum":null,"afterChecksum":"aa"}]}"#).unwrap();
         assert_eq!(read(harness.config_root()).unwrap().len(), 1);

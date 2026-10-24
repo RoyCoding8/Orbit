@@ -331,28 +331,17 @@ fn json_item(value: &Value) -> Result<toml_edit::Item, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        fs,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::fs;
 
-    fn harness() -> (std::path::PathBuf, CodexHarness) {
-        let root = std::env::temp_dir().join(format!(
-            "orbit-codex-mcp-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        let h = CodexHarness::new(root.join(".codex"), root.clone());
+    fn harness() -> (tempfile::TempDir, CodexHarness) {
+        let root = crate::test_support::tempdir().unwrap();
+        let h = CodexHarness::new(root.path().join(".codex"), root.path().to_path_buf());
         (root, h)
     }
 
     #[test]
     fn native_server_crud_normalizes_ui_shape_and_preserves_other_settings() {
-        let (root, h) = harness();
+        let (_root, h) = harness();
         fs::create_dir_all(h.config_root()).unwrap();
         fs::write(h.settings_path(), "# retained\nother = 42\n").unwrap();
         save(&h, "sample", serde_json::json!({"type":"http","url":"https://example.test/mcp","headers":{"Authorization":"Bearer private-token"}})).unwrap();
@@ -398,12 +387,11 @@ mod tests {
         assert!(!list(&h).unwrap()[0].enabled);
         delete(&h, "sample").unwrap();
         assert!(list(&h).unwrap().is_empty());
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn save_rejects_entries_with_both_transport_fields() {
-        let (root, h) = harness();
+        let (_root, h) = harness();
         let error = save(
             &h,
             "ambiguous",
@@ -417,6 +405,5 @@ mod tests {
 
         assert!(error.contains("both `command` and `url`"));
         assert!(list(&h).unwrap().is_empty());
-        let _ = fs::remove_dir_all(root);
     }
 }

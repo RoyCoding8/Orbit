@@ -300,7 +300,7 @@ mod tests {
 
     #[test]
     fn inventory_edit_uninstall_and_restore_use_native_skill_directories() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir().unwrap();
         let home = root.path().join("home/.kiro");
         let harness = KiroHarness::new(home.clone());
         let project = root.path().join("project");
@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn native_skill_toggle_is_reported_as_unsupported() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir().unwrap();
         let harness = KiroHarness::new(root.path().join("home/.kiro"));
         let error = set_override(&harness, root.path(), "fixture", SkillOverride::Off).unwrap_err();
         assert!(error.contains("no native per-skill enable or disable"));

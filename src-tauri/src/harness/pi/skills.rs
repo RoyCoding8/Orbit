@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn global_skill_can_be_edited_uninstalled_and_restored_from_its_backup() {
         for flat in [false, true] {
-            let root = tempfile::tempdir().unwrap();
+            let root = crate::test_support::tempdir().unwrap();
             let harness = PiHarness::new(root.path().join(".pi/agent"), root.path().join("home"));
             let project = root.path().join("project");
             std::fs::create_dir_all(&project).unwrap();
@@ -487,7 +487,7 @@ mod tests {
 
     #[test]
     fn history_allowlist_accepts_native_skill_targets_and_rejects_traversal() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir().unwrap();
         let harness = PiHarness::new(root.path().join(".pi/agent"), root.path().join("home"));
         let project = root.path().join("project");
         std::fs::create_dir_all(project.join(".pi/skills")).unwrap();
@@ -513,7 +513,7 @@ mod tests {
     fn project_and_custom_skill_roots_are_visible_with_only_native_roots_editable() {
         use serde_json::json;
 
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir().unwrap();
         let home = root.path().join("home");
         let harness = PiHarness::new(home.join(".pi/agent"), home.clone());
         let project = root.path().join("project");

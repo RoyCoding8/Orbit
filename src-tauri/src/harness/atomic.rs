@@ -902,8 +902,9 @@ mod tests {
 
     #[test]
     fn new_file_publication_never_replaces_an_existing_destination() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::tempdir().unwrap();
         let target = directory.path().join("memory.md");
+        let _guard = lock_mutations(&target).unwrap();
         create_via_temp(&target, b"saved memory").unwrap();
         assert!(matches!(
             create_via_temp(&target, b"replacement"),
@@ -915,7 +916,7 @@ mod tests {
 
     #[test]
     fn staging_refuses_an_existing_temp_link_without_changing_its_target() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::tempdir().unwrap();
         let target = directory.path().join("settings.json");
         let _guard = lock_mutations(&target).unwrap();
         let outside = directory.path().join("preserve.txt");
@@ -938,7 +939,7 @@ mod tests {
 
     #[test]
     fn mixed_set_and_unkeyed_push_land_once() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let path = dir.path().join("ledger.json");
         write_fixture(&path, br#"{"rows":[]}"#);
         let receipt = commit(
@@ -966,7 +967,7 @@ mod tests {
 
     #[test]
     fn concurrent_whole_value_pushes_keep_one_addressable_entry() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         write_fixture(&path, br#"{"hooks":[]}"#);
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -995,7 +996,7 @@ mod tests {
 
     #[test]
     fn replacement_cannot_collide_with_an_entry_added_since_the_read() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         let backup = dir.path().join("backup.json");
         write_fixture(&path, br#"{"hooks":[{"command":"old"}]}"#);
@@ -1023,7 +1024,7 @@ mod tests {
 
     #[test]
     fn where_patches_change_only_the_matching_element() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         write_fixture(
             &path,
@@ -1060,7 +1061,7 @@ mod tests {
 
     #[test]
     fn ambiguous_where_batches_leave_original_bytes_and_backup_untouched() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         let backup = dir.path().join("backup");
         let original = br#"{"hooks":[{"command":"same"},{"command":"same"}]}"#;
@@ -1095,7 +1096,7 @@ mod tests {
 
     #[test]
     fn removing_an_absent_nested_path_does_not_create_parents() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         write_fixture(&path, br#"{}"#);
         commit(
@@ -1111,7 +1112,7 @@ mod tests {
 
     #[test]
     fn stale_or_bad_shape_is_rejected_before_mutating() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         write_fixture(&path, br#"{"hooks":[]}"#);
         let original = std::fs::read(&path).unwrap();
@@ -1141,7 +1142,7 @@ mod tests {
 
     #[test]
     fn receipt_before_matches_exact_backup_and_after_matches_readback() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         let backup = dir.path().join("backup").join("settings");
         let original = b"{ \"theme\": \"dark\" }\r\n";
@@ -1163,7 +1164,7 @@ mod tests {
 
     #[test]
     fn creation_receipt_has_no_backup_or_before_checksum() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let path = dir.path().join("new.json");
         let backup = dir.path().join("backup");
         let receipt = write_file(&path, b"created", Some(&backup)).unwrap();
@@ -1187,7 +1188,7 @@ mod tests {
 
     #[test]
     fn write_file_preserves_exact_bytes_and_checksums() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let path = dir.path().join("skill.md");
         let backup = dir.path().join("backup");
         write_fixture(&path, b"original\r\n");
@@ -1200,8 +1201,9 @@ mod tests {
 
     #[test]
     fn windows_rename_replaces_an_existing_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let path = dir.path().join("replace.json");
+        let _guard = lock_mutations(&path).unwrap();
         write_fixture(&path, b"old");
         replace_via_temp(&path, b"new").unwrap();
         assert_eq!(std::fs::read(path).unwrap(), b"new");
@@ -1209,8 +1211,9 @@ mod tests {
 
     #[test]
     fn failed_rename_leaves_no_temp_file_and_no_landed_mutation() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let occupied = dir.path().join("occupied");
+        let _guard = lock_mutations(&occupied).unwrap();
         std::fs::create_dir_all(&occupied).unwrap();
         std::fs::write(occupied.join("keep.txt"), b"occupied").unwrap();
         let error = replace_via_temp(&occupied, b"new").unwrap_err();
@@ -1232,7 +1235,7 @@ mod tests {
 
     #[test]
     fn restore_writes_only_when_the_file_still_holds_the_expected_digest() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         write_fixture(&path, b"current");
         let receipt = restore(&path, sha256(b"current"), b"restored", None).unwrap();
@@ -1244,7 +1247,7 @@ mod tests {
 
     #[test]
     fn restore_refuses_without_writing_when_the_file_drifted() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         write_fixture(&path, b"changed by someone else");
         let error = restore(&path, sha256(b"current"), b"restored", None).unwrap_err();
@@ -1271,7 +1274,7 @@ mod tests {
 
     #[test]
     fn restore_refuses_an_absent_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         let error = restore(&path, sha256(b"current"), b"restored", None).unwrap_err();
         match &error {
@@ -1284,7 +1287,7 @@ mod tests {
 
     #[test]
     fn remove_current_deletes_only_the_unchanged_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let path = dir.path().join("created.json");
         write_fixture(&path, b"created");
         remove_current(&path, sha256(b"created")).unwrap();
@@ -1293,7 +1296,7 @@ mod tests {
 
     #[test]
     fn remove_current_refuses_when_the_file_drifted_or_is_absent() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let path = dir.path().join("created.json");
         write_fixture(&path, b"changed");
         let error = remove_current(&path, sha256(b"created")).unwrap_err();

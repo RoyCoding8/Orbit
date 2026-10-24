@@ -525,7 +525,7 @@ mod tests {
 
     #[test]
     fn native_rollout_records_are_indexed_for_shared_read_and_search() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let home = temp.path().join("codex");
         let rollout = home.join("sessions/2026/10/22/rollout-2026-10-22T11-00-00-00000000-0000-4000-8000-000000000001.jsonl");
         fs::create_dir_all(rollout.parent().unwrap()).unwrap();
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn native_event_and_response_pairs_index_once_and_keep_repeated_turns() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let home = temp.path().join("codex");
         let id = "00000000-0000-4000-8000-000000000001";
         let rollout = home.join(format!(
@@ -631,7 +631,7 @@ mod tests {
 
     #[test]
     fn archive_import_creates_a_fresh_codex_rollout_with_selected_cwd() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let home = temp.path().join("codex");
         let project = temp.path().join("selected-project");
         let archive_destination = temp.path().join("archives");
@@ -705,7 +705,7 @@ mod tests {
 
     #[test]
     fn ingest_prunes_cache_entries_when_native_rollouts_are_removed() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let home = temp.path().join("codex");
         let rollout = home.join(
             "sessions/2026/10/22/rollout-2026-10-22T11-00-00-00000000-0000-4000-8000-000000000001.jsonl",
@@ -732,7 +732,7 @@ mod tests {
 
     #[test]
     fn compressed_rollouts_are_indexed_and_archived_byte_for_byte() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let home = temp.path().join("codex");
         let project = temp.path().join("selected-project");
         let archive_destination = temp.path().join("archives");

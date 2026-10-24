@@ -61,7 +61,7 @@ fn assert_conversation(chat: &Conversation) {
 
 #[test]
 fn all_four_native_codecs_preserve_conversation_roles_images_and_text() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_support::tempdir().unwrap();
     for source in [
         Client::ClaudeCode,
         Client::Codex,
@@ -98,7 +98,7 @@ fn all_four_native_codecs_preserve_conversation_roles_images_and_text() {
 
 #[test]
 fn native_import_conversion_defaults_cwd_and_honors_override_without_changing_source() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_support::tempdir().unwrap();
     let project_a = temp.path().join("project-a");
     let project_b = temp.path().join("project-b");
     fs::create_dir(&project_a).unwrap();
@@ -233,7 +233,7 @@ fn kiro_chunks_join_without_inventing_spaces_and_keep_native_cwd() {
 
 #[test]
 fn conversion_rejects_unsupported_destination_before_creating_any_chat() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_support::tempdir().unwrap();
     let claude = harness(Client::ClaudeCode, &temp.path().join("claude"));
     let kiro = harness(Client::Kiro, &temp.path().join("kiro"));
     let app = temp.path().join("app");
@@ -292,7 +292,7 @@ fn native_codex_reads_and_resumes_converted_history_without_inference() {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_support::tempdir().unwrap();
     let project = temp.path().join("project");
     fs::create_dir(&project).unwrap();
     let target = harness(Client::Codex, &temp.path().join("codex"));
@@ -361,6 +361,26 @@ fn native_codex_reads_and_resumes_converted_history_without_inference() {
     assert_eq!(resumed["thread"]["id"], report.session_id);
     assert!(resumed.to_string().contains("The image is a pixel."));
     server.cleanup();
+    let backup = crate::transcript::deletion::delete(
+        &target,
+        &temp.path().join("app"),
+        &report.session_id,
+        &archive,
+    )
+    .unwrap();
+    assert!(
+        !Path::new(&report.path).exists(),
+        "native delete must remove the rollout"
+    );
+    let restored = target
+        .transcript_import(&temp.path().join("app"), Path::new(&backup.path), &project)
+        .unwrap();
+    assert_ne!(restored.session_id, report.session_id);
+    assert_conversation(
+        &snapshot(&target, &temp.path().join("app"), &restored.session_id)
+            .unwrap()
+            .1,
+    );
 }
 
 #[test]
@@ -409,7 +429,7 @@ fn opencode_partial_reverts_keep_only_the_confirmed_prefix() {
 #[ignore = "requires installed OpenCode v2 CLI; uses disposable native storage, no model prompt"]
 fn native_opencode_accepts_converted_history_and_inline_images() {
     use std::process::Stdio;
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_support::tempdir().unwrap();
     let project = temp.path().join("project");
     fs::create_dir(&project).unwrap();
     let target = harness(Client::Opencode, &temp.path().join("opencode-config"));
@@ -462,7 +482,7 @@ fn native_pi_resumes_converted_history_and_inline_images_without_inference() {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_support::tempdir().unwrap();
     let original_project = temp.path().join("original-project");
     let chosen_project = temp.path().join("chosen-project");
     fs::create_dir(&original_project).unwrap();

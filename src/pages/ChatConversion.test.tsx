@@ -8,7 +8,7 @@ const preview = { title: "Source chat", workingDirectory: "D:/old-project", mess
 describe("chat conversion", () => {
   it.each(["original", "override", "reset"])("converts using the %s working directory", async mode => {
     const ipc = vi.fn((command, payload) => {
-      if (command === "transcript_list_sessions") return [{ sessionId: "source/one", title: "Source chat", project: "encoded-key", messageCount: 2 }];
+      if (command === "transcript_list_sessions") return { sessions: [{ sessionId: "source/one", title: "Source chat", project: "encoded-key", messageCount: 2 }], source: "C:/native-chats", warnings: [] };
       if (command === "transcript_thread_page") return [];
       if (command === "transcript_conversion_preview") return preview;
       if (command === "project_choose") return "D:/new-project";
@@ -42,7 +42,7 @@ describe("chat conversion", () => {
 
   it.each(["preview", "convert"])("keeps a %s failure visible without reporting success", async step => {
     const ipc = vi.fn(command => {
-      if (command === "transcript_list_sessions") return [{ sessionId: "source/one", project: "key", messageCount: 2 }];
+      if (command === "transcript_list_sessions") return { sessions: [{ sessionId: "source/one", project: "key", messageCount: 2 }], source: "C:/native-chats", warnings: [] };
       if (command === "transcript_thread_page") return [];
       if (command === "transcript_conversion_preview") {
         if (step === "preview") throw new Error("Native session is unavailable");

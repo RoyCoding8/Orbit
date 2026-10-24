@@ -6,8 +6,11 @@ import {
   type FormEvent,
 } from "react";
 import { useHarness } from "../HarnessContext";
+import { JsonValue } from "../components/JsonValue";
+import { JsonEditor } from "../components/JsonEditor";
 import { M3eButton } from "@m3e/react/button";
 import "./Mcp.css";
+import "./ListControls.css";
 
 const MASK = "••••••••";
 type Transport = "stdio" | "http";
@@ -36,6 +39,12 @@ type LoadState =
   | { kind: "loading" }
   | { kind: "ready" }
   | { kind: "error"; message: string };
+
+function connectionSummary(server: Server): string {
+  return server.kind === "stdio"
+    ? `${String(server.entry.command ?? "")} ${Array.isArray(server.entry.args) ? server.entry.args.join(" ") : ""}`
+    : String(server.entry.url ?? server.entry.serverUrl ?? "");
+}
 
 const blankEditor = (kind: Transport = "stdio"): Editor => ({
   mode: "create",
@@ -121,6 +130,7 @@ function payloadFor(editor: Editor): Record<string, unknown> {
 export function McpPage() {
   const { invoke, label } = useHarness();
   const [servers, setServers] = useState<Server[]>([]);
+  const [serverSearch, setServerSearch] = useState("");
   const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
   const [editor, setEditor] = useState<Editor | null>(null);
   const [error, setError] = useState("");
@@ -135,6 +145,16 @@ export function McpPage() {
   const firstInput = useRef<HTMLInputElement>(null);
   const isEditing = editor !== null;
   const canMutate = loadState.kind === "ready" && !busy;
+  const normalizedServerSearch = serverSearch.trim().toLocaleLowerCase();
+  const visibleServers = normalizedServerSearch
+    ? servers.filter((server) => {
+        const publicConnection = server.kind === "stdio"
+          ? [server.entry.command, ...(Array.isArray(server.entry.args) ? server.entry.args : [])]
+          : [server.entry.url ?? server.entry.serverUrl];
+        return [server.name, ...publicConnection]
+          .some((value) => typeof value === "string" && value.toLocaleLowerCase().includes(normalizedServerSearch));
+      })
+    : servers;
 
   const refresh = useCallback(async () => {
     setLoadState({ kind: "loading" });
@@ -274,8 +294,20 @@ export function McpPage() {
           </p>
         </div>
       ) : (
+        <>
+        <div className="collection-search">
+          <label htmlFor="mcp-search">Search MCP servers</label>
+          <div>
+            <input id="mcp-search" type="search" value={serverSearch} onChange={(event) => setServerSearch(event.target.value)} />
+            {serverSearch && <button type="button" className="text-button" onClick={() => setServerSearch("")}>Clear search</button>}
+          </div>
+          <p role="status">Showing {visibleServers.length} of {servers.length} MCP servers</p>
+        </div>
+        {visibleServers.length === 0 ? (
+          <p className="empty-copy">No MCP servers match "{serverSearch.trim()}".</p>
+        ) : (
         <div className="mcp-list" role="region" tabIndex={0} aria-label="MCP servers">
-          {servers.map((server) => (
+          {visibleServers.map((server) => (
             <article className="mcp-card" key={server.name}>
               <div className="mcp-card-heading">
                 <div>
@@ -322,21 +354,21 @@ export function McpPage() {
                   </button>
                 </div>
               </div>
-              <p className="mcp-summary" tabIndex={0}>
-                {server.kind === "stdio"
-                  ? `${String(server.entry.command ?? "")} ${Array.isArray(server.entry.args) ? server.entry.args.join(" ") : ""}`
-                  : String(server.entry.url ?? server.entry.serverUrl ?? "")}
-              </p>
+              {connectionSummary(server).length > 72 ? (
+                <details className="mcp-details mcp-connection">
+                  <summary>Command and URL</summary>
+                  <p className="mcp-summary" tabIndex={0}>{connectionSummary(server)}</p>
+                </details>
+              ) : (
+                <p className="mcp-summary" tabIndex={0}>{connectionSummary(server)}</p>
+              )}
               {server.entry.env || server.entry.headers ? (
                 <details className="mcp-details">
                   <summary>Connection details (masked)</summary>
-                  <pre className="mcp-secrets" tabIndex={0}>
-                    {JSON.stringify(
-                      server.entry.env ?? server.entry.headers,
-                      null,
-                      2,
-                    )}
-                  </pre>
+                  <JsonValue value={{
+                    ...(server.entry.env ? { env: server.entry.env } : {}),
+                    ...(server.entry.headers ? { headers: server.entry.headers } : {}),
+                  }} />
                 </details>
               ) : null}
               {bench?.name === server.name && (
@@ -366,6 +398,8 @@ export function McpPage() {
             </article>
           ))}
         </div>
+        )}
+        </>
       )}
       <footer className="pane-footer">
         <span>LOCAL FIRST</span>
@@ -460,17 +494,8 @@ export function McpPage() {
                     }
                   />
                 </label>
-                <label>
-                  Environment variables, JSON
-                  <textarea
-                    disabled={busy}
-                    value={editor.env}
-                    onChange={(event) =>
-                      setEditor({ ...editor, env: event.target.value })
-                    }
-                    placeholder='{"MODE":"safe"}'
-                  />
-                </label>
+                <JsonEditor id="mcp-environment" label="Environment variables, JSON" disabled={busy} value={editor.env}
+                  onChange={env => setEditor({ ...editor, env })} placeholder='{"MODE":"safe"}' />
               </>
             ) : (
               <>
@@ -487,17 +512,8 @@ export function McpPage() {
                     }
                   />
                 </label>
-                <label>
-                  Headers, JSON
-                  <textarea
-                    disabled={busy}
-                    value={editor.headers}
-                    onChange={(event) =>
-                      setEditor({ ...editor, headers: event.target.value })
-                    }
-                    placeholder='{"Authorization":"Bearer …"}'
-                  />
-                </label>
+                <JsonEditor id="mcp-headers" label="Headers, JSON" disabled={busy} value={editor.headers}
+                  onChange={headers => setEditor({ ...editor, headers })} placeholder='{"Authorization":"Bearer …"}' />
               </>
             )}
             <p className="mcp-hint">

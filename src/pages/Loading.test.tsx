@@ -8,7 +8,7 @@ import { Transcripts } from "./Transcripts";
 const pages = [
   { name: "hooks", Component: Hooks, command: "hooks_list", loading: "Loading hooks…", empty: "No hooks found in the user or selected project settings." },
   { name: "MCP servers", Component: McpPage, command: "mcp_list", loading: "Loading MCP servers…", empty: "Connect a tool server" },
-  { name: "transcripts", Component: Transcripts, command: "transcript_list_sessions", loading: "Loading sessions…", empty: "No sessions indexed yet." },
+  { name: "transcripts", Component: Transcripts, command: "transcript_list_sessions", loading: "Finding chats…", empty: "No chats found in this source." },
 ];
 
 describe.each(pages)("$name load feedback", ({ Component, command, loading, empty }) => {
@@ -21,11 +21,11 @@ describe.each(pages)("$name load feedback", ({ Component, command, loading, empt
     render(<Component />);
     expect(screen.getByText(loading)).toBeInTheDocument();
     expect(screen.queryByText(empty)).not.toBeInTheDocument();
-    if (command === "transcript_list_sessions") expect(screen.getByRole("button", { name: "Index transcripts" })).toBeDisabled();
-    await act(async () => { finish([]); });
+    if (command === "transcript_list_sessions") expect(screen.getByRole("button", { name: "Refresh chats" })).toBeDisabled();
+    await act(async () => { finish(command === "transcript_list_sessions" ? {sessions: [], source: "C:/native-chats", warnings: []} : []); });
     expect(await screen.findByText(empty)).toBeInTheDocument();
     expect(screen.queryByText(loading)).not.toBeInTheDocument();
-    if (command === "transcript_list_sessions") expect(screen.getByRole("button", { name: "Index transcripts" })).toBeEnabled();
+    if (command === "transcript_list_sessions") expect(screen.getByRole("button", { name: "Refresh chats" })).toBeEnabled();
   });
 
   it("reports a rejected load instead of claiming the source is empty", async () => {

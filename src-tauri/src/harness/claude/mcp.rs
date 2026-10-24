@@ -890,7 +890,7 @@ mod tests {
     };
 
     fn fixture() -> (tempfile::TempDir, ClaudeCodeHarness) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let root = dir.path().join("claude");
         fs::create_dir_all(&root).unwrap();
         let harness = ClaudeCodeHarness::new(crate::harness::HarnessPaths {
@@ -1048,7 +1048,7 @@ mod tests {
         let app_data = dir.path().join("app-data");
         let entry = json!({"command":"fixture-server","env":{"SERVICE_TOKEN":"fixture-secret"}});
         config_file(&harness, json!({"mcpServers":{"alpha":entry.clone()}}));
-        let ledger = harness.config_root().join(".harness-agent/ledger.json");
+        let ledger = harness.config_root().join(".orbit/ledger.json");
         fs::create_dir_all(&ledger).unwrap();
 
         let error = harness.mcp_disable("alpha", &app_data).unwrap_err();

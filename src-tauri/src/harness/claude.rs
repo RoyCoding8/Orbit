@@ -5,6 +5,7 @@
 //! back to `%USERPROFILE%\.claude`.
 
 use std::path::{Path, PathBuf};
+use unicode_normalization::UnicodeNormalization;
 
 pub mod mcp;
 
@@ -22,6 +23,20 @@ pub mod skills;
 
 /// Environment variable Claude Code honors to relocate its config directory.
 pub const CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
+
+pub(crate) fn project_key(path: &str) -> Option<String> {
+    let slug: String = path
+        .nfc()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    (slug.len() <= 200).then_some(slug)
+}
 
 /// A setting for controlling how one skill is surfaced by Claude Code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -174,7 +189,7 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::test_support::tempdir().unwrap();
             let home = dir.path().to_path_buf();
             fs::create_dir_all(home.join("claude")).unwrap();
             Self { _dir: dir, home }
@@ -295,7 +310,7 @@ mod tests {
     /// override is never touched.
     #[test]
     fn override_state_file_lives_inside_the_override_not_beside_it() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let home = dir.path();
         let override_dir = home.join("claude-alt");
         fs::create_dir_all(&override_dir).unwrap();

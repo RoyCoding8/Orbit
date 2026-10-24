@@ -930,7 +930,7 @@ mod tests {
 
     #[test]
     fn v2_hooks_edit_the_selected_agent_profile_and_have_no_toggle() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir().unwrap();
         let harness = KiroHarness::new(root.path().join("home/.kiro"));
         let project = root.path().join("project");
         std::fs::create_dir_all(harness.home().join("agents")).unwrap();
@@ -972,7 +972,7 @@ mod tests {
 
     #[test]
     fn v3_standalone_hooks_preserve_native_enable_and_delete_behavior() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir().unwrap();
         let home = root.path().join("home/.kiro");
         let harness = KiroHarness::new(home.clone());
         std::fs::create_dir_all(home.join("settings")).unwrap();
@@ -1006,7 +1006,7 @@ mod tests {
 
     #[test]
     fn v3_interleaved_triggers_mutate_the_matching_native_array_entry() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir().unwrap();
         let home = root.path().join("home/.kiro");
         let harness = KiroHarness::new(home.clone());
         std::fs::create_dir_all(home.join("settings")).unwrap();
@@ -1038,7 +1038,7 @@ mod tests {
 
     #[test]
     fn v2_default_source_discovery_does_not_require_login_or_inference() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir().unwrap();
         let harness = KiroHarness::new(root.path().join("home/.kiro"));
         std::fs::create_dir_all(harness.home().join("agents")).unwrap();
         std::fs::write(
@@ -1052,7 +1052,7 @@ mod tests {
 
     #[test]
     fn v3_empty_source_is_creatable_with_all_native_triggers() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir().unwrap();
         let home = root.path().join("home/.kiro");
         let harness = KiroHarness::new(home.clone());
         std::fs::create_dir_all(home.join("settings")).unwrap();
@@ -1087,7 +1087,7 @@ mod tests {
 
     #[test]
     fn v3_json_agent_inline_hooks_use_native_profile_array() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir().unwrap();
         let home = root.path().join("home/.kiro");
         let harness = KiroHarness::new(home.clone());
         std::fs::create_dir_all(home.join("settings")).unwrap();
@@ -1138,7 +1138,7 @@ mod tests {
 
     #[test]
     fn v3_markdown_agent_hooks_are_listed_read_only() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir().unwrap();
         let home = root.path().join("home/.kiro");
         let harness = KiroHarness::new(home.clone());
         std::fs::create_dir_all(home.join("settings")).unwrap();

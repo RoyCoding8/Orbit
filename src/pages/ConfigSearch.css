@@ -1,0 +1,4 @@
+.effective-search { display: grid; gap: 6px; margin-bottom: 12px; }
+.effective-search label { font-size: 12px; font-weight: 600; }
+.effective-search-controls { display: flex; align-items: center; gap: 6px; }
+.effective-search input { box-sizing: border-box; min-width: 0; width: 100%; padding: 9px 10px; border: 1px solid var(--md-sys-color-outline, #79747e); border-radius: 10px; background: var(--md-sys-color-surface, #fff); color: var(--md-sys-color-on-surface, #1d1b20); font: inherit; font-size: 12px; }

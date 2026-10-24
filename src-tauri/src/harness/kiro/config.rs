@@ -96,7 +96,7 @@ mod tests {
 
     #[test]
     fn layers_overlay_and_keep_native_dotted_setting_names() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir().unwrap();
         let harness = KiroHarness::new(root.path().join("home/.kiro"));
         let project = root.path().join("project");
         std::fs::create_dir_all(project.join(".kiro/settings")).unwrap();
@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn applying_masked_setting_preserves_existing_credential() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir().unwrap();
         let harness = KiroHarness::new(root.path().join("home/.kiro"));
         std::fs::create_dir_all(harness.home().join("settings")).unwrap();
         std::fs::write(

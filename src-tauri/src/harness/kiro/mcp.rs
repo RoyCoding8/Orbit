@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn server_crud_uses_kiro_mcp_shape_and_masks_credentials() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir().unwrap();
         let harness = KiroHarness::new(root.path().join("home/.kiro"));
 
         save(

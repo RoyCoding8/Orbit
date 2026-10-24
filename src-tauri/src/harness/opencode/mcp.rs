@@ -316,7 +316,7 @@ fn validate_name(name: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use crate::test_support::tempdir;
 
     #[test]
     fn native_local_server_roundtrips_through_editor_contract_and_jsonc_comments_survive() {

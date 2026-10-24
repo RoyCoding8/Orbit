@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn instruction_delete_checks_stale_content_and_removes_known_inbound_links() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir().unwrap();
         let harness = PiHarness::new(root.path().join(".pi/agent"), root.path().join("home"));
         let project = root.path().join("project");
         let pi = project.join(".pi");

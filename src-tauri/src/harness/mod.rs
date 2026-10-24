@@ -172,24 +172,24 @@ mod tests {
 
     #[test]
     fn override_config_dir_moves_both_the_root_and_the_state_file() {
-        let home = std::path::Path::new(r"C:\Users\fixture");
-        let paths = resolve_paths(Some(r"D:\fixture\claude-alt"), home);
+        let home = std::path::Path::new("/fixture/home");
+        let paths = resolve_paths(Some("/fixture/claude-alt"), home);
         assert_eq!(
             paths.config_root,
-            std::path::PathBuf::from(r"D:\fixture\claude-alt")
+            std::path::PathBuf::from("/fixture/claude-alt")
         );
         assert_eq!(
             paths.claude_json,
-            std::path::PathBuf::from(r"D:\fixture\claude-alt\.claude.json")
+            std::path::PathBuf::from("/fixture/claude-alt/.claude.json")
         );
     }
 
     #[test]
     fn missing_or_blank_override_keeps_the_default_layout() {
-        let home = std::path::Path::new(r"C:\Users\fixture");
+        let home = std::path::Path::new("/fixture/home");
         let expected = HarnessPaths {
-            config_root: std::path::PathBuf::from(r"C:\Users\fixture\.claude"),
-            claude_json: std::path::PathBuf::from(r"C:\Users\fixture\.claude.json"),
+            config_root: std::path::PathBuf::from("/fixture/home/.claude"),
+            claude_json: std::path::PathBuf::from("/fixture/home/.claude.json"),
         };
         assert_eq!(resolve_paths(None, home), expected);
         assert_eq!(resolve_paths(Some(""), home), expected);
@@ -198,11 +198,8 @@ mod tests {
 
     #[test]
     fn a_set_override_is_trimmed_before_use() {
-        let home = std::path::Path::new(r"C:\Users\fixture");
-        let paths = resolve_paths(Some("  D:\\fixture\\cfg  "), home);
-        assert_eq!(
-            paths.config_root,
-            std::path::PathBuf::from(r"D:\fixture\cfg")
-        );
+        let home = std::path::Path::new("/fixture/home");
+        let paths = resolve_paths(Some("  /fixture/cfg  "), home);
+        assert_eq!(paths.config_root, std::path::PathBuf::from("/fixture/cfg"));
     }
 }

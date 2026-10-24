@@ -449,7 +449,7 @@ fn resolved_or_deleted_path(path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use crate::test_support::tempdir;
 
     fn file_at<'a>(catalog: &'a MemoryCatalog, path: &Path) -> &'a MemoryFile {
         let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());

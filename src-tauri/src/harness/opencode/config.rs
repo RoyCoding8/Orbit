@@ -316,7 +316,7 @@ pub(crate) fn mutate_jsonc(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use crate::test_support::tempdir;
 
     #[test]
     fn config_edit_preserves_jsonc_comments_and_undo_restores_bytes() {

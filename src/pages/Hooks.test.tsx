@@ -16,6 +16,22 @@ const hook = {
 };
 
 describe("hook mutation identity", () => {
+  it("filters by hook metadata and commands and lets the user expand details", async () => {
+    mockIPC(command => command === "hooks_list" ? [{ ...hook, matcher: "Write", commands: ["node verify-long-command.js"] }] : []);
+    render(<Hooks />);
+    const search = await screen.findByRole("searchbox", { name: "Search hooks" });
+    fireEvent.change(search, { target: { value: "VERIFY-LONG" } });
+    expect(screen.getByRole("heading", { name: "PreToolUse" })).toBeInTheDocument();
+    expect(screen.getByText("Showing 1 of 1 hooks")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search hooks" }), { target: { value: "does-not-match" } });
+    expect(screen.getByText('No hooks match "does-not-match".')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
+    fireEvent.click(screen.getByText("Hook details"));
+    expect(screen.getByText("node verify-long-command.js")).toBeInTheDocument();
+    expect(screen.getByText("node verify-long-command.js").closest("details")).toHaveAttribute("open");
+  });
+
   it("disables the displayed identity without converting it to an array index", async () => {
     const ipc = vi.fn((command: string, payload?: InvokeArgs) => {
       if (command === "hooks_list") return [hook];

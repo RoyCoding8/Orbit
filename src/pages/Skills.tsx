@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHarness } from "../HarnessContext";
 import { open } from "@tauri-apps/plugin-dialog";
+import { MarkdownEditor } from "../components/MarkdownEditor";
+import "./ListControls.css";
 
 type SkillState = "on" | "name-only" | "user-invocable-only" | "off";
 type Skill = {
@@ -32,6 +34,7 @@ export function Skills() {
   const invoke = useCallback(<T,>(command: string, args?: Record<string, unknown>) =>
     request<T>(command, profile.projectSkills ? { ...args, projectRoot } : args), [request, profile.projectSkills, projectRoot]);
   const [skills, setSkills] = useState<Skill[]>([]);
+  const [skillSearch, setSkillSearch] = useState("");
   const [ledger, setLedger] = useState<LedgerRow[]>([]);
   const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
   const [editing, setEditing] = useState<Skill | null>(null);
@@ -90,6 +93,14 @@ export function Skills() {
     );
   }, [ledger]);
   const canMutate = loadState.kind === "ready" && !busy;
+  const normalizedSkillSearch = skillSearch.trim().toLocaleLowerCase();
+  const visibleSkills = useMemo(
+    () => normalizedSkillSearch
+      ? skills.filter((skill) => [skill.id, skill.name, skill.description, skill.path, skill.content]
+          .some((value) => value?.toLocaleLowerCase().includes(normalizedSkillSearch)))
+      : skills,
+    [normalizedSkillSearch, skills],
+  );
   const update = async (action: () => Promise<unknown>) => {
     setBusy(true);
     try {
@@ -204,8 +215,20 @@ export function Skills() {
               </button>
             </div>
           ) : (
+            <>
+              <div className="collection-search">
+                <label htmlFor="skills-search">Search skills</label>
+                <div>
+                  <input id="skills-search" type="search" value={skillSearch} onChange={(event) => setSkillSearch(event.target.value)} />
+                  {skillSearch && <button type="button" className="text-button" onClick={() => setSkillSearch("")}>Clear search</button>}
+                </div>
+                <p role="status">Showing {visibleSkills.length} of {skills.length} skills</p>
+              </div>
+              {visibleSkills.length === 0 ? (
+                <p className="empty-copy">No skills match "{skillSearch.trim()}".</p>
+              ) : (
             <div className="skill-list" role="region" tabIndex={0} aria-label="Available skills">
-              {skills.map((skill) => (
+              {visibleSkills.map((skill) => (
                 <article className="skill-card" key={skill.id}>
                   <div className="skill-copy">
                     <div className="skill-title-row">
@@ -215,9 +238,11 @@ export function Skills() {
                       </span>
                     </div>
                     <p className="skill-id">{skill.id}</p>
-                    <p className="supporting-copy" tabIndex={0}>
-                      {skill.description || "No description in frontmatter."}
-                    </p>
+                    <details className="collection-card-details">
+                      <summary>Skill details</summary>
+                      <p className="supporting-copy">{skill.description || "No description in frontmatter."}</p>
+                      <p className="skill-id">Path: {skill.path}</p>
+                    </details>
                   </div>
                   {profile.skillModes.length > 0 && <><label className="state-toggle">
                     <input
@@ -281,6 +306,8 @@ export function Skills() {
                 </article>
               ))}
             </div>
+              )}
+            </>
           )}
           {restorable.length > 0 && (
             <details className="restore-section">
@@ -344,18 +371,8 @@ export function Skills() {
               </p>
             )}
             <div className="diff-columns">
-              <label>
-                Current SKILL.md<pre>{editing.content}</pre>
-              </label>
-              <label>
-                Proposed SKILL.md
-                <textarea
-                  ref={draftInput}
-                  disabled={busy}
-                  value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
-                />
-              </label>
+              <MarkdownEditor key={`${editing.id}-original`} id="skill-original" label="Current SKILL.md" value={editing.content} readOnly />
+              <MarkdownEditor key={editing.id} id="skill-draft" label="Proposed SKILL.md" value={draft} onChange={setDraft} disabled={busy} inputRef={draftInput} />
             </div>
             <div className="dialog-actions">
               <button

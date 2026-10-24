@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHarness } from "../HarnessContext";
+import { JsonEditor } from "../components/JsonEditor";
+import "./ListControls.css";
 
 type Layer = "user" | "project";
 type Hook = {
@@ -37,6 +39,7 @@ export function Hooks() {
 function CommandHooks({ policy }: { policy: HookPolicy }) {
   const { invoke, client, label } = useHarness();
   const [hooks, setHooks] = useState<Hook[]>([]);
+  const [hookSearch, setHookSearch] = useState("");
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">(
     "loading",
   );
@@ -57,6 +60,14 @@ function CommandHooks({ policy }: { policy: HookPolicy }) {
   const loadSequence = useRef(0);
   const source = sources.find(item => item.id === sourceId);
   const events = source?.events ?? policy.events;
+  const normalizedHookSearch = hookSearch.trim().toLocaleLowerCase();
+  const visibleHooks = useMemo(
+    () => normalizedHookSearch
+      ? hooks.filter((hook) => [hook.id, hook.event, hook.matcher, hook.layer, hook.source_path, ...hook.commands]
+          .some((value) => value?.toLocaleLowerCase().includes(normalizedHookSearch)))
+      : hooks,
+    [hooks, normalizedHookSearch],
+  );
   useEffect(() => {
     if (!events.includes(event)) setEvent(events[0] ?? "");
   }, [event, events]);
@@ -303,16 +314,7 @@ function CommandHooks({ policy }: { policy: HookPolicy }) {
               This command looks destructive. Saving requires confirmation.
             </p>
           )}
-          <label className="field-label" htmlFor="hook-sample">
-            Sample JSON input
-          </label>
-          <textarea
-            id="hook-sample"
-            value={sample}
-            onChange={(e) => setSample(e.target.value)}
-            rows={5}
-            spellCheck={false}
-          />
+          <JsonEditor id="hook-sample" label="Sample JSON input" value={sample} onChange={setSample} disabled={busy} />
           <div className="hook-actions">
             <button
               className="action-button"
@@ -392,8 +394,20 @@ function CommandHooks({ policy }: { policy: HookPolicy }) {
               No hooks found in the user or selected project settings.
             </p>
           ) : (
+            <>
+            <div className="collection-search">
+              <label htmlFor="hooks-search">Search hooks</label>
+              <div>
+                <input id="hooks-search" type="search" value={hookSearch} onChange={(event) => setHookSearch(event.target.value)} />
+                {hookSearch && <button type="button" className="text-button" onClick={() => setHookSearch("")}>Clear search</button>}
+              </div>
+              <p role="status">Showing {visibleHooks.length} of {hooks.length} hooks</p>
+            </div>
+            {visibleHooks.length === 0 ? (
+              <p className="config-empty">No hooks match "{hookSearch.trim()}".</p>
+            ) : (
             <div className="hook-list" role="region" tabIndex={0} aria-label="Configured hooks">
-              {hooks.map((hook) => (
+              {visibleHooks.map((hook) => (
                 <article className="hook-card" key={hook.id}>
                   <div className="hook-copy">
                     <div className="skill-title-row">
@@ -404,15 +418,18 @@ function CommandHooks({ policy }: { policy: HookPolicy }) {
                         {client === "codex" ? "Configured" : hook.enabled ? "Enabled" : "Disabled"}
                       </span>
                     </div>
-                    <p className="hook-meta">
-                      {hook.layer} scope · matcher: {hook.matcher || "all"}
-                    </p>
-                    {hook.source_path && <p className="layer-path">{hook.source_path}{!hook.editable && " · Inherited, read-only"}</p>}
-                    {hook.commands.map((value, i) => (
-                      <code className="hook-command" key={`${hook.id}-${i}`} tabIndex={0}>
-                        {value}
-                      </code>
-                    ))}
+                    <details className="collection-card-details">
+                      <summary>Hook details</summary>
+                      <p className="hook-meta">
+                        {hook.layer} scope · matcher: {hook.matcher || "all"}
+                      </p>
+                      {hook.source_path && <p className="layer-path">{hook.source_path}{!hook.editable && " · Inherited, read-only"}</p>}
+                      {hook.commands.map((value, i) => (
+                        <code className="hook-command" key={`${hook.id}-${i}`} tabIndex={0}>
+                          {value}
+                        </code>
+                      ))}
+                    </details>
                   </div>
                   <div className="card-actions">
                     {hook.enabled && (
@@ -452,6 +469,8 @@ function CommandHooks({ policy }: { policy: HookPolicy }) {
                 </article>
               ))}
             </div>
+            )}
+            </>
           )}
         </section>
       </div>

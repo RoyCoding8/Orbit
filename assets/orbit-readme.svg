@@ -1,20 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="960" height="250" viewBox="0 0 960 250" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96" role="img" aria-labelledby="title">
   <title id="title">Orbit</title>
-  <desc id="desc">A desktop control panel for Claude Code.</desc>
-  <defs>
-    <linearGradient id="wash" x1="0" y1="0" x2="1" y2="1">
-      <stop stop-color="#f1edff"/>
-      <stop offset="1" stop-color="#faf8ff"/>
-    </linearGradient>
-  </defs>
-  <rect width="960" height="250" rx="28" fill="url(#wash)"/>
-  <rect x="46" y="49" width="152" height="152" rx="38" fill="#6750a4"/>
-  <path d="M88 91v68m68-68v68M89 125h66" fill="none" stroke="#fff" stroke-linecap="round" stroke-width="12"/>
-  <circle cx="88" cy="91" r="7" fill="#d0bcff"/>
-  <circle cx="156" cy="159" r="7" fill="#d0bcff"/>
-  <text x="238" y="117" fill="#201a2d" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="56" font-weight="700" letter-spacing="-1.5">Orbit</text>
-  <text x="240" y="158" fill="#625d70" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20">Your coding agent setup, in one place</text>
-  <rect x="240" y="184" width="184" height="30" rx="15" fill="#e7dfff"/>
-  <circle cx="258" cy="199" r="4" fill="#6750a4"/>
-  <text x="271" y="204" fill="#493779" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="12" font-weight="600" letter-spacing="1">WINDOWS DESKTOP</text>
+  <circle cx="48" cy="48" r="24" fill="none" stroke="#3b82f6" stroke-width="9"/>
+  <ellipse cx="48" cy="48" rx="42" ry="15" transform="rotate(-35 48 48)" fill="none" stroke="#60a5fa" stroke-width="3"/>
+  <circle cx="80" cy="27" r="7" fill="#f97316"/>
 </svg>

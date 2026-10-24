@@ -67,12 +67,17 @@ function parseScopeFilter(value: string): ScopeFilter {
   return "all";
 }
 
+function matchesSearch(query: string, fields: readonly (string | null | undefined)[]): boolean {
+  return !query || fields.some((field) => field?.toLocaleLowerCase().includes(query));
+}
+
 export function History() {
   const { invoke } = useHarness();
   const [snapshot, setSnapshot] = useState<HistorySnapshot>(emptySnapshot);
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [tab, setTab] = useState<Tab>("versions");
   const [scopeFilter, setScopeFilter] = useState<ScopeFilter>("all");
+  const [search, setSearch] = useState("");
   const [projectRoot, setProjectRoot] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -103,19 +108,53 @@ export function History() {
     };
   }, [load]);
 
-  const visibleVersions = useMemo(
+  const normalizedSearch = search.trim().toLocaleLowerCase();
+  const scopedVersions = useMemo(
     () =>
       snapshot.versions.filter(
         (version) => scopeFilter === "all" || version.scope === scopeFilter,
       ),
     [scopeFilter, snapshot.versions],
   );
-  const visibleLogs = useMemo(
+  const scopedLogs = useMemo(
     () =>
       snapshot.logs.filter(
         (entry) => scopeFilter === "all" || entry.scope === scopeFilter,
       ),
     [scopeFilter, snapshot.logs],
+  );
+  const visibleVersions = useMemo(
+    () => scopedVersions.filter((version) => matchesSearch(normalizedSearch, [
+      version.id,
+      version.resourceKind,
+      version.resourceId,
+      version.target,
+      version.scope,
+      version.scopeId,
+      version.scopeLabel,
+      version.action,
+      version.kind,
+      formatTime(version.timestamp),
+      backupLabels[version.backupStatus],
+      targetState(version.currentChecksum),
+    ])),
+    [normalizedSearch, scopedVersions],
+  );
+  const visibleLogs = useMemo(
+    () => scopedLogs.filter((entry) => matchesSearch(normalizedSearch, [
+      entry.id,
+      entry.resourceKind,
+      entry.resourceId,
+      entry.target ?? "Target not recorded",
+      entry.scope,
+      entry.scopeId,
+      entry.scopeLabel,
+      entry.action,
+      entry.status,
+      formatTime(entry.timestamp),
+      entry.backupStatus === null ? "No saved payload" : backupLabels[entry.backupStatus],
+    ])),
+    [normalizedSearch, scopedLogs],
   );
 
   const chooseProject = async () => {
@@ -227,7 +266,27 @@ export function History() {
             <option value="project">Project</option>
           </select>
         </label>
+        <label className="history-search" htmlFor="history-search">
+          Search history
+          <span>
+            <input
+              id="history-search"
+              type="search"
+              aria-label="Search history"
+              value={search}
+              onChange={(event) => setSearch(event.currentTarget.value)}
+            />
+            {search && (
+              <button className="text-button" type="button" onClick={() => setSearch("")}>
+                Clear search
+              </button>
+            )}
+          </span>
+        </label>
       </div>
+      <p className="history-search-count" role="status">
+        Showing {visibleVersions.length} of {scopedVersions.length} versions and {visibleLogs.length} of {scopedLogs.length} logs
+      </p>
 
       {error && <p className="history-error" role="alert">{error}</p>}
       {loadState === "loading" && (
@@ -268,14 +327,20 @@ export function History() {
           tabIndex={0}
         >
           {loadState === "ready" && visibleVersions.length === 0 && (
-            <p className="history-empty">No saved versions match this scope.</p>
+            <p className="history-empty">
+              {snapshot.versions.length === 0
+                ? "No saved versions found."
+                : scopedVersions.length === 0
+                  ? "No saved versions match this scope."
+                  : `No versions match "${search.trim()}".`}
+            </p>
           )}
           {versionsByGroup.map((group) => (
-            <section className="history-group" key={`${group[0].scopeId}:${group[0].scopeLabel}`}>
-              <header className="history-group-heading">
+            <details className="history-group" key={`${group[0].scopeId}:${group[0].scopeLabel}`} open={versionsByGroup[0] === group}>
+              <summary className="history-group-heading">
                 <h3>{group[0].scopeLabel}</h3>
                 <span>{group.length}</span>
-              </header>
+              </summary>
               <div className="history-list">
                 {group.map((version) => (
                   <article className="history-version" key={version.id}>
@@ -313,7 +378,7 @@ export function History() {
                   </article>
                 ))}
               </div>
-            </section>
+            </details>
           ))}
         </div>
       ) : (
@@ -325,7 +390,13 @@ export function History() {
           tabIndex={0}
         >
           {loadState === "ready" && visibleLogs.length === 0 && (
-            <p className="history-empty">No operations match this scope.</p>
+            <p className="history-empty">
+              {snapshot.logs.length === 0
+                ? "No operations found."
+                : scopedLogs.length === 0
+                  ? "No operations match this scope."
+                  : `No operations match "${search.trim()}".`}
+            </p>
           )}
           <div className="history-list">
             {visibleLogs.map((entry) => (

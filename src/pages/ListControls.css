@@ -1,0 +1,55 @@
+.collection-search {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+}
+
+.collection-search > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.collection-search label { font-size: 12px; font-weight: 600; }
+
+.collection-search input {
+  box-sizing: border-box;
+  min-width: 0;
+  width: min(100%, 420px);
+  padding: 12px 14px;
+  border: 1px solid var(--md-sys-color-outline-variant, #cac4d0);
+  border-radius: 12px;
+  color: var(--md-sys-color-on-surface, #1d1b20);
+  background: var(--md-sys-color-surface, #fff);
+  font: inherit;
+}
+
+.collection-search input:focus-visible,
+.collection-search button:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary, #6750a4);
+  outline-offset: 2px;
+}
+
+.collection-search button {
+  flex-shrink: 0;
+  font: inherit;
+}
+
+.collection-search p {
+  margin: 0;
+  color: var(--md-sys-color-on-surface-variant, #49454f);
+  font-size: 12px;
+}
+
+.collection-card-details {
+  margin-top: 8px;
+}
+
+.collection-card-details summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--md-sys-color-primary, #6750a4);
+  font-size: 12px;
+  font-weight: 600;
+}
+

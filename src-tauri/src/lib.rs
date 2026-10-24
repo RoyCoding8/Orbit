@@ -3,6 +3,9 @@ pub mod history;
 pub mod ledger;
 pub mod transcript;
 
+#[cfg(test)]
+mod test_support;
+
 use harness::{selected::SelectedHarness, Client, Harness as _};
 use serde_json::Value;
 use std::{
@@ -494,14 +497,72 @@ async fn transcript_ingest(
 #[tauri::command]
 async fn transcript_list_sessions(
     app: tauri::AppHandle,
+    project_roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+    refresh: Option<bool>,
     client: Option<Client>,
-) -> Result<Vec<transcript::SessionSummary>, String> {
+) -> Result<SessionCatalog, String> {
+    let roots = project_roots.inner().clone();
     run_blocking(move || {
         let harness = SelectedHarness::from_env(client);
-        transcript::ingest::list_sessions(&harness.transcript_cache(&app_data_dir(&app)?))
-            .map_err(|e| e.to_string())
+        let app_dir = app_data_dir(&app)?;
+        let mut warnings = Vec::new();
+        if refresh.unwrap_or(false) {
+            let report = harness
+                .transcript_ingest(&app_dir, &roots.resolve(project_root)?)
+                .map_err(|error| {
+                    format!(
+                        "Could not read chats from {}: {error}",
+                        harness.config_root().display()
+                    )
+                })?;
+            if report.skipped_files > 0 {
+                warnings.push(format!("{} unreadable chat files", report.skipped_files));
+            }
+            if report.malformed_lines > 0 {
+                warnings.push(format!("{} malformed records", report.malformed_lines));
+            }
+        }
+        Ok(SessionCatalog {
+            warnings,
+            sessions: transcript::ingest::list_sessions(&harness.transcript_cache(&app_dir))
+                .map_err(|e| e.to_string())?,
+            source: match &harness {
+                SelectedHarness::Opencode(_) => "OpenCode v2 native session service".into(),
+                _ => harness.config_root().to_string_lossy().into_owned(),
+            },
+        })
     })
     .await
+}
+
+#[derive(serde::Serialize)]
+struct SessionCatalog {
+    sessions: Vec<transcript::SessionSummary>,
+    source: String,
+    warnings: Vec<String>,
+}
+
+#[tauri::command]
+async fn transcript_delete(
+    app: tauri::AppHandle,
+    session_id: String,
+    backup_directory: String,
+    client: Option<Client>,
+) -> Result<transcript::deletion::DeleteReport, String> {
+    run_blocking(move || {
+        let harness = SelectedHarness::from_env(client);
+        let app_dir = app_data_dir(&app)?;
+        let mut report = transcript::deletion::delete(
+            &harness, &app_dir, &session_id, Path::new(&backup_directory),
+        )?;
+        if let Err(error) = transcript::ingest::remove_sessions(
+            &harness.transcript_cache(&app_dir), &report.deleted_sessions,
+        ) {
+            report.warning = Some(format!("The chat was deleted, but its search index could not refresh: {error}. Refresh chats to rebuild it."));
+        }
+        Ok(report)
+    }).await
 }
 
 #[tauri::command]
@@ -757,6 +818,7 @@ pub fn run() {
             mcp_test,
             transcript_ingest,
             transcript_list_sessions,
+            transcript_delete,
             transcript_thread_page,
             transcript_message_page_offset,
             transcript_search,
@@ -777,7 +839,7 @@ mod project_root_tests {
 
     #[test]
     fn launch_directory_and_native_picker_grants_are_the_only_allowed_roots() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::tempdir().unwrap();
         let launch = directory.path().join("launch");
         let selected = directory.path().join("selected");
         let unknown = directory.path().join("unknown");
@@ -814,7 +876,7 @@ mod project_root_tests {
 
     #[test]
     fn authorization_compares_canonical_directory_paths() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::tempdir().unwrap();
         let project = directory.path().join("project");
         fs::create_dir_all(&project).unwrap();
         let alias = project.join("..").join("project");

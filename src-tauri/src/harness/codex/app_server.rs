@@ -17,6 +17,46 @@ use crate::harness::{process_lifetime::ChildTree, Harness};
 const RESPONSE_BUDGET: u64 = 8 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+pub(crate) fn delete_session(harness: &CodexHarness, session_id: &str) -> Result<(), String> {
+    let mut command = Command::new("codex");
+    command
+        .args(["delete", session_id, "--force"])
+        .env("CODEX_HOME", harness.config_root())
+        .env("HOME", harness.home())
+        .env("USERPROFILE", harness.home())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(sqlite_home) = &harness.sqlite_home {
+        command.env("CODEX_SQLITE_HOME", sqlite_home);
+    } else {
+        command.env_remove("CODEX_SQLITE_HOME");
+    }
+    let mut child = ChildTree::spawn(&mut command)
+        .map_err(|error| format!("Could not start Codex session deletion: {error}"))?;
+    let deadline = Instant::now() + REQUEST_TIMEOUT;
+    loop {
+        match child.child_mut().try_wait() {
+            Ok(Some(status)) => {
+                child.cleanup();
+                return status
+                    .success()
+                    .then_some(())
+                    .ok_or_else(|| "Codex CLI could not delete the session.".to_owned());
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                child.cleanup();
+                return Err("Codex session deletion did not finish within 30 seconds.".into());
+            }
+            Err(error) => {
+                child.cleanup();
+                return Err(format!("Could not check Codex deletion process: {error}"));
+            }
+        }
+    }
+}
+
 pub(crate) fn request(
     harness: &CodexHarness,
     cwd: &Path,

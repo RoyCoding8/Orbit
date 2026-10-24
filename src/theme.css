@@ -1,0 +1,83 @@
+.application-shell {
+  color-scheme: light;
+  --md-sys-color-background: light-dark(#f5f7fb, #10151e);
+  --md-sys-color-surface: light-dark(#ffffff, #1a222e);
+  --md-sys-color-surface-container-low: light-dark(#ffffff, #1a222e);
+  --md-sys-color-surface-container: light-dark(#edf1f7, #242e3c);
+  --md-sys-color-surface-container-high: light-dark(#e3e9f2, #303c4c);
+  --md-sys-color-on-surface: light-dark(#202b3c, #e4eaf3);
+  --md-sys-color-on-surface-variant: light-dark(#58677d, #aab9cc);
+  --md-sys-color-outline: light-dark(#8b9ab0, #718199);
+  --md-sys-color-outline-variant: light-dark(#e0e6ef, #354256);
+  --md-sys-color-primary: light-dark(#245bd6, #a8c7ff);
+  --md-sys-color-on-primary: light-dark(#ffffff, #082d6f);
+  --md-sys-color-primary-container: light-dark(#dce9ff, #243e68);
+  --md-sys-color-on-primary-container: light-dark(#164795, #d7e5ff);
+  --md-sys-color-secondary-container: light-dark(#e5edf9, #2b3b52);
+  --md-sys-color-on-secondary-container: light-dark(#324c70, #d0e1fa);
+  --md-sys-color-tertiary-container: light-dark(#ffead3, #563b27);
+  --md-sys-color-on-tertiary-container: light-dark(#7f4814, #ffd7ad);
+  --md-sys-color-error: light-dark(#b22936, #ffb3b9);
+  --md-sys-color-error-container: light-dark(#fce7e9, #542b33);
+  --md-sys-color-on-error-container: light-dark(#82202b, #ffd9dd);
+  --orbit-blue: light-dark(#245bd6, #a8c7ff);
+  --orbit-blue-soft: light-dark(#e4eeff, #243e68);
+  --orbit-orange: light-dark(#aa4a15, #ffbc8d);
+  --orbit-orange-soft: light-dark(#fff0e3, #4a3228);
+  --orbit-green: light-dark(#16715b, #85d6bc);
+  --orbit-green-soft: light-dark(#e0f4ed, #213f3a);
+  --orbit-rose: light-dark(#a43b60, #f5a7c2);
+  --orbit-rose-soft: light-dark(#fce9ef, #4a2d3e);
+  --orbit-amber: light-dark(#825813, #eac47a);
+  --orbit-amber-soft: light-dark(#fff4d9, #473b24);
+  --orbit-rail: light-dark(#eef3fb, #151e2c);
+  --orbit-shadow: 0 2px 5px light-dark(rgb(34 58 94 / 4%), rgb(0 0 0 / 12%));
+  color: var(--md-sys-color-on-surface);
+  background: var(--md-sys-color-background);
+}
+.application-shell[data-theme="dark"] { color-scheme: dark; }
+@media (prefers-color-scheme: dark) { .application-shell[data-theme="system"] { color-scheme: dark; } }
+
+.workspace-controls { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 16px; }
+.theme-toggle { display: grid; place-items: center; width: 40px; height: 40px; padding: 0; border: 1px solid var(--md-sys-color-outline-variant); border-radius: 12px; background: var(--md-sys-color-surface-container); color: var(--md-sys-color-on-surface); cursor: pointer; }
+.theme-toggle:hover { background: var(--md-sys-color-surface-container-high); }
+.theme-toggle:focus-visible { outline: 2px solid var(--md-sys-color-primary); outline-offset: 3px; }
+.theme-icon { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+.theme-icon-sun { display: none; }
+.application-shell[data-theme="dark"] .theme-icon-sun { display: block; }
+.application-shell[data-theme="dark"] .theme-icon-moon { display: none; }
+@media (prefers-color-scheme: dark) {
+  .application-shell[data-theme="system"] .theme-icon-sun { display: block; }
+  .application-shell[data-theme="system"] .theme-icon-moon { display: none; }
+}
+.rail-item, .overview-link { --section-color: var(--orbit-blue); --section-fill: var(--orbit-blue-soft); }
+[data-section="skills"], [data-section="hooks"] { --section-color: var(--orbit-orange); --section-fill: var(--orbit-orange-soft); }
+[data-section="memories"], [data-section="transcripts"] { --section-color: var(--orbit-green); --section-fill: var(--orbit-green-soft); }
+[data-section="mcp"] { --section-color: var(--orbit-rose); --section-fill: var(--orbit-rose-soft); }
+[data-section="history"] { --section-color: var(--orbit-amber); --section-fill: var(--orbit-amber-soft); }
+.overview-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+.overview-link { display: flex; align-items: flex-start; gap: 14px; min-width: 0; padding: 22px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: 16px; background: var(--md-sys-color-surface); color: inherit; box-shadow: var(--orbit-shadow); font: inherit; text-align: left; cursor: pointer; }
+.overview-link > span:nth-child(2) { display: grid; gap: 7px; }
+.overview-link strong { font-size: 15px; }
+.overview-link > span:nth-child(2) > span { color: var(--md-sys-color-on-surface-variant); font-size: 13px; line-height: 1.55; }
+.feature-icon { display: grid; place-items: center; flex: none; width: 38px; height: 38px; border-radius: 11px; color: var(--section-color); background: var(--section-fill); font-size: 22px; }
+.shortcut-arrow { margin-left: auto; color: var(--md-sys-color-on-surface-variant); }
+.overview-link:hover { border-color: var(--section-color); }
+.overview-link:focus-visible, .workspace-controls select:focus-visible { outline: 2px solid var(--md-sys-color-primary); outline-offset: 3px; }
+.source-project, .state-on { background: var(--orbit-green-soft); color: var(--orbit-green); }
+.source-local, .state-name-only { background: var(--orbit-orange-soft); color: var(--orbit-orange); }
+.state-user-invocable-only { background: var(--orbit-blue-soft); color: var(--orbit-blue); }
+
+@media (max-width: 900px) {
+  .workspace-controls { gap: 8px 14px; }
+  .connection-state { flex-wrap: wrap; gap: 4px; }
+  .overview-grid { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+}
+@media (max-width: 520px) {
+  .workspace-controls { justify-content: flex-start; }
+  .overview-grid { grid-template-columns: 1fr; }
+}
+@media (forced-colors: active) {
+  .application-shell { color: CanvasText; background: Canvas; }
+  .rail-item.active, .view-switch button[aria-pressed="true"] { outline: 1px solid Highlight; }
+}

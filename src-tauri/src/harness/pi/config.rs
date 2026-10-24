@@ -128,7 +128,7 @@ mod tests {
 
     #[test]
     fn settings_strip_bom_merge_objects_and_track_the_project_source() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir().unwrap();
         let harness = PiHarness::new(root.path().join(".pi/agent"), root.path().to_path_buf());
         let project = root.path().join("project");
         std::fs::create_dir_all(harness.config_root()).unwrap();

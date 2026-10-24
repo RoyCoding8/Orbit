@@ -179,6 +179,17 @@ pub(super) fn prune_vanished_sessions(
     Ok(())
 }
 
+pub fn remove_sessions(cache: &Path, session_ids: &[String]) -> Result<(), TranscriptError> {
+    let mut connection = open_database(cache)?;
+    let transaction = connection.transaction()?;
+    for id in session_ids {
+        transaction.execute("DELETE FROM messages_fts WHERE session_id = ?1", [id])?;
+        transaction.execute("DELETE FROM sessions WHERE session_id = ?1", [id])?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
 fn ingest_session(
     connection: &mut Connection,
     path: &Path,
@@ -201,6 +212,16 @@ fn ingest_session(
         .filter_map(|(_, _, result)| result.as_ref().ok())
         .collect::<Vec<_>>();
     let tool_ids = tool_call_owners(&valid_values);
+    let native_project = valid_values
+        .iter()
+        .find_map(|value| {
+            value
+                .get("cwd")
+                .and_then(Value::as_str)
+                .filter(|cwd| !cwd.trim().is_empty())
+        })
+        .unwrap_or(project)
+        .to_owned();
     let mut title = SessionTitle::default();
     for value in &valid_values {
         title.observe(value);
@@ -260,7 +281,7 @@ fn ingest_session(
         connection,
         IndexedSession {
             id: session_id,
-            project,
+            project: &native_project,
             source_path: path,
             updated_at: modified.as_deref(),
             title: title.finish().as_deref(),
@@ -568,7 +589,7 @@ mod tests {
 
     #[test]
     fn adding_titles_preserves_the_existing_version_three_cache() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::tempdir().unwrap();
         let connection = Connection::open(database_path(directory.path())).unwrap();
         connection.execute_batch("CREATE TABLE sessions (session_id TEXT PRIMARY KEY, project TEXT NOT NULL, source_path TEXT NOT NULL, updated_at TEXT, message_count INTEGER NOT NULL DEFAULT 0); INSERT INTO sessions VALUES ('existing.jsonl', 'project', 'source.jsonl', NULL, 7); PRAGMA user_version = 3;").unwrap();
         drop(connection);
@@ -581,7 +602,7 @@ mod tests {
 
     #[test]
     fn ingestion_counts_source_lines_and_indexes_valid_messages() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let project = temp.path().join("projects").join("munged");
         fs::create_dir_all(&project).unwrap();
         let source = project.join("session-1.jsonl");
@@ -631,7 +652,7 @@ mod tests {
 
     #[test]
     fn spill_reattaches_by_tool_call_link_in_raw_json() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let project = temp.path().join("projects").join("munged");
         let spills = project.join("session-1").join("tool-results");
         fs::create_dir_all(&spills).unwrap();
@@ -656,7 +677,7 @@ mod tests {
 
     #[test]
     fn unlinked_spill_is_reported_on_the_session_thread() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let project = temp.path().join("projects").join("munged");
         let spills = project.join("session-1").join("tool-results");
         fs::create_dir_all(&spills).unwrap();
@@ -681,13 +702,13 @@ mod tests {
 
     #[test]
     fn missing_spill_directory_is_non_fatal() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         assert!(read_spills_for_tests(&temp.path().join("missing.jsonl")).is_empty());
     }
 
     #[test]
     fn state_lines_and_blank_lines_are_skipped_not_malformed() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let project = temp.path().join("projects").join("munged");
         fs::create_dir_all(&project).unwrap();
         let source = project.join("session-1.jsonl");
@@ -737,7 +758,7 @@ mod tests {
 
     #[test]
     fn non_utf8_session_file_does_not_abort_the_walk() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let project = temp.path().join("projects").join("munged");
         fs::create_dir_all(&project).unwrap();
         fs::write(
@@ -759,13 +780,13 @@ mod tests {
 
     #[test]
     fn same_filename_in_two_projects_keeps_two_sessions() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         for (project, text) in [("alpha", "alpha message"), ("beta", "beta message")] {
             let project_dir = temp.path().join("projects").join(project);
             fs::create_dir_all(&project_dir).unwrap();
             fs::write(
                 project_dir.join("dup.jsonl"),
-                format!("{{\"uuid\":\"m1\",\"type\":\"user\",\"message\":{{\"content\":\"{text}\"}}}}\n"),
+                format!("{{\"uuid\":\"m1\",\"type\":\"user\",\"cwd\":\"D:/native/{project}\",\"message\":{{\"content\":\"{text}\"}}}}\n"),
             )
             .unwrap();
         }
@@ -776,6 +797,13 @@ mod tests {
             .query_row("SELECT count(*) FROM sessions", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 2);
+        let sessions = list_sessions(&temp.path().join("db")).unwrap();
+        assert!(sessions
+            .iter()
+            .any(|s| s.session_id == "alpha/dup.jsonl" && s.project == "D:/native/alpha"));
+        assert!(sessions
+            .iter()
+            .any(|s| s.session_id == "beta/dup.jsonl" && s.project == "D:/native/beta"));
         let alpha: String = connection
             .query_row(
                 "SELECT text FROM messages WHERE session_id = 'alpha/dup.jsonl'",
@@ -796,7 +824,7 @@ mod tests {
 
     #[test]
     fn same_stem_with_case_distinct_extensions_keeps_two_sessions() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let project = temp.path().join("projects").join("munged");
         fs::create_dir_all(&project).unwrap();
         fs::write(
@@ -848,7 +876,7 @@ mod tests {
 
     #[test]
     fn deleted_source_file_is_pruned_after_a_full_reingest() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let project = temp.path().join("projects").join("munged");
         fs::create_dir_all(&project).unwrap();
         fs::write(
@@ -882,11 +910,20 @@ mod tests {
             )
             .unwrap();
         assert_eq!(fts, 0);
+        remove_sessions(&temp.path().join("db"), &["munged/keep.jsonl".into()]).unwrap();
+        assert!(list_sessions(&temp.path().join("db")).unwrap().is_empty());
+        let hits: i64 = connection
+            .query_row("SELECT count(*) FROM messages_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            hits, 0,
+            "explicit deletion also removes searchable messages"
+        );
     }
 
     #[test]
     fn uppercase_jsonl_extension_is_ingested() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let project = temp.path().join("projects").join("munged");
         fs::create_dir_all(&project).unwrap();
         fs::write(
@@ -901,7 +938,7 @@ mod tests {
 
     #[test]
     fn duplicate_uuid_indexes_only_the_last_record_and_fts_text() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let project = temp.path().join("projects").join("munged");
         fs::create_dir_all(&project).unwrap();
         let mut file = fs::File::create(project.join("session-1.jsonl")).unwrap();
@@ -951,7 +988,7 @@ mod tests {
 
     #[test]
     fn spilled_tool_result_text_is_searchable() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let project = temp.path().join("projects").join("munged");
         let spills = project.join("session-1").join("tool-results");
         fs::create_dir_all(&spills).unwrap();
@@ -975,7 +1012,7 @@ mod tests {
     #[test]
     fn previous_cache_versions_rebuild_to_the_full_filename_schema() {
         for previous_version in [1, 2] {
-            let temp = tempfile::tempdir().unwrap();
+            let temp = crate::test_support::tempdir().unwrap();
             let data_dir = temp.path().join("db");
             fs::create_dir_all(&data_dir).unwrap();
             let legacy = format!(
@@ -1005,7 +1042,7 @@ mod tests {
     #[test]
     fn locked_source_file_is_counted_and_prune_keeps_it() {
         use std::os::windows::fs::OpenOptionsExt;
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let project = temp.path().join("projects").join("munged");
         fs::create_dir_all(&project).unwrap();
         fs::write(
@@ -1042,7 +1079,7 @@ mod tests {
 
     #[test]
     fn current_cache_opens_while_another_connection_holds_the_writer_slot() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let mut writer = open_database(temp.path()).unwrap();
         let transaction = writer
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -1057,7 +1094,7 @@ mod tests {
 
     #[test]
     fn newer_schema_database_is_refused_without_mutation() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let data_dir = temp.path().join("db");
         fs::create_dir_all(&data_dir).unwrap();
         {
@@ -1086,7 +1123,7 @@ mod tests {
 
     #[test]
     fn duplicate_uuid_keeps_final_record_spill_attachment() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let project = temp.path().join("projects").join("munged");
         let spills = project.join("session-1").join("tool-results");
         fs::create_dir_all(&spills).unwrap();

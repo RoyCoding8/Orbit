@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useHarness } from "../HarnessContext";
 import { parseMemorySections, type MemorySection } from "./memorySections";
+import { MarkdownEditor } from "../components/MarkdownEditor";
+import { displayPath } from "../pathDisplay";
 import "./Memories.css";
 
 export type MemorySource = "projectAutoMemory" | "globalAutoMemory" | "projectInstructions" | "userInstructions";
@@ -52,7 +54,12 @@ export function Memories() {
   const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [memorySearch, setMemorySearch] = useState("");
+  const normalizedSearch = memorySearch.trim().toLocaleLowerCase();
   const selected = catalog?.files.find((file) => file.id === selectedId) ?? null;
+  const groups = [...(catalog?.groups ?? [])].sort((a, b) =>
+    Number(b.role === "userInstructions") - Number(a.role === "userInstructions"),
+  );
   const dirty = !!selected && draft !== selected.content;
   const sections = useMemo(() => selected?.source === "globalAutoMemory" ? parseMemorySections(draft) : [], [selected?.source, draft]);
   const sectionGroups = useMemo(() => {
@@ -65,6 +72,19 @@ export function Memories() {
     }
     return [...groups];
   }, [sections]);
+  const matchesSearch = (values: string[]) => !normalizedSearch || values.some((value) =>
+    value.toLocaleLowerCase().includes(normalizedSearch) || displayPath(value).toLocaleLowerCase().includes(normalizedSearch),
+  );
+  const filteredFiles = catalog?.files.filter((file) => {
+    const group = catalog.groups.find((entry) => entry.id === file.groupId);
+    const content = file.id === selectedId ? `${file.content}\n${draft}` : file.content;
+    return matchesSearch([file.name, file.path, content, group?.label ?? "", roleLabel(file.role)]);
+  }) ?? [];
+  const filteredSectionGroups = sectionGroups.map(([group, entries]) => [group, entries.filter((entry) =>
+    matchesSearch([group, entry.title, ...entry.projects, draft.slice(entry.start, entry.end)]),
+  )] as const).filter(([, entries]) => entries.length > 0);
+  const selectedFileIsVisible = filteredFiles.some((file) => file.id === selectedId);
+  const selectedSectionIsVisible = filteredSectionGroups.some(([, entries]) => entries.some((entry) => view.kind === "section" && entry.start === view.start));
   const editorStart = view.kind === "section" ? view.start : 0;
   const editorEnd = view.kind === "section" ? draft.length - view.trailingLength : draft.length;
   const showSections = sections.length > 1 || view.kind === "section";
@@ -169,28 +189,48 @@ export function Memories() {
       {loadState.kind === "error" ? <div className="empty-panel"><h3>Could not load memories</h3><p className="inline-error">{loadState.message}</p><button className="action-button" onClick={() => void load()}>Retry</button></div> : null}
       {loadState.kind === "ready" && catalog ? (
         <>
-          <div className="memory-project-banner"><span>Authorized project</span><code>{catalog.projectRoot}</code></div>
-          {catalog.excludedCustomMemoryDirectory && <p className="memory-boundary-note" role="note">Custom auto-memory directory is outside this authorized project and was excluded: <code>{catalog.excludedCustomMemoryDirectory}</code></p>}
+            <div className="memory-project-banner"><span>Authorized project</span><code>{displayPath(catalog.projectRoot)}</code></div>
+            {catalog.excludedCustomMemoryDirectory && <p className="memory-boundary-note" role="note">Custom auto-memory directory is outside this authorized project and was excluded: <code>{displayPath(catalog.excludedCustomMemoryDirectory)}</code></p>}
           <div className="memory-browser">
             <nav className="memory-groups" aria-label="Memory files by source">
-              {catalog.groups.map((group) => {
-                const files = catalog.files.filter((file) => file.groupId === group.id);
-                return <section className="memory-group" key={group.id}>
-                  <div className="memory-group-heading"><h3>{group.label}</h3><span className="count">{files.length}</span></div>
+              <div className="memory-search">
+                <label htmlFor="memory-search">Search memories</label>
+                <div className="memory-search-controls">
+                  <input id="memory-search" type="search" value={memorySearch} onChange={(event) => setMemorySearch(event.target.value)} placeholder="Name, path, project, or content" />
+                  <button className="text-button" type="button" onClick={() => setMemorySearch("")} disabled={!memorySearch} aria-label="Clear memory search">Clear</button>
+                </div>
+              </div>
+              {normalizedSearch && <p className="memory-search-count">{filteredFiles.length} matching files</p>}
+              {groups.map((group, index) => {
+                const allFiles = catalog.files.filter((file) => file.groupId === group.id);
+                const files = filteredFiles.filter((file) => file.groupId === group.id);
+                if (normalizedSearch && files.length === 0) return null;
+                const selectedGroup = allFiles.some((file) => file.id === selectedId);
+                const firstVisibleGroup = groups.find((candidate) => filteredFiles.some((file) => file.groupId === candidate.id))?.id;
+                return <details className="memory-group" key={group.id} open={selectedGroup || (!selectedFileIsVisible && group.id === firstVisibleGroup) || (!selectedId && index === 0)}>
+                  <summary className="memory-group-heading">
+                    <div className="memory-group-title">
+                      {group.role === "projectAutoMemory" && <small className="memory-group-badge">Auto memory</small>}
+                      {group.id === "selected-project" && <small className="memory-group-badge">Selected project</small>}
+                      <h3>{displayPath(group.label)}</h3>
+                    </div>
+                    <span className="count">{files.length}</span>
+                  </summary>
                   <p className="memory-source-hint">{sourceHint(group.role)}</p>
                   {files.length ? <ul>{files.map((file) => <li key={file.id}>
                     <button className={file.id === selectedId ? "memory-file active" : "memory-file"} aria-current={file.id === selectedId ? "page" : undefined} onClick={() => selectFile(file)} disabled={busy}>
                       <span>{file.name}</span><small>{roleLabel(file.role)}</small>
                     </button>
                   </li>)}</ul> : <p className="memory-empty-group">No files found.</p>}
-                </section>;
+                </details>;
               })}
+              {normalizedSearch && filteredFiles.length === 0 && <p className="memory-search-empty" role="status">No memories match "{memorySearch.trim()}".</p>}
             </nav>
 
             <main className="memory-editor-area">
               {selected ? <>
                 <div className="memory-file-heading">
-                  <div><p className="eyebrow">{roleLabel(selected.role)}</p><h3>{selected.name}</h3><code>{selected.path}</code></div>
+                  <div><p className="eyebrow">{roleLabel(selected.role)}</p><h3>{selected.name}</h3><code>{displayPath(selected.path)}</code></div>
                   <div className="memory-header-actions">
                     <button className="action-button danger" onClick={() => void removeFile()} disabled={busy || !selected.editable}>Delete file</button>
                     <button className="action-button primary" onClick={() => void save()} disabled={busy || !selected.editable || draft === selected.content}>Save changes</button>
@@ -206,18 +246,19 @@ export function Memories() {
                     <div className="memory-section-heading"><h4>Sections</h4><button className="text-button" aria-pressed={view.kind === "file"} onClick={() => setView({ kind: "file" })} disabled={busy}>Whole file</button></div>
                     <p className="memory-source-hint">Grouped by project details stated in the text. Codex memories remain shared.</p>
                     <div className="memory-section-list" tabIndex={0}>
-                      {sectionGroups.map(([group, entries]) => <section className="memory-section-group" key={group}>
-                        <h5>{group}</h5>
+                      {filteredSectionGroups.map(([group, entries], index) => <details className="memory-section-group" key={group} open={entries.some((entry) => view.kind === "section" && entry.start === view.start) || (!selectedSectionIsVisible && index === 0) || (view.kind !== "section" && index === 0)}>
+                        <summary><h5>{displayPath(group)}</h5></summary>
                         {entries.map((entry) => <button key={entry.start} className="memory-section-button" aria-current={view.kind === "section" && view.start === entry.start ? "true" : undefined} onClick={() => setView(sectionView(entry, draft))} disabled={busy}>
-                          <span>{entry.title}</span>
-                          {entry.projects.length > 1 && <small>{entry.projects.join(" · ")}</small>}
+                          <span>{displayPath(entry.title)}</span>
+                          {entry.projects.length > 1 && <small>{entry.projects.map(displayPath).join(" · ")}</small>}
                         </button>)}
-                      </section>)}
+                      </details>)}
+                      {normalizedSearch && filteredSectionGroups.length === 0 && <p className="memory-search-empty">No sections match "{memorySearch.trim()}".</p>}
                     </div>
                   </nav>}
                   <div className="memory-draft-editor">
-                    <label className="memory-content-label" htmlFor="memory-content">Markdown content{view.kind === "section" && <span className="memory-source-hint"> · Selected section</span>}</label>
-                    <textarea id="memory-content" className="memory-content" spellCheck={false} value={draft.slice(editorStart, editorEnd)} onChange={(event) => editContent(event.target.value)} disabled={busy || !selected.editable} />
+                    {view.kind === "section" && <p className="memory-source-hint">Selected section</p>}
+                    <MarkdownEditor key={selected.id} id="memory-content" label="Markdown content" value={draft.slice(editorStart, editorEnd)} onChange={editContent} disabled={busy || !selected.editable} />
                     {dirty && <p className="memory-source-hint" role="status">Unsaved changes. Save changes applies your edits to {selected.name}.</p>}
                   </div>
                 </div>
@@ -228,7 +269,7 @@ export function Memories() {
                   <div className="memory-connection-column">
                     <h4>Outgoing links <span className="count">{selected.references.length}</span></h4>
                     {selected.references.length ? <ul>{selected.references.map((reference, index) => <li key={reference.kind + reference.target + index}>
-                      {reference.status === "known" && reference.fileId ? <button className="memory-link known" onClick={() => openReference(reference)}>{reference.target}</button> : <span className="memory-link unavailable">{reference.target}</span>}
+                        {reference.status === "known" && reference.fileId ? <button className="memory-link known" onClick={() => openReference(reference)}>{displayPath(reference.target)}</button> : <span className="memory-link unavailable">{displayPath(reference.target)}</span>}
                       <small>{reference.kind === "import" ? "Context import" : "Markdown link"} · {reference.status === "known" ? "in catalog" : reference.status === "external" ? "outside authorized roots" : "not in catalog"}</small>
                     </li>)}</ul> : <p>No recognized links or imports.</p>}
                   </div>

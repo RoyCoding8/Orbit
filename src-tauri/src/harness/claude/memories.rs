@@ -108,6 +108,7 @@ pub fn catalog(harness: &ClaudeCodeHarness, project: &Path) -> Result<MemoryCata
     // Auto memory is project-scoped, even though Claude Code stores each
     // project's directory under its config root. Slugs are labels only.
     if let Some(config_root) = &config_root {
+        let project_names = recorded_project_names(harness);
         let projects = config_root.join("projects");
         if plain_dir(&projects) {
             for project_entry in safe_entries(&projects)? {
@@ -126,10 +127,13 @@ pub fn catalog(harness: &ClaudeCodeHarness, project: &Path) -> Result<MemoryCata
                     continue;
                 }
                 let group_id = format!("auto:{slug}");
-                let label = format!("Project auto memory · {slug}");
+                let project_name = project_names
+                    .get(&slug)
+                    .and_then(Option::as_deref)
+                    .unwrap_or(&slug);
                 let group = MemoryGroup {
                     id: group_id.clone(),
-                    label: label.clone(),
+                    label: project_name.to_owned(),
                     role: MemorySource::ProjectAutoMemory,
                 };
                 groups.insert(group_id.clone(), group);
@@ -170,7 +174,7 @@ pub fn catalog(harness: &ClaudeCodeHarness, project: &Path) -> Result<MemoryCata
     }
 
     let project_group = "selected-project".to_owned();
-    let project_label = format!("Selected project · {}", project.display());
+    let project_label = project.display().to_string();
     add_group(
         &mut groups,
         &project_group,
@@ -215,7 +219,7 @@ pub fn catalog(harness: &ClaudeCodeHarness, project: &Path) -> Result<MemoryCata
                 add_group(
                     &mut groups,
                     group,
-                    "Project auto memory · custom directory",
+                    "Custom memory directory",
                     MemorySource::ProjectAutoMemory,
                 );
                 collect_markdown(
@@ -585,6 +589,30 @@ fn file_id(path: &Path) -> String {
     format!("memory-{}", crate::harness::atomic::hex(&digest))
 }
 
+fn recorded_project_names(harness: &ClaudeCodeHarness) -> BTreeMap<String, Option<String>> {
+    let mut names = BTreeMap::new();
+    let Ok(state) = atomic::read_json(&harness.claude_json_path()) else {
+        return names;
+    };
+    let Some(projects) = state.get("projects").and_then(serde_json::Value::as_object) else {
+        return names;
+    };
+    for path in projects.keys() {
+        let Some(slug) = super::project_key(path) else {
+            continue;
+        };
+        names
+            .entry(slug)
+            .and_modify(|known: &mut Option<String>| {
+                if known.as_deref() != Some(path) {
+                    *known = None;
+                }
+            })
+            .or_insert_with(|| Some(path.clone()));
+    }
+    names
+}
+
 pub(crate) fn configured_memory_directory(
     harness: &impl Harness,
     project: &Path,
@@ -653,7 +681,7 @@ mod tests {
     use crate::harness::HarnessPaths;
 
     fn fixture() -> (tempfile::TempDir, ClaudeCodeHarness, PathBuf) {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let config = temp.path().join("claude");
         let project = temp.path().join("project");
         std::fs::create_dir_all(&config).unwrap();
@@ -682,6 +710,41 @@ mod tests {
                 "{}",
                 String::from_utf8_lossy(&result.stderr)
             );
+        }
+    }
+
+    #[test]
+    fn catalog_labels_auto_memory_only_from_unambiguous_recorded_project_paths() {
+        let (_temp, harness, project) = fixture();
+        let memory = harness
+            .config_root()
+            .join("projects/D--AI-Agent-Society-v2/memory");
+        std::fs::create_dir_all(&memory).unwrap();
+        std::fs::write(memory.join("MEMORY.md"), "memory").unwrap();
+        for (state, expected) in [
+            (
+                r#"{"projects":{"D:/AI/Agent-Society-v2":{}}}"#,
+                "D:/AI/Agent-Society-v2",
+            ),
+            (
+                r#"{"projects":{"D:/AI/Agent-Society-v2":{},"D:/AI/Agent-Society/v2":{}}}"#,
+                "D--AI-Agent-Society-v2",
+            ),
+            (
+                r#"{"projects":{"D:/another-project":{}}}"#,
+                "D--AI-Agent-Society-v2",
+            ),
+            ("{", "D--AI-Agent-Society-v2"),
+        ] {
+            std::fs::write(harness.claude_json_path(), state).unwrap();
+            let catalog = catalog(&harness, &project).unwrap();
+            let group = catalog
+                .groups
+                .iter()
+                .find(|group| group.id == "auto:D--AI-Agent-Society-v2")
+                .unwrap();
+            assert_eq!(group.label, expected);
+            assert_eq!(catalog.files[0].content, "memory");
         }
     }
 

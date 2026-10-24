@@ -7,8 +7,9 @@ import { HarnessProvider } from "../HarnessContext";
 const catalog: MemoryCatalog = {
   projectRoot: "D:/workspace/orbit",
   groups: [
-    { id: "auto:orbit-project", label: "Project auto memory · orbit-project", role: "projectAutoMemory" },
-    { id: "selected-project", label: "Selected project · D:/workspace/orbit", role: "projectInstructions" },
+    { id: "auto:orbit-project", label: "orbit-project", role: "projectAutoMemory" },
+    { id: "selected-project", label: "D:/workspace/orbit", role: "projectInstructions" },
+    { id: "user-instructions", label: "User instructions", role: "userInstructions" },
   ],
   files: [
     {
@@ -55,6 +56,29 @@ function installCatalog(initial = catalog) {
 }
 
 describe("Memories", () => {
+  it("shows ordinary Windows paths while saving with the original canonical project identity", async () => {
+    const projectRoot = "\\\\?\\D:\\AI\\Orbit";
+    const ipc = installCatalog({
+      ...catalog,
+      projectRoot,
+      groups: [{ id: "selected-project", label: projectRoot, role: "projectInstructions" }],
+      files: catalog.files.filter((file) => file.id === "topic").map((file) => ({
+        ...file, groupId: "selected-project", path: `${projectRoot}\\architecture.md`,
+      })),
+    });
+    render(<Memories />);
+    const editor = await screen.findByLabelText("Markdown content");
+    expect(screen.getByRole("heading", { name: "D:\\AI\\Orbit" })).toBeInTheDocument();
+    expect(screen.getByText("Selected project")).toBeInTheDocument();
+    expect(screen.getByText("Selected project").closest("h3")).toBeNull();
+    expect(screen.getByText("D:\\AI\\Orbit\\architecture.md", { exact: true })).toBeInTheDocument();
+    fireEvent.change(editor, { target: { value: "Updated topic." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(ipc).toHaveBeenCalledWith("memory_edit", expect.objectContaining({
+      projectRoot, id: "topic", expectedContent: "Original topic.", content: "Updated topic.",
+    })));
+  });
+
   it("edits project sections within one checked file while retaining other sections and CRLF", async () => {
     const first = "# Task Group: First\r\napplies_to: cwd=D:\\Projects\\One\r\n\r\nFirst stays.\r\n\r\n";
     const second = "# Task Group: Second\r\napplies_to: cwd=D:\\Projects\\Two\r\n\r\nSecond changes.\r\n\r\n";
@@ -76,6 +100,13 @@ describe("Memories", () => {
     render(<HarnessProvider client="codex"><Memories /></HarnessProvider>);
     const navigation = await screen.findByRole("navigation", { name: "Memory sections" });
     expect(within(navigation).getByRole("heading", { name: "D:\\Projects\\One" })).toBeInTheDocument();
+    const secondProjectGroup = within(navigation).getByText("D:\\Projects\\Two").closest("details");
+    expect(secondProjectGroup).toHaveProperty("open", false);
+    fireEvent.click(within(navigation).getByText("D:\\Projects\\Two"));
+    expect(secondProjectGroup).toHaveProperty("open", true);
+    fireEvent.click(within(navigation).getByText("D:\\Projects\\Two"));
+    expect(secondProjectGroup).toHaveProperty("open", false);
+    fireEvent.click(within(navigation).getByText("D:\\Projects\\Two"));
     expect(within(navigation).getByRole("heading", { name: "D:\\Projects\\Two" })).toBeInTheDocument();
     expect(within(navigation).getByRole("heading", { name: "Project not stated" })).toBeInTheDocument();
     fireEvent.click(within(navigation).getByRole("button", { name: "Task Group: Second" }));
@@ -115,8 +146,20 @@ describe("Memories", () => {
   it("groups project-scoped auto memory, distinguishes load behavior, and navigates known links only", async () => {
     installCatalog();
     render(<Memories />);
-    expect(await screen.findByText("Project auto memory · orbit-project")).toBeInTheDocument();
+    const groupSummary = await screen.findByRole("heading", { name: "orbit-project" });
+    expect(screen.getByText("Auto memory")).toBeInTheDocument();
+    expect(groupSummary).not.toHaveTextContent("Auto memory");
+    const navigation = screen.getByRole("navigation", { name: "Memory files by source" });
+    const headings = within(navigation).getAllByRole("heading");
+    expect(headings[0]).toHaveTextContent("User instructions");
+    expect(screen.getByText("User instructions")).toBe(headings[0]);
+    expect(groupSummary.closest("details")).toHaveProperty("open", true);
     expect(screen.getByText(/First 200 lines or 25 KB/)).toBeInTheDocument();
+    const fileGroup = groupSummary.closest("details");
+    fireEvent.click(groupSummary);
+    expect(fileGroup).toHaveProperty("open", false);
+    fireEvent.click(groupSummary);
+    expect(fileGroup).toHaveProperty("open", true);
     fireEvent.click(screen.getByText("Connections"));
     expect(screen.getByText(/Context import/)).toBeInTheDocument();
     expect(screen.getAllByText(/^Markdown link ·/)).toHaveLength(2);
@@ -136,10 +179,13 @@ describe("Memories", () => {
     fireEvent.click(await screen.findByRole("button", { name: /architecture\.md Auto-memory topic/ }));
     const editor = await screen.findByLabelText("Markdown content");
     fireEvent.change(editor, { target: { value: "Updated topic." } });
+    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+    expect(await screen.findByText("Updated topic.")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(ipc).toHaveBeenCalledWith("memory_edit", {
       projectRoot: "D:/workspace/orbit", id: "topic", expectedContent: "Original topic.", content: "Updated topic.",
     }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     await waitFor(() => expect(screen.getByLabelText("Markdown content")).toHaveValue("Updated topic."));
   });
 
@@ -205,5 +251,46 @@ describe("Memories", () => {
     render(<Memories />);
     expect(await screen.findByRole("note")).toHaveTextContent("outside this authorized project");
     expect(screen.getByRole("note")).toHaveTextContent("D:/private/memory");
+  });
+
+  it("searches file and section content without replacing the selected draft or section boundaries", async () => {
+    const first = "# Task Group: First\nFirst original.\n\n";
+    const second = "# Task Group: Second\nSecond original.\n";
+    const original = first + second;
+    mockIPC((command: string) => {
+      if (command === "memory_catalog") return {
+        ...catalog,
+        groups: [{ id: "global", label: "Codex generated memory", role: "globalAutoMemory" }],
+        files: [{ ...catalog.files[0], id: "global-memory", groupId: "global", source: "globalAutoMemory", content: original }],
+      };
+      throw new Error("Unexpected command " + command);
+    });
+    render(<HarnessProvider client="codex"><Memories /></HarnessProvider>);
+
+    const editor = await screen.findByLabelText("Markdown content");
+    const search = screen.getByRole("searchbox", { name: "Search memories" });
+    fireEvent.change(editor, { target: { value: "# Task Group: First\nFirst draft.\n\n" } });
+    fireEvent.change(search, { target: { value: "Second original" } });
+
+    const navigation = screen.getByRole("navigation", { name: "Memory sections" });
+    expect(within(navigation).getByRole("button", { name: "Task Group: Second" })).toBeInTheDocument();
+    expect(within(navigation).queryByRole("button", { name: "Task Group: First" })).not.toBeInTheDocument();
+    expect(editor).toHaveValue("# Task Group: First\nFirst draft.\n\n");
+
+    fireEvent.click(screen.getByRole("button", { name: "Whole file" }));
+    expect(editor).toHaveValue("# Task Group: First\nFirst draft.\n\n# Task Group: Second\nSecond original.\n");
+    fireEvent.change(search, { target: { value: "no such memory text" } });
+    expect(screen.getByText('No memories match "no such memory text".')).toBeInTheDocument();
+    expect(editor).toHaveValue("# Task Group: First\nFirst draft.\n\n# Task Group: Second\nSecond original.\n");
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear memory search" }));
+    expect(await screen.findByRole("button", { name: "Task Group: First" })).toBeInTheDocument();
+    expect(editor).toHaveValue("# Task Group: First\nFirst draft.\n\n# Task Group: Second\nSecond original.\n");
+    fireEvent.change(search, { target: { value: "Codex generated memory" } });
+    expect(screen.getByRole("button", { name: /MEMORY\.md Auto-memory index/ })).toBeInTheDocument();
+    fireEvent.change(search, { target: { value: "C:/Users/roy/.claude/projects/orbit-project/memory/MEMORY.md" } });
+    expect(screen.getByRole("button", { name: /MEMORY\.md Auto-memory index/ })).toBeInTheDocument();
+    fireEvent.change(search, { target: { value: "First draft" } });
+    expect(screen.getByRole("button", { name: /MEMORY\.md Auto-memory index/ })).toBeInTheDocument();
   });
 });

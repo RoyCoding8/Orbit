@@ -359,7 +359,7 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::test_support::tempdir().unwrap();
             let root = dir.path().join(".claude");
             let project = dir.path().join("project");
             let claude_json = dir.path().join(".claude.json");
@@ -663,7 +663,7 @@ mod tests {
 
     #[test]
     fn a_stale_same_key_edit_refuses_without_writing_or_backing_up() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         std::fs::write(
             &path,
@@ -688,7 +688,7 @@ mod tests {
 
     #[test]
     fn a_fresh_same_key_edit_lands_and_a_disjoint_key_composes() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         std::fs::write(
             &path,
@@ -723,7 +723,7 @@ mod tests {
 
     #[test]
     fn replace_path_refuses_missing_and_null_mismatched_slots() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         std::fs::write(
             &path,

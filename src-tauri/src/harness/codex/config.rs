@@ -385,31 +385,21 @@ fn path_identity(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        fs,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::fs;
 
-    fn fixture() -> (PathBuf, CodexHarness, PathBuf) {
-        let root = std::env::temp_dir().join(format!(
-            "orbit-codex-config-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let home = root.join(".codex");
-        let project = root.join("project");
+    fn fixture() -> (tempfile::TempDir, CodexHarness, PathBuf) {
+        let root = crate::test_support::tempdir().unwrap();
+        let home = root.path().join(".codex");
+        let project = root.path().join("project");
         fs::create_dir_all(&home).unwrap();
         fs::create_dir_all(&project).unwrap();
-        let harness = CodexHarness::new(home.clone(), root.clone());
+        let harness = CodexHarness::new(home.clone(), root.path().to_path_buf());
         (root, harness, project)
     }
 
     #[test]
     fn load_masks_nested_secrets_and_uses_trusted_project_override() {
-        let (root, harness, project) = fixture();
+        let (_root, harness, project) = fixture();
         let project_key = project.to_string_lossy().replace('\\', "/");
         fs::write(harness.settings_path(), format!("model = 'base'\n\n[env]\nAPI_TOKEN = 'private'\n\n[projects.\"{project_key}\"]\ntrust_level = 'trusted'\n")).unwrap();
         fs::create_dir_all(project.join(".codex")).unwrap();
@@ -432,15 +422,13 @@ mod tests {
                 .unwrap()
                 .to_string_lossy()
         );
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn project_writes_require_native_trust_and_local_layer_is_rejected() {
-        let (root, harness, project) = fixture();
+        let (_root, harness, project) = fixture();
         assert!(settings_path(&harness, &project, SettingsLayer::Project).is_err());
         assert!(settings_path(&harness, &project, SettingsLayer::Local).is_err());
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -457,7 +445,7 @@ mod tests {
 
     #[test]
     fn project_ignored_keys_do_not_appear_in_effective_settings() {
-        let (root, harness, project) = fixture();
+        let (_root, harness, project) = fixture();
         let key = project.to_string_lossy().replace('\\', "/");
         fs::write(
             harness.settings_path(),
@@ -473,12 +461,11 @@ mod tests {
         let snapshot = load_config(&harness, &project).unwrap();
         assert_eq!(snapshot.layers[1].values["model_provider"], "ignored");
         assert!(!snapshot.effective.contains_key("model_provider"));
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn nested_trusted_project_configs_merge_from_git_root_to_selected_directory() {
-        let (root, harness, project) = fixture();
+        let (_root, harness, project) = fixture();
         let repository = project.join("repo");
         let nested = repository.join("packages").join("app");
         fs::create_dir_all(repository.join(".git")).unwrap();
@@ -523,12 +510,11 @@ mod tests {
                 .unwrap()
                 .to_string_lossy()
         );
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn effective_tables_keep_inherited_siblings_and_project_overrides() {
-        let (root, harness, project) = fixture();
+        let (_root, harness, project) = fixture();
         let project_key = project.to_string_lossy().replace('\\', "/");
         fs::write(
             harness.settings_path(),
@@ -564,12 +550,11 @@ mod tests {
                 .unwrap()
                 .to_string_lossy()
         );
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn masked_settings_restore_credentials_from_the_document_being_mutated() {
-        let (root, harness, project) = fixture();
+        let (_root, harness, project) = fixture();
         fs::write(
             harness.settings_path(),
             "[env]\nAPI_TOKEN = 'current-token'\nMODE = 'old'\n",
@@ -589,6 +574,5 @@ mod tests {
         let saved = store::read_value(&harness.settings_path()).unwrap();
         assert_eq!(saved["env"]["API_TOKEN"], "current-token");
         assert_eq!(saved["env"]["MODE"], "new");
-        let _ = fs::remove_dir_all(root);
     }
 }

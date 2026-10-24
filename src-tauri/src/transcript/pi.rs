@@ -49,7 +49,11 @@ pub fn ingest(
     project: &Path,
 ) -> Result<IngestReport, TranscriptError> {
     let project = checked_directory(project).map_err(invalid)?;
-    let roots = session_roots(config, &project).map_err(invalid)?;
+    let mut roots = session_roots(config, &project).map_err(invalid)?;
+    let default_root = crate::history::canonical_location(&config.join("sessions"))
+        .ok_or_else(|| invalid("Invalid Pi sessions directory".into()))?;
+    roots.retain(|root| !root.starts_with(&default_root));
+    roots.push(default_root);
     let mut connection = open_database(cache)?;
     let mut seen = Vec::new();
     // Retain other custom session directories that were indexed previously.
@@ -84,14 +88,6 @@ pub fn ingest(
                 continue;
             }
         };
-        if doc.header["cwd"]
-            .as_str()
-            .and_then(|cwd| Path::new(cwd).canonicalize().ok())
-            .as_ref()
-            != Some(&project)
-        {
-            continue;
-        }
         let mut parents: HashMap<String, Option<String>> = HashMap::new();
         let mut messages = Vec::new();
         for (position, entry) in &doc.entries {
@@ -320,6 +316,27 @@ pub fn import_archive(
     })
 }
 
+pub(super) fn delete_exported_source(
+    source: &Path,
+    session_id: &str,
+    archive: &Path,
+) -> Result<(), String> {
+    let manifest: Value = serde_json::from_slice(&read_snapshot(&archive.join("manifest.json"))?)
+        .map_err(|error| format!("Pi backup manifest is invalid: {error}"))?;
+    let archived = read_snapshot(&archive.join("session.jsonl"))?;
+    if manifest["format"] != FORMAT
+        || manifest["version"] != 1
+        || manifest["sessionId"].as_str() != session_id.strip_prefix("pi:")
+        || manifest["sha256"].as_str() != Some(atomic::hex(&Sha256::digest(&archived)).as_str())
+    {
+        return Err("Pi backup archive does not match the selected session.".into());
+    }
+    if read_snapshot(source)? != archived {
+        return Err("Pi session changed after the backup was created.".into());
+    }
+    fs::remove_file(source).map_err(|error| format!("Could not remove Pi session: {error}"))
+}
+
 fn read_document(path: &Path, strict: bool) -> Result<Document, String> {
     ensure_plain_components(path)?;
     ensure_plain_file_if_present(path)?;
@@ -534,7 +551,13 @@ fn write_session_root(config: &Path, project: &Path) -> Result<PathBuf, String> 
 }
 
 fn default_session_root(config: &Path, project: &Path) -> Result<PathBuf, String> {
-    let cwd = native_path(&checked_directory(project)?);
+    ensure_plain_components(project)?;
+    if !project.is_absolute() {
+        return Err("Pi session working directory must be absolute".into());
+    }
+    let cwd = native_path(
+        &crate::history::canonical_location(project).ok_or("Invalid Pi working directory")?,
+    );
     let encoded = cwd
         .strip_prefix(['/', '\\'])
         .unwrap_or(&cwd)
@@ -603,9 +626,9 @@ mod tests {
     }
 
     #[test]
-    fn indexing_scopes_default_and_shared_directories_to_the_project_and_retains_prior_projects() {
+    fn indexing_discovers_all_projects_in_default_and_shared_directories() {
         for shared in [false, true] {
-            let temp = tempfile::tempdir().unwrap();
+            let temp = crate::test_support::tempdir().unwrap();
             let config = temp.path().join("agent");
             let cache = temp.path().join("cache");
             let a = temp.path().join("a");
@@ -629,16 +652,22 @@ mod tests {
                 let root = write_session_root(&config, project).unwrap();
                 write_fixture(&root.join(format!("{id}.jsonl")), &records);
             }
-            assert_eq!(ingest(&config, &cache, &a).unwrap().sessions, 1);
-            assert_eq!(list_sessions(&cache).unwrap().len(), 1);
-            assert_eq!(ingest(&config, &cache, &b).unwrap().sessions, 1);
-            assert_eq!(list_sessions(&cache).unwrap().len(), 2);
+            assert_eq!(ingest(&config, &cache, &a).unwrap().sessions, 2);
+            let sessions = list_sessions(&cache).unwrap();
+            assert_eq!(sessions.len(), 2);
+            assert!(sessions
+                .iter()
+                .any(|session| session.project == native_path(&a)));
+            assert!(sessions
+                .iter()
+                .any(|session| session.project == native_path(&b)));
+            assert_eq!(ingest(&config, &cache, &b).unwrap().sessions, 2);
         }
     }
 
     #[test]
     fn native_archive_preserves_branches_images_unknown_records_and_imports_without_overwrite() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let config = temp.path().join("agent");
         let cache = temp.path().join("cache");
         let a = temp.path().join("a");
@@ -702,6 +731,21 @@ mod tests {
         assert_eq!(list_sessions(&cache).unwrap().len(), 3);
         assert_eq!(fs::read(&file).unwrap(), original);
         assert_eq!(fs::read(archive.join("session.jsonl")).unwrap(), original);
+        fs::write(&file, [original.as_slice(), b"\n"].concat()).unwrap();
+        assert!(delete_exported_source(&file, id, &archive)
+            .unwrap_err()
+            .contains("changed"));
+        assert!(file.is_file());
+        fs::write(&file, &original).unwrap();
+        delete_exported_source(&file, id, &archive).unwrap();
+        assert!(!file.exists());
+        let restored = import_archive(&config, &archive, &a).unwrap();
+        let restored = read_document(Path::new(&restored.path), true).unwrap();
+        assert_eq!(restored.entries.len(), records.len() - 1);
+        assert_eq!(
+            restored.entries[4].1["message"]["content"],
+            records[5]["message"]["content"]
+        );
         let mut tampered = original;
         tampered.push(b'\n');
         fs::write(archive.join("session.jsonl"), tampered).unwrap();
@@ -718,7 +762,7 @@ mod tests {
 
     #[test]
     fn indexing_tolerates_unfinished_tail_but_import_rejects_bad_branch_records() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let file = temp.path().join("fixture.jsonl");
         let records = fixture(temp.path());
         write_fixture(&file, &records);

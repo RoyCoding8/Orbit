@@ -643,7 +643,7 @@ fn validate_name(name: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use crate::test_support::tempdir;
 
     #[test]
     fn inventory_finds_native_roots_and_grouped_skills_but_skips_hidden_and_node_modules() {

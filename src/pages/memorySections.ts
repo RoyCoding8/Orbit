@@ -1,3 +1,5 @@
+import { displayPath } from "../pathDisplay";
+
 export type MemorySection = {
   title: string;
   start: number;
@@ -176,15 +178,13 @@ function mergeProjects(projectNames: Map<string, string>, ...collections: string
 function addProject(projects: string[], value: string, projectNames: Map<string, string>): void {
   const normalized = normalizeProject(value);
   if (!normalized) return;
-  const display = projectNames.get(normalized) ?? value;
+  const display = projectNames.get(normalized) ?? displayPath(value);
   projectNames.set(normalized, display);
   if (!projects.some((project) => normalizeProject(project) === normalized)) projects.push(display);
 }
 
 function normalizeProject(value: string): string {
-  let path = value.trim();
-  if (path.startsWith("\\\\?\\UNC\\")) path = `\\\\${path.slice(8)}`;
-  else if (path.startsWith("\\\\?\\")) path = path.slice(4);
+  const path = displayPath(value.trim());
 
   const isWindowsPath = /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("\\\\") || path.startsWith("//");
   if (isWindowsPath) {

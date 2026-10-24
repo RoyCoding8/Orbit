@@ -578,7 +578,7 @@ fn path_is_within(path: &Path, root: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use crate::test_support::tempdir;
 
     fn write_skill(root: &Path, directory: &str, name: &str, description: &str) -> PathBuf {
         let skill = root.join(directory);

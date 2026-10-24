@@ -480,7 +480,7 @@ mod tests {
 
     #[test]
     fn v2_ingest_lists_and_reads_visible_text_without_indexing_tool_records() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir().unwrap();
         let config_root = root.path().join("kiro");
         let session_dir = config_root.join("sessions").join("cli");
         fs::create_dir_all(&session_dir).unwrap();
@@ -569,7 +569,7 @@ mod tests {
 
     #[test]
     fn v2_ingest_ignores_an_unterminated_final_record_until_the_next_write() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir().unwrap();
         let config_root = root.path().join("kiro");
         let session_dir = config_root.join("sessions").join("cli");
         fs::create_dir_all(&session_dir).unwrap();

@@ -2,6 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHarness } from "../HarnessContext";
 import { M3eButton } from "@m3e/react/button";
 import "@m3e/web/button";
+import { JsonValue } from "../components/JsonValue";
+import { JsonEditor } from "../components/JsonEditor";
+import "./ConfigSearch.css";
 
 type LayerName = "user" | "project" | "local";
 type Layer = { name: LayerName | "project_parent"; path: string; values: Record<string, unknown> };
@@ -21,6 +24,7 @@ export function Config() {
   const [projectRoot, setProjectRoot] = useState<string | null>(null);
   const [key, setKey] = useState("");
   const [valueText, setValueText] = useState("");
+  const [effectiveSearch, setEffectiveSearch] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -54,6 +58,10 @@ export function Config() {
     () => snapshot.layers.find((layer) => layer.name === activeLayer),
     [activeLayer, snapshot.layers],
   );
+  const matchingSettings = Object.entries(snapshot.effective).filter(([settingKey, entry]) => {
+    const query = effectiveSearch.trim().toLocaleLowerCase();
+    return !query || [settingKey, entry.source, JSON.stringify(entry.value) ?? ""].some((value) => value.toLocaleLowerCase().includes(query));
+  });
 
   const chooseProject = async () => {
     try {
@@ -185,17 +193,7 @@ export function Config() {
             onChange={(event) => setKey(event.target.value)}
             placeholder="e.g. model"
           />
-          <label className="field-label" htmlFor="setting-value">
-            JSON value
-          </label>
-          <textarea
-            id="setting-value"
-            value={valueText}
-            onChange={(event) => setValueText(event.target.value)}
-            rows={6}
-            spellCheck={false}
-            placeholder={profile.modelExample}
-          />
+          <JsonEditor id="setting-value" label="JSON value" value={valueText} onChange={setValueText} disabled={saving || loading} placeholder={profile.modelExample} />
           <M3eButton
             variant="filled"
             onClick={() => void apply()}
@@ -226,7 +224,7 @@ export function Config() {
               {profile.configNote && <p className="supporting-copy">{profile.configNote}</p>}
             </div>
             <span className="setting-count">
-              {Object.keys(snapshot.effective).length} keys
+              {effectiveSearch.trim() ? `${matchingSettings.length} of ${Object.keys(snapshot.effective).length} keys` : `${Object.keys(snapshot.effective).length} keys`}
             </span>
           </div>
           {snapshot.layers.some(layer => layer.name === "project_parent") && (
@@ -240,6 +238,13 @@ export function Config() {
               {error}
             </p>
           )}
+          <div className="effective-search">
+            <label htmlFor="effective-search">Search effective settings</label>
+            <div className="effective-search-controls">
+              <input id="effective-search" type="search" value={effectiveSearch} onChange={(event) => setEffectiveSearch(event.target.value)} placeholder="Key, source, or value" />
+              <button type="button" className="text-button" onClick={() => setEffectiveSearch("")} disabled={!effectiveSearch} aria-label="Clear settings search">Clear</button>
+            </div>
+          </div>
           {loading ? (
             <p className="config-empty" role="status">
               Loading settings…
@@ -250,6 +255,8 @@ export function Config() {
             <p className="config-empty">
               No settings found in the available layers.
             </p>
+          ) : matchingSettings.length === 0 ? (
+            <p className="config-empty" role="status">No effective settings match "{effectiveSearch.trim()}".</p>
           ) : (
             <div className="effective-table-wrap" role="region" tabIndex={0} aria-label="Effective settings table">
               <table className="effective-table">
@@ -261,7 +268,7 @@ export function Config() {
                   </tr>
                 </thead>
                 <tbody>
-                  {Object.entries(snapshot.effective).map(
+                  {matchingSettings.map(
                     ([settingKey, entry]) => (
                       <tr key={settingKey}>
                         <th scope="row">
@@ -274,7 +281,7 @@ export function Config() {
                           </button>
                         </th>
                         <td>
-                          <code tabIndex={0}>{JSON.stringify(entry.value)}</code>
+                          <JsonValue value={entry.value} />
                         </td>
                         <td>
                           <span

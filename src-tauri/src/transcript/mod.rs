@@ -1,6 +1,7 @@
 pub mod archive;
 pub mod codex;
 pub mod conversion;
+pub mod deletion;
 pub mod ingest;
 mod jsonl;
 pub mod kiro;

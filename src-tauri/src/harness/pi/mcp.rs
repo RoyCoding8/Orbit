@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn native_mcp_crud_preserves_fields_masks_secrets_and_refuses_runtime_expansion() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir().unwrap();
         let harness = PiHarness::new(root.path().join(".pi/agent"), root.path().join("home"));
         save(
             &harness,
@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn streamable_http_is_supported_but_sse_is_rejected() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir().unwrap();
         let harness = PiHarness::new(root.path().join(".pi/agent"), root.path().join("home"));
         save(&harness, "remote", json!({"type":"streamable-http","url":"https://example.test/mcp","headers":{"Accept":"application/json"}})).unwrap();
         assert_eq!(list(&harness).unwrap()[0].kind, "http");

@@ -125,10 +125,7 @@ pub fn load(harness: &impl Harness, project: &Path) -> Result<HistorySnapshot, S
         ));
     }
 
-    let lock_path = harness
-        .config_root()
-        .join(".harness-agent")
-        .join("ledger.json");
+    let lock_path = harness.config_root().join(".orbit").join("ledger.json");
     let _guard = atomic::lock_mutations(&lock_path).map_err(|error| error.to_string())?;
     let rows = ledger::read(harness.config_root())?;
     let mut versions = Vec::new();
@@ -1355,7 +1352,7 @@ mod tests {
     use crate::harness::{claude::skills, HarnessPaths};
 
     fn fixture() -> (tempfile::TempDir, ClaudeCodeHarness, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let config_root = dir.path().join("claude");
         let project = dir.path().join("project");
         std::fs::create_dir_all(config_root.join("skills/alpha")).unwrap();
@@ -1380,7 +1377,7 @@ mod tests {
         };
         for client in ["kiro", "opencode", "pi"] {
             let kiro = client == "kiro";
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::test_support::tempdir().unwrap();
             let home = dir.path().canonicalize().unwrap();
             let project = home.join("project");
             let config = home.join(match client {
@@ -1496,7 +1493,7 @@ mod tests {
     #[test]
     fn codex_memory_edits_and_deletions_have_restorable_global_versions() {
         use crate::harness::codex::{memories, CodexHarness};
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let home = dir.path().canonicalize().unwrap();
         let config = home.join("codex");
         let project = home.join("project");
@@ -1602,7 +1599,7 @@ mod tests {
     #[test]
     fn codex_history_restores_deleted_fallback_instructions_and_user_skills() {
         use crate::harness::codex::{memories, CodexHarness};
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let home = dir.path().canonicalize().unwrap();
         let config = home.join(".codex");
         let project = home.join("project");
@@ -1840,7 +1837,7 @@ mod tests {
         std::fs::write(&outside, b"outside").unwrap();
         std::fs::write(&modern, b"modern").unwrap();
         std::fs::write(&orphan, b"orphan").unwrap();
-        let ledger_path = harness.config_root().join(".harness-agent/ledger.json");
+        let ledger_path = harness.config_root().join(".orbit/ledger.json");
         std::fs::create_dir_all(ledger_path.parent().unwrap()).unwrap();
         let modern_hash = atomic::hex(&Sha256::digest(b"modern"));
         let old_hash = atomic::hex(&Sha256::digest(b"legacy"));

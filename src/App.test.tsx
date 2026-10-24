@@ -1,18 +1,88 @@
-import { describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { App } from "./App";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  localStorage.clear();
+});
+
+function useSystemTheme(isDark: boolean) {
+  vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({
+    matches: isDark,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  }));
+}
+
 describe("App shell", () => {
+  it.each([
+    { systemDark: false, next: "dark" },
+    { systemDark: true, next: "light" },
+  ])("follows the system theme and toggles from its current appearance", ({ systemDark, next }) => {
+    useSystemTheme(systemDark);
+    const view = render(<App />);
+    expect(view.container.querySelector("m3e-theme")).toHaveProperty("scheme", "auto");
+    expect(view.container.querySelector(".application-shell")).toHaveAttribute("data-theme", "system");
+
+    fireEvent.click(screen.getByRole("button", { name: "Toggle light and dark theme" }));
+
+    expect(view.container.querySelector("m3e-theme")).toHaveProperty("scheme", next);
+    expect(view.container.querySelector(".application-shell")).toHaveAttribute("data-theme", next);
+    expect(localStorage.getItem("orbit.theme")).toBe(next);
+  });
+
+  it("loads and persists a valid preference across remounts", () => {
+    localStorage.setItem("orbit.theme", "dark");
+    const first = render(<App />);
+    expect(first.container.querySelector("m3e-theme")).toHaveProperty("scheme", "dark");
+    fireEvent.click(screen.getByRole("button", { name: "Toggle light and dark theme" }));
+    expect(first.container.querySelector("m3e-theme")).toHaveProperty("scheme", "light");
+    first.unmount();
+
+    const second = render(<App />);
+    expect(second.container.querySelector("m3e-theme")).toHaveProperty("scheme", "light");
+    fireEvent.click(screen.getByRole("button", { name: "Toggle light and dark theme" }));
+    expect(second.container.querySelector("m3e-theme")).toHaveProperty("scheme", "dark");
+    expect(localStorage.getItem("orbit.theme")).toBe("dark");
+  });
+
+  it("falls back to system theme for an invalid preference", () => {
+    localStorage.setItem("orbit.theme", "invalid");
+    useSystemTheme(true);
+    const view = render(<App />);
+    expect(view.container.querySelector("m3e-theme")).toHaveProperty("scheme", "auto");
+    fireEvent.click(screen.getByRole("button", { name: "Toggle light and dark theme" }));
+    expect(view.container.querySelector("m3e-theme")).toHaveProperty("scheme", "light");
+    expect(localStorage.getItem("orbit.theme")).toBe("light");
+  });
+
+  it("stays usable when storage is unavailable", () => {
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("Storage unavailable"); });
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("Storage unavailable"); });
+    useSystemTheme(false);
+    const view = render(<App />);
+    expect(view.container.querySelector("m3e-theme")).toHaveProperty("scheme", "auto");
+    fireEvent.click(screen.getByRole("button", { name: "Toggle light and dark theme" }));
+    expect(view.container.querySelector("m3e-theme")).toHaveProperty("scheme", "dark");
+    expect(screen.getByRole("heading", { name: "Orbit" })).toBeInTheDocument();
+  });
+
   it("renders the M3E shell with navigation, heading, and an empty pane", () => {
     render(<App />);
 
     expect(screen.getByRole("heading", { name: "Orbit" })).toBeTruthy();
     expect(screen.getByLabelText("Main navigation")).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Your harness, in view." })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Claude Code" })).toBeTruthy();
+    expect(screen.getByText("Manage the files, tools, settings, and chats used by this coding agent.")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Coding agent"), { target: { value: "codex" } });
+    expect(screen.getByRole("heading", { name: "Codex" })).toBeTruthy();
     expect(screen.getByText("Overview")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Connect Claude Code" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Add harness" })).toBeNull();
@@ -52,15 +122,16 @@ describe("App shell", () => {
   });
 
   it.each([
-    { nav: /Transcripts/, heading: "Transcripts", action: "Index transcripts", empty: "No sessions indexed yet.", input: "Search message text" },
+    { nav: /Chats/, heading: "Chats", action: "Refresh chats", empty: "No chats found in this source.", input: "Search message text" },
     { nav: /^Skills$/, heading: "Skills", action: "Install skill", empty: "No skills found", input: null },
     { nav: /Servers/, heading: "MCP servers", action: "Add server", empty: "Connect a tool server", input: null },
     { nav: /Memories/, heading: "Memories & instructions", action: "Choose project", empty: "No memory files found", input: null },
-    { nav: /History/, heading: "History", action: "Choose project", empty: "No saved versions match this scope.", input: null },
+    { nav: /History/, heading: "History", action: "Choose project", empty: "No saved versions found.", input: null },
   ])("opens $heading from navigation", async ({ nav, heading, action, empty, input }) => {
     vi.mocked(invoke).mockImplementation(async command => {
       if (command === "memory_catalog") return { projectRoot: "D:/project", groups: [], files: [], excludedCustomMemoryDirectory: null };
       if (command === "history_load") return { versions: [], logs: [] };
+      if (command === "transcript_list_sessions") return {sessions: [], source: "D:/native-chats", warnings: []};
       return [];
     });
     render(<App />);
@@ -89,7 +160,13 @@ describe("App shell", () => {
   });
 
   it("saves a hook to the selected project scope", async () => {
-    vi.mocked(invoke).mockImplementation(async (command) => command === "project_choose" ? "D:/demo-project" : []);
+    let finishProjectLoad: (hooks: never[]) => void = () => {};
+    const projectHooks = new Promise<never[]>(resolve => { finishProjectLoad = resolve; });
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "project_choose") return "D:/demo-project";
+      if (command === "hooks_list" && args && "projectRoot" in args && args.projectRoot === "D:/demo-project") return projectHooks;
+      return [];
+    });
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: "Hooks" }));
     await screen.findByRole("heading", { name: "Hooks" });
@@ -98,8 +175,11 @@ describe("App shell", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Choose project" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Choose project" }));
     expect(await screen.findByText("D:/demo-project/.claude/settings.json")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Save hook" })).toBeDisabled();
+    await act(async () => { finishProjectLoad([]); });
 
     fireEvent.change(screen.getByLabelText("Command"), { target: { value: "echo checked" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save hook" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Save hook" }));
 
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("hooks_save", {
@@ -215,7 +295,7 @@ describe("App shell", () => {
       client: "kiro", projectRoot: null,
       draft: { layer: "user", event: "userPromptSubmit", matcher: null, command: "echo checked", editId: null, sourceId: "D:/kiro/agents/reviewer.json" },
     }));
-    fireEvent.click(screen.getByRole("button", { name: "Transcripts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Chats" }));
     expect(screen.getByRole("button", { name: "Import Kiro archive" })).toBeDisabled();
     expect(screen.getByText(/V3, terminal and cloud sessions are not indexed/)).toBeInTheDocument();
   });
@@ -228,6 +308,7 @@ describe("App shell", () => {
       if (command === "config_load") return { layers: [{ name: "user", path: "D:/config/opencode.jsonc", values: { model: "openai/example" } }], effective: { model: { value: "openai/example", source: "user" } } };
       if (command === "project_choose") return "D:/chosen-project";
       if (command === "transcript_ingest") return { sessions: 0, messagesIndexed: 0, linesRead: 0, skippedFiles: 0, skippedStateLines: 0, malformedLines: 0 };
+      if (command === "transcript_list_sessions") return {sessions: [], source: "D:/native-chats", warnings: []};
       return [];
     });
     render(<App />);
@@ -241,12 +322,14 @@ describe("App shell", () => {
     expect(screen.getByText(hookText)).toBeInTheDocument();
     expect(screen.queryByLabelText("Command")).toBeNull();
     expect(invoke).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Transcripts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Chats" }));
     await waitFor(() => expect(screen.getByRole("button", { name: `Import ${label} archive` })).toBeEnabled());
-    fireEvent.click(screen.getByRole("button", { name: "Choose project" }));
-    expect(await screen.findByText("Indexing project: D:/chosen-project")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Index transcripts" }));
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith("transcript_ingest", { client, projectRoot: "D:/chosen-project" }));
+    if (client === "pi") {
+      fireEvent.click(screen.getByRole("button", { name: "Choose project" }));
+      expect(await screen.findByText("Indexing project: D:/chosen-project")).toBeInTheDocument();
+    } else expect(screen.queryByRole("button", { name: "Choose project" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh chats" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("transcript_ingest", client === "pi" ? { client, projectRoot: "D:/chosen-project" } : { client }));
     expect(await screen.findByText("Indexed 0 messages from 0 sessions.")).toBeInTheDocument();
   });
 });

@@ -155,23 +155,11 @@ fn ensure_plain(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn temp_root() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "orbit-codex-store-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
-    }
 
     #[test]
     fn toml_mutation_preserves_comments_and_unknown_keys() {
-        let root = temp_root();
-        let home = root.join("home");
+        let root = crate::test_support::tempdir().unwrap();
+        let home = root.path().join("home");
         let config = home.join("config.toml");
         fs::create_dir_all(&home).unwrap();
         fs::write(
@@ -179,7 +167,7 @@ mod tests {
             "# keep me\nunknown_key = 'keep too'\nmodel = 'old'\n",
         )
         .unwrap();
-        let harness = CodexHarness::new(home, root.clone());
+        let harness = CodexHarness::new(home, root.path().to_path_buf());
         mutate(
             &harness,
             ResourceKind::Settings,
@@ -198,17 +186,16 @@ mod tests {
         assert!(saved.contains("# keep me"));
         assert!(saved.contains("unknown_key = 'keep too'"));
         assert!(saved.contains("model = \"new\""));
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn toml_mutation_refuses_to_overwrite_a_concurrent_change() {
-        let root = temp_root();
-        let home = root.join("home");
+        let root = crate::test_support::tempdir().unwrap();
+        let home = root.path().join("home");
         let config = home.join("config.toml");
         fs::create_dir_all(&home).unwrap();
         fs::write(&config, "model = 'before'\n").unwrap();
-        let harness = CodexHarness::new(home, root.clone());
+        let harness = CodexHarness::new(home, root.path().to_path_buf());
         let result = mutate(
             &harness,
             ResourceKind::Settings,
@@ -226,6 +213,5 @@ mod tests {
             fs::read_to_string(&config).unwrap(),
             "model = 'concurrent edit'\n"
         );
-        let _ = fs::remove_dir_all(root);
     }
 }

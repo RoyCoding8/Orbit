@@ -696,7 +696,7 @@ mod tests {
         assert_eq!(result, value);
         assert_eq!(result["theme"], "dark");
         assert_eq!(result["custom"], json!({"v":1}));
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::tempdir().unwrap();
         let config_root = directory.path().join("user");
         let project = directory.path().join("project");
         let app_data = directory.path().join("app-data");
@@ -738,7 +738,7 @@ mod tests {
 
     #[test]
     fn editing_command_preserves_sibling_hooks_unknown_fields_and_non_command_hooks() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::tempdir().unwrap();
         let config_root = directory.path().join("user");
         let project = directory.path().join("project");
         let app_data = directory.path().join("app-data");
@@ -790,7 +790,7 @@ mod tests {
 
     #[test]
     fn every_native_hook_change_records_exact_backup_and_receipt_hashes() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::tempdir().unwrap();
         let config_root = directory.path().join("user");
         let project = directory.path().join("project");
         let app_data = directory.path().join("app-data");
@@ -901,7 +901,7 @@ mod tests {
 
     #[test]
     fn project_hook_ids_and_disabled_records_are_scoped_to_the_project() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::tempdir().unwrap();
         let config_root = directory.path().join("user");
         let project_a = directory.path().join("project-a");
         let project_b = directory.path().join("project-b");
@@ -964,7 +964,7 @@ mod tests {
 
     #[test]
     fn saving_an_identical_hook_refuses_and_leaves_the_file_untouched() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::tempdir().unwrap();
         let config_root = directory.path().join("user/.claude");
         let project = directory.path().join("project");
         std::fs::create_dir_all(&config_root).unwrap();
@@ -1027,7 +1027,7 @@ mod tests {
 
     #[test]
     fn editing_a_hook_onto_an_identical_sibling_refuses_and_leaves_the_file_untouched() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::tempdir().unwrap();
         let config_root = directory.path().join("user/.claude");
         let project = directory.path().join("project");
         std::fs::create_dir_all(&config_root).unwrap();
@@ -1123,7 +1123,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn command_runner_kills_descendants_after_successful_parent_exit() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::tempdir().unwrap();
         let log = directory.path().join("child.log");
         let log_text = log.to_string_lossy().into_owned();
         let command = format!("(while :; do printf x >> '{log_text}'; sleep 0.02; done) & exit 0");
@@ -1137,7 +1137,7 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn command_runner_kills_descendants_after_successful_parent_exit() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::tempdir().unwrap();
         let log = directory.path().join("child.log");
         let script = directory.path().join("child.cmd");
         let log_text = log.to_string_lossy().into_owned();
@@ -1166,7 +1166,7 @@ mod tests {
 
     #[test]
     fn timing_out_kills_descendants_the_child_handle_cannot_address() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::tempdir().unwrap();
         let log = directory.path().join("child.log");
         let log_text = log.to_string_lossy().into_owned();
         let command = if cfg!(windows) {
@@ -1204,7 +1204,7 @@ mod tests {
 
     #[test]
     fn builder_uses_selected_layer_and_disable_enable_restores_the_hook() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::tempdir().unwrap();
         let config_root = directory.path().join("user/.claude");
         let project = directory.path().join("project");
         let app_data = directory.path().join("app-data");

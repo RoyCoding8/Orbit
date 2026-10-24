@@ -538,7 +538,7 @@ fn is_external(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use crate::test_support::tempdir;
 
     fn fixture() -> (tempfile::TempDir, CodexHarness, PathBuf) {
         let temp = tempdir().unwrap();

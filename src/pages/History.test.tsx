@@ -30,6 +30,66 @@ it("keeps a failed restore visible and sends the chosen project and current chec
   expect(invoke).toHaveBeenCalledWith("history_restore", { projectRoot: "D:/project", id: "operation-1", expectedCurrentChecksum: "current" });
 });
 
+it("combines scope and text search across tabs while keeping version actions bound to ids", async () => {
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  const globalVersion = {
+    ...version,
+    id: "operation-2",
+    resourceId: "settings",
+    scope: "global" as const,
+    scopeId: "global",
+    scopeLabel: "Global settings",
+    target: "C:/users/config.json",
+  };
+  const globalLog = {
+    ...log,
+    id: "log-2",
+    resourceId: "settings",
+    scope: "global" as const,
+    scopeId: "global",
+    scopeLabel: "Global settings",
+    target: "C:/users/config.json",
+    status: "pending" as const,
+  };
+  vi.mocked(invoke).mockImplementation(async command => {
+    if (command === "history_load") return { versions: [version, globalVersion], logs: [log, globalLog] };
+    if (command === "history_restore") return null;
+    throw new Error(command);
+  });
+  render(<History />);
+
+  const projectGroup = (await screen.findByText("Project memory")).closest("details");
+  const globalGroup = screen.getByText("Global settings").closest("details");
+  expect(projectGroup).toHaveAttribute("open");
+  expect(globalGroup).not.toHaveAttribute("open");
+
+  fireEvent.change(screen.getByRole("searchbox", { name: "Search history" }), { target: { value: "notes.md" } });
+  expect(screen.getByText("Showing 1 of 2 versions and 1 of 2 logs")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("tab", { name: /Logs/ }));
+  expect(screen.getByText("memory · notes")).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Scope"), { target: { value: "global" } });
+  expect(screen.getByText('No operations match "notes.md".')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("tab", { name: /Versions/ }));
+  expect(screen.getByText('No versions match "notes.md".')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
+  expect(screen.getByText("Global settings").closest("details")).toHaveAttribute("open");
+  expect(screen.getByRole("button", { name: "Restore" })).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("history_restore", {
+    projectRoot: null,
+    id: "operation-2",
+    expectedCurrentChecksum: "current",
+  }));
+
+  fireEvent.click(screen.getByRole("tab", { name: /Logs/ }));
+  fireEvent.change(screen.getByRole("searchbox", { name: "Search history" }), { target: { value: "pending" } });
+  expect(screen.getByText(/Global settings/)).toBeInTheDocument();
+  expect(screen.getByText("memory · settings")).toBeInTheDocument();
+  fireEvent.change(screen.getByRole("searchbox", { name: "Search history" }), { target: { value: "log-2" } });
+  expect(screen.getByText("Showing 0 of 1 versions and 1 of 1 logs")).toBeInTheDocument();
+  expect(screen.getByText("memory · settings")).toBeInTheDocument();
+});
+
 it("deletes the saved payload while retaining the separate operation log", async () => {
   vi.spyOn(window, "confirm").mockReturnValue(true);
   let deleted = false;
@@ -43,7 +103,7 @@ it("deletes the saved payload while retaining the separate operation log", async
   });
   render(<History />);
   fireEvent.click(await screen.findByRole("button", { name: "Delete version" }));
-  await screen.findByText("No saved versions match this scope.");
+  await screen.findByText("No saved versions found.");
   expect(invoke).toHaveBeenCalledWith("history_delete", { id: "operation-1" });
   fireEvent.click(screen.getByRole("tab", { name: /Logs/ }));
   expect(screen.getByText("memory · notes")).toBeInTheDocument();

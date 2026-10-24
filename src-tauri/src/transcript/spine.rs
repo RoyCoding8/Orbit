@@ -372,7 +372,7 @@ mod tests {
 
     #[test]
     fn branch_point_renders_each_child_and_descendant() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let connection = open_database(temp.path()).unwrap();
         insert_message(&connection, "root", None, 1, "root");
         insert_message(&connection, "branch-a", Some("root"), 2, "a");
@@ -392,7 +392,7 @@ mod tests {
 
     #[test]
     fn markdown_export_includes_every_message_and_formats_tool_result() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let connection = open_database(temp.path()).unwrap();
         insert_message(&connection, "one", None, 1, "first message");
         insert_message(&connection, "two", Some("one"), 2, "second message");
@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn search_returns_hit_with_adjacent_context() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let connection = open_database(temp.path()).unwrap();
         insert_message(&connection, "before", None, 1, "previous context");
         insert_message(
@@ -436,7 +436,7 @@ mod tests {
 
     #[test]
     fn punctuation_queries_search_as_literals_instead_of_erroring() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let connection = open_database(temp.path()).unwrap();
         insert_message(&connection, "one", None, 1, "refactor the C++ parser");
         insert_message(
@@ -481,7 +481,7 @@ mod tests {
 
     #[test]
     fn branch_context_uses_spine_order_not_file_position() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let connection = open_database(temp.path()).unwrap();
         insert_message(&connection, "root", None, 1, "root text");
         insert_message(
@@ -515,7 +515,7 @@ mod tests {
 
     #[test]
     fn thread_page_serializes_without_raw_json_but_export_keeps_the_note() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir().unwrap();
         let connection = open_database(temp.path()).unwrap();
         connection
             .execute(
