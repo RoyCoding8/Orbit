@@ -27,7 +27,7 @@ jobs:
             rust-target: x86_64-unknown-linux-gnu
             bundles: deb,rpm,appimage
           - label: linux-arm64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04-arm
             rust-target: aarch64-unknown-linux-gnu
             bundles: deb
           - label: macos-arm64
@@ -61,30 +61,6 @@ jobs:
             libssl-dev \
             librsvg2-dev \
             patchelf
-      - name: Set up Linux ARM64 cross toolchain
-        if: matrix.rust-target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo dpkg --add-architecture arm64
-          CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
-          sudo tee /etc/apt/sources.list.d/arm64.list > /dev/null <<EOF
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $CODENAME main restricted universe multiverse
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $CODENAME-updates main restricted universe multiverse
-          EOF
-          sed -i 's/^Types: deb$/Types: deb\nArchitectures: amd64/' /etc/apt/sources.list.d/ubuntu.sources
-          sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list 2>/dev/null || true
-          sudo apt-get update
-          sudo apt-get install --yes gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            libwebkit2gtk-4.1-dev:arm64 \
-            libayatana-appindicator3-dev:arm64 \
-            libxdo-dev:arm64 \
-            libssl-dev:arm64 \
-            librsvg2-dev:arm64
-      - name: Configure Linux ARM64 cross toolchain
-        if: matrix.rust-target == 'aarch64-unknown-linux-gnu'
-        run: |
-          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
-          echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
       - run: npm ci
       - name: Build packages
         run: npm run tauri build -- --target ${{ matrix.rust-target }} --bundles ${{ matrix.bundles }}

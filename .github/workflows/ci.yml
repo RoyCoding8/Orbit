@@ -53,7 +53,7 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
   release:
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
     needs: checks
     runs-on: windows-latest
     steps:
