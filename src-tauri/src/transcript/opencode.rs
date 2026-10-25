@@ -380,6 +380,7 @@ fn index_export(
             source_path,
             updated_at: updated_at.as_deref(),
             title,
+            fingerprint: None,
         },
         &messages,
         &[],

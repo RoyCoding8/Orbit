@@ -2,8 +2,8 @@
 use super::{
     archive::{ArchiveAction, ArchiveReport},
     ingest::{
-        open_database, prune_vanished_sessions, replace_indexed_session, IndexedMessage,
-        IndexedSession, IngestReport,
+        file_fingerprint, open_database, prune_vanished_sessions, replace_indexed_session,
+        unchanged_source, IndexedMessage, IndexedSession, IngestReport,
     },
     jsonl::{read_bounded_line, LineStatus},
     TranscriptError,
@@ -80,7 +80,15 @@ pub fn ingest(
         files.extend(session_files(&root).map_err(invalid)?);
     }
     for path in files {
-        seen.push(path.to_string_lossy().into_owned());
+        let source_path = path.to_string_lossy().into_owned();
+        seen.push(source_path.clone());
+        let fingerprint = file_fingerprint(&path, None);
+        if let Some(fingerprint) = &fingerprint {
+            if unchanged_source(&connection, &source_path, fingerprint)? {
+                report.sessions += 1;
+                continue;
+            }
+        }
         let doc = match read_document(&path, false) {
             Ok(doc) => doc,
             Err(_) => {
@@ -157,6 +165,7 @@ pub fn ingest(
                     .and_then(|(_, entry)| entry["timestamp"].as_str())
                     .or(doc.header["timestamp"].as_str()),
                 title: title.as_deref(),
+                fingerprint: fingerprint.as_deref(),
             },
             &messages,
             &doc.errors,

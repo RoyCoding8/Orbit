@@ -5,8 +5,8 @@
 
 use super::archive::{ArchiveAction, ArchiveReport};
 use super::ingest::{
-    open_database, prune_vanished_sessions, replace_indexed_session, IndexedMessage,
-    IndexedSession, IngestReport,
+    file_fingerprint, open_database, prune_vanished_sessions, replace_indexed_session,
+    unchanged_source, IndexedMessage, IndexedSession, IngestReport,
 };
 use super::jsonl::{read_bounded_line, LineStatus};
 use super::TranscriptError;
@@ -96,6 +96,24 @@ pub fn ingest(config_root: &Path, app_data_dir: &Path) -> Result<IngestReport, T
         }
         seen_paths.push(log_path.to_string_lossy().into_owned());
 
+        let fingerprint = match (
+            file_fingerprint(&log_path, None),
+            file_fingerprint(&header_path, None),
+        ) {
+            (Some(log), Some(header)) => Some(format!("{log}|{header}")),
+            _ => None,
+        };
+        if let Some(fingerprint) = &fingerprint {
+            if unchanged_source(
+                &connection,
+                seen_paths.last().map(String::as_str).unwrap(),
+                fingerprint,
+            )? {
+                report.sessions += 1;
+                continue;
+            }
+        }
+
         let header = match read_header(&header_path) {
             Ok(Some(header))
                 if header.session_id == session_id && !header.cwd.trim().is_empty() =>
@@ -108,7 +126,13 @@ pub fn ingest(config_root: &Path, app_data_dir: &Path) -> Result<IngestReport, T
             }
         };
 
-        match ingest_session(&mut connection, &header, &log_path, &mut report) {
+        match ingest_session(
+            &mut connection,
+            &header,
+            &log_path,
+            &mut report,
+            fingerprint.as_deref(),
+        ) {
             Ok(indexed) => {
                 report.sessions += 1;
                 report.messages_indexed += indexed;
@@ -309,6 +333,7 @@ fn ingest_session(
     header: &SessionHeader,
     source_path: &Path,
     report: &mut IngestReport,
+    fingerprint: Option<&str>,
 ) -> Result<usize, TranscriptError> {
     if !plain_file(source_path)? {
         return Err(std::io::Error::new(
@@ -436,6 +461,7 @@ fn ingest_session(
             source_path,
             updated_at: header.updated_at.as_deref(),
             title: header.title.as_deref(),
+            fingerprint,
         },
         &messages,
         &errors,

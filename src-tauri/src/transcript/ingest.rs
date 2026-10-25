@@ -1,7 +1,12 @@
 use super::{database_path, SessionSummary, SessionTitle, TranscriptError};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
-use std::{collections::HashMap, fs, path::Path};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,11 +37,17 @@ pub(super) struct IndexedSession<'a> {
     pub source_path: &'a Path,
     pub updated_at: Option<&'a str>,
     pub title: Option<&'a str>,
+    /// Cache key so unchanged sources skip full re-parsing. `None` sources
+    /// (unknown stamps, native services) always re-index.
+    pub fingerprint: Option<&'a str>,
 }
 
 /// Version 3 fixed case-sensitive filename collisions. Version 4 adds native
 /// chat titles without discarding an existing version 3 message cache.
-const SCHEMA_VERSION: i64 = 4;
+/// Version 5 adds the source fingerprint that lets unchanged session files
+/// skip full re-indexing instead of being re-read on every scan.
+/// Version 6 indexes source paths for incremental lookups.
+const SCHEMA_VERSION: i64 = 6;
 
 pub fn open_database(app_data_dir: &Path) -> Result<Connection, TranscriptError> {
     fs::create_dir_all(app_data_dir)?;
@@ -70,6 +81,9 @@ pub fn open_database(app_data_dir: &Path) -> Result<Connection, TranscriptError>
     transaction.execute_batch(include_str!("../../migrations/001_transcripts.sql"))?;
     if version == 3 {
         transaction.execute("ALTER TABLE sessions ADD COLUMN title TEXT", [])?;
+    }
+    if matches!(version, 3 | 4) {
+        transaction.execute("ALTER TABLE sessions ADD COLUMN fingerprint TEXT", [])?;
     }
     if version != SCHEMA_VERSION {
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -114,17 +128,25 @@ pub fn ingest_projects(
                 continue;
             }
             let path = session_entry.path();
-            seen_paths.push(path.to_string_lossy().into_owned());
-            let session_id = qualified_session_id(&project, &path);
-            let session_result = match ingest_session(&mut connection, &path, &project, &session_id)
-            {
-                Ok(result) => result,
-                Err(TranscriptError::Io(_)) => {
-                    report.skipped_files += 1;
+            let source_path = path.to_string_lossy().into_owned();
+            seen_paths.push(source_path.clone());
+            let fingerprint = file_fingerprint(&path, Some(&spill_directory(&path)));
+            if let Some(fingerprint) = &fingerprint {
+                if unchanged_source(&connection, &source_path, fingerprint)? {
+                    report.sessions += 1;
                     continue;
                 }
-                Err(error) => return Err(error),
-            };
+            }
+            let session_id = qualified_session_id(&project, &path);
+            let session_result =
+                match ingest_session(&mut connection, &path, &project, &session_id, fingerprint) {
+                    Ok(result) => result,
+                    Err(TranscriptError::Io(_)) => {
+                        report.skipped_files += 1;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
             report.sessions += 1;
             report.lines_read += session_result.0;
             report.messages_indexed += session_result.1;
@@ -190,11 +212,81 @@ pub fn remove_sessions(cache: &Path, session_ids: &[String]) -> Result<(), Trans
     Ok(())
 }
 
+/// Cheap change key for one source file: modification-time nanoseconds and
+/// byte length. `None` means the stamp could not be read, which always falls
+/// through to a full re-index instead of a possibly wrong skip.
+pub(super) fn file_stamp(path: &Path) -> Option<(u128, u64)> {
+    let metadata = fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?;
+    let nanos = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some((nanos, metadata.len()))
+}
+
+/// Combined fingerprint for a file source. `spill_dir` names the optional
+/// side directory (Claude tool-result spills) whose contents are part of the
+/// indexed session, so spill files added later cannot be missed forever.
+pub(super) fn file_fingerprint(path: &Path, spill_dir: Option<&Path>) -> Option<String> {
+    let (nanos, len) = file_stamp(path)?;
+    let spills = match spill_dir {
+        Some(dir) => spill_stamp(dir)?,
+        None => "0".to_owned(),
+    };
+    Some(format!("{nanos}:{len}|{spills}"))
+}
+
+fn spill_stamp(dir: &Path) -> Option<String> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some("0".into()),
+        Err(_) => return None,
+    };
+    let mut stamps = Vec::new();
+    for entry in entries {
+        let entry = entry.ok()?;
+        if !entry.file_type().ok()?.is_file()
+            || entry.path().extension().is_none_or(|ext| ext != "json")
+        {
+            continue;
+        }
+        let (nanos, len) = file_stamp(&entry.path())?;
+        stamps.push((entry.file_name(), nanos, len));
+    }
+    stamps.sort_unstable();
+    let mut digest = Sha256::new();
+    for (name, nanos, len) in stamps {
+        let bytes = name.as_encoded_bytes();
+        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update(bytes);
+        digest.update(nanos.to_le_bytes());
+        digest.update(len.to_le_bytes());
+    }
+    Some(crate::harness::atomic::hex(&digest.finalize()))
+}
+
+/// True when the cache already indexed this exact source with this exact
+/// fingerprint, so the source file can be skipped without being read.
+pub(super) fn unchanged_source(
+    connection: &Connection,
+    source_path: &str,
+    fingerprint: &str,
+) -> Result<bool, TranscriptError> {
+    let mut statement = connection
+        .prepare("SELECT 1 FROM sessions WHERE source_path = ?1 AND fingerprint = ?2 LIMIT 1")?;
+    Ok(statement
+        .query_row(params![source_path, fingerprint], |_| Ok(()))
+        .optional()?
+        .is_some())
+}
+
 fn ingest_session(
     connection: &mut Connection,
     path: &Path,
     project: &str,
     session_id: &str,
+    fingerprint: Option<String>,
 ) -> Result<(usize, usize, usize, usize), TranscriptError> {
     let bytes = fs::read(path)?;
     let input = String::from_utf8_lossy(&bytes);
@@ -231,6 +323,7 @@ fn ingest_session(
         .find_map(|value| value.get("uuid").and_then(Value::as_str))
         .map(str::to_owned);
     let spills = read_spills(path, &tool_ids, fallback_message.as_deref());
+    let fingerprint = fingerprint.filter(|_| spills.values().all(|(_, note)| note.is_none()));
     let mut malformed = 0usize;
     let mut skipped_state = 0usize;
     let mut messages = Vec::new();
@@ -285,6 +378,7 @@ fn ingest_session(
             source_path: path,
             updated_at: modified.as_deref(),
             title: title.finish().as_deref(),
+            fingerprint: fingerprint.as_deref(),
         },
         &messages,
         &errors,
@@ -304,6 +398,7 @@ pub(super) fn replace_indexed_session(
         source_path,
         updated_at,
         title,
+        fingerprint,
     } = session;
     let transaction = connection.transaction()?;
     transaction.execute(
@@ -312,8 +407,8 @@ pub(super) fn replace_indexed_session(
     )?;
     transaction.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id])?;
     transaction.execute(
-        "INSERT INTO sessions(session_id, project, source_path, updated_at, message_count, title) VALUES (?1, ?2, ?3, ?4, 0, ?5)",
-        params![session_id, project, source_path.to_string_lossy(), updated_at, title],
+        "INSERT INTO sessions(session_id, project, source_path, updated_at, message_count, title, fingerprint) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)",
+        params![session_id, project, source_path.to_string_lossy(), updated_at, title, fingerprint],
     )?;
     for (position, error) in errors {
         transaction.execute(
@@ -444,17 +539,23 @@ fn collect_tool_ids(value: &Value, message_uuid: &str, owners: &mut HashMap<Stri
     }
 }
 
+/// Tool results for a Claude session live beside its transcript under the
+/// site-stem `tool-results` directory.
+fn spill_directory(session_path: &Path) -> PathBuf {
+    let stem = session_path.file_stem().unwrap_or_default();
+    session_path
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(stem)
+        .join("tool-results")
+}
+
 fn read_spills(
     session_path: &Path,
     tool_ids: &HashMap<String, String>,
     fallback_message: Option<&str>,
 ) -> HashMap<String, (Option<String>, Option<String>)> {
-    let session_id = session_path.file_stem().unwrap_or_default();
-    let spill_dir = session_path
-        .parent()
-        .unwrap_or_else(|| Path::new(""))
-        .join(session_id)
-        .join("tool-results");
+    let spill_dir = spill_directory(session_path);
     let mut attached = HashMap::new();
     let Ok(entries) = fs::read_dir(spill_dir) else {
         return attached;
@@ -598,6 +699,181 @@ mod tests {
         assert_eq!(sessions[0].session_id, "existing.jsonl");
         assert_eq!(sessions[0].message_count, 7);
         assert_eq!(sessions[0].title, None);
+    }
+
+    #[test]
+    fn previous_incremental_caches_preserve_sessions_and_gain_indexed_source_lookups() {
+        for (version, expected_unchanged) in [(4, false), (5, true)] {
+            let directory = crate::test_support::tempdir().unwrap();
+            let data_dir = directory.path().join("db");
+            fs::create_dir_all(&data_dir).unwrap();
+            let connection = Connection::open(database_path(&data_dir)).unwrap();
+            connection
+            .execute_batch(
+                "CREATE TABLE sessions (session_id TEXT PRIMARY KEY, project TEXT NOT NULL, source_path TEXT NOT NULL, updated_at TEXT, title TEXT, message_count INTEGER NOT NULL DEFAULT 0);\
+                 INSERT INTO sessions VALUES ('legacy', 'project', 'legacy.jsonl', NULL, NULL, 1);",
+            )
+            .unwrap();
+            if version == 5 {
+                connection.execute_batch("ALTER TABLE sessions ADD COLUMN fingerprint TEXT; UPDATE sessions SET fingerprint = '0:0|0';").unwrap();
+            }
+            connection
+                .pragma_update(None, "user_version", version)
+                .unwrap();
+            drop(connection);
+            let connection = open_database(&data_dir).unwrap();
+            let sessions = list_sessions(&data_dir).unwrap();
+            assert_eq!(sessions.len(), 1);
+            assert_eq!(sessions[0].session_id, "legacy");
+            assert_eq!(sessions[0].message_count, 1);
+            assert_eq!(
+                unchanged_source(&connection, "legacy.jsonl", "0:0|0").unwrap(),
+                expected_unchanged
+            );
+            let query_plan: String = connection.query_row(
+            "EXPLAIN QUERY PLAN SELECT 1 FROM sessions WHERE source_path = ?1 AND fingerprint = ?2 LIMIT 1",
+            params!["legacy.jsonl", "0:0|0"], |row| row.get(3),
+        ).unwrap();
+            assert!(query_plan.starts_with("SEARCH sessions "), "{query_plan}");
+        }
+    }
+
+    #[test]
+    fn repeated_ingest_skips_unchanged_sources_and_reindexes_changed_ones() {
+        let temp = crate::test_support::tempdir().unwrap();
+        let project = temp.path().join("projects").join("munged");
+        fs::create_dir_all(&project).unwrap();
+        let source = project.join("session-1.jsonl");
+        fs::write(
+            &source,
+            "{\"uuid\":\"m1\",\"type\":\"user\",\"message\":{\"content\":\"first wording\"}}\n",
+        )
+        .unwrap();
+        let first = ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        assert_eq!(first.sessions, 1);
+        assert_eq!(first.messages_indexed, 1);
+
+        let second = ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        assert_eq!(second.sessions, 1);
+        assert_eq!(second.lines_read, 0, "unchanged source is never re-read");
+        assert_eq!(second.messages_indexed, 0);
+
+        fs::write(
+            &source,
+            "{\"uuid\":\"m1\",\"type\":\"user\",\"message\":{\"content\":\"first wording\"}}\n{\"uuid\":\"m2\",\"type\":\"user\",\"message\":{\"content\":\"second wording\"}}\n",
+        )
+        .unwrap();
+        let third = ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        assert_eq!(
+            third.messages_indexed, 2,
+            "changed source re-indexes in full"
+        );
+        let connection = open_database(&temp.path().join("db")).unwrap();
+        let count: i64 = connection
+            .query_row("SELECT count(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn new_spill_file_without_transcript_change_is_picked_up_on_the_next_scan() {
+        let temp = crate::test_support::tempdir().unwrap();
+        let project = temp.path().join("projects").join("munged");
+        let spills = project.join("session-1").join("tool-results");
+        fs::create_dir_all(&spills).unwrap();
+        let source = project.join("session-1.jsonl");
+        fs::write(
+            &source,
+            "{\"uuid\":\"m1\",\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"call-3\",\"name\":\"Read\"}]}}\n",
+        )
+        .unwrap();
+        ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        fs::write(
+            spills.join("call-3.json"),
+            "{\"tool_use_id\":\"call-3\",\"content\":\"late spill phrase\"}",
+        )
+        .unwrap();
+        ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        let connection = open_database(&temp.path().join("db")).unwrap();
+        let result: Option<String> = connection
+            .query_row(
+                "SELECT tool_result FROM messages WHERE uuid = 'm1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(result.as_deref(), Some("late spill phrase"));
+    }
+
+    #[test]
+    fn changed_spill_below_the_newest_timestamp_updates_the_cached_tool_result() {
+        let temp = crate::test_support::tempdir().unwrap();
+        let project = temp.path().join("projects/munged");
+        let spills = project.join("session/tool-results");
+        fs::create_dir_all(&spills).unwrap();
+        fs::write(
+            project.join("session.jsonl"),
+            "{\"uuid\":\"m1\",\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"call-1\",\"name\":\"Read\"}]}}\n{\"uuid\":\"m2\",\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"call-2\",\"name\":\"Read\"}]}}\n",
+        ).unwrap();
+        let write_spill = |name: &str, text: &str, seconds| {
+            let path = spills.join(name);
+            fs::write(&path, format!("{{\"content\":\"{text}\"}}")).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+                .unwrap();
+        };
+        write_spill("call-1.json", "original", 100);
+        write_spill("call-2.json", "newest result", 300);
+        let cache = temp.path().join("db");
+        ingest_projects(temp.path(), &cache).unwrap();
+        assert_eq!(ingest_projects(temp.path(), &cache).unwrap().lines_read, 0);
+        write_spill("call-1.json", "updated result", 200);
+        ingest_projects(temp.path(), &cache).unwrap();
+        let connection = open_database(&cache).unwrap();
+        let result: String = connection
+            .query_row(
+                "SELECT tool_result FROM messages WHERE uuid = 'm1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(result, "updated result");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_temporarily_locked_spill_is_read_after_unlocking_without_source_changes() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let temp = crate::test_support::tempdir().unwrap();
+        let project = temp.path().join("projects/munged");
+        let spills = project.join("session/tool-results");
+        fs::create_dir_all(&spills).unwrap();
+        fs::write(project.join("session.jsonl"),
+            "{\"uuid\":\"m1\",\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"call-1\",\"name\":\"Read\"}]}}\n",
+        ).unwrap();
+        let path = spills.join("call-1.json");
+        fs::write(&path, "{\"content\":\"read after unlock\"}").unwrap();
+        let guard = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        let cache = temp.path().join("db");
+        ingest_projects(temp.path(), &cache).unwrap();
+        drop(guard);
+        ingest_projects(temp.path(), &cache).unwrap();
+        let connection = open_database(&cache).unwrap();
+        let result: Option<String> = connection
+            .query_row(
+                "SELECT tool_result FROM messages WHERE uuid = 'm1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(result.as_deref(), Some("read after unlock"));
     }
 
     #[test]
@@ -1063,9 +1339,12 @@ mod tests {
             .share_mode(0)
             .open(&locked_path)
             .unwrap();
+        // The locked file is unchanged, so the scan serves it entirely from
+        // the cache without reading it and without reporting an unreadable
+        // file. A locked file that HAD changed would still count as skipped.
         let report = ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
-        assert_eq!(report.sessions, 1);
-        assert_eq!(report.skipped_files, 1);
+        assert_eq!(report.sessions, 2);
+        assert_eq!(report.skipped_files, 0);
         let cached = list_sessions(&temp.path().join("db")).unwrap();
         assert_eq!(cached.len(), 2);
         assert!(cached.iter().any(
@@ -1088,7 +1367,7 @@ mod tests {
         let version: i64 = reader
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, super::SCHEMA_VERSION);
         transaction.rollback().unwrap();
     }
 

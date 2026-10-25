@@ -402,6 +402,20 @@ pub fn read_applied(config_root: &Path) -> Result<Vec<LedgerRow>, String> {
         .collect()
 }
 
+/// Rows whose saved payload was deleted (for example from the History page)
+/// can no longer be restored, so restore views drop them. Rows without a
+/// payload were never backed up and keep flowing to their views untouched.
+pub fn rows_with_saved_payloads(rows: Vec<LedgerRow>) -> Vec<LedgerRow> {
+    rows.into_iter()
+        .filter(|row| {
+            row.backup_path
+                .as_deref()
+                .map(|path| std::path::Path::new(path).exists())
+                .unwrap_or(true)
+        })
+        .collect()
+}
+
 fn pending_was_superseded(rows: &[LedgerRow], index: usize, row: &LedgerRow) -> bool {
     row.status == Some(LedgerStatus::Pending)
         && row.target.as_deref().is_some_and(|target| {
@@ -811,6 +825,42 @@ mod tests {
         assert_eq!(rows[0].status, Some(LedgerStatus::Applied));
         assert_eq!(rows[1].status, Some(LedgerStatus::Applied));
         assert_eq!(read_applied(harness.config_root()).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn restore_view_drops_rows_whose_saved_payload_is_deleted() {
+        let (_dir, harness) = fixture();
+        let backup = backup_path(harness.config_root(), "skill-a", "uninstall");
+        std::fs::create_dir_all(backup.parent().unwrap()).unwrap();
+        std::fs::write(&backup, b"payload").unwrap();
+        let backup_text = backup.to_string_lossy().into_owned();
+        let deleted = harness
+            .config_root()
+            .join(".orbit")
+            .join("backups")
+            .join("deleted-payload");
+        let row = |op: &str, backup_path: Option<String>| LedgerRow {
+            timestamp: 1,
+            resource_kind: "skill".into(),
+            id: "skill-a".into(),
+            action: "uninstall".into(),
+            backup_path,
+            before_checksum: Some("aa".into()),
+            after_checksum: None,
+            target: None,
+            op: Some(op.into()),
+            status: Some(LedgerStatus::Applied),
+        };
+        let rows = vec![
+            row("op:kept:1", Some(backup_text)),
+            row("op:deleted:2", Some(deleted.to_string_lossy().into_owned())),
+            row("op:unbacked:3", None),
+        ];
+        let restorable = rows_with_saved_payloads(rows)
+            .iter()
+            .map(|row| row.op.clone().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(restorable, ["op:kept:1", "op:unbacked:3"]);
     }
 
     #[test]

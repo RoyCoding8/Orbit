@@ -1,6 +1,28 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96" role="img" aria-labelledby="title">
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title">
   <title id="title">Orbit</title>
-  <circle cx="48" cy="48" r="24" fill="none" stroke="#3b82f6" stroke-width="9"/>
-  <ellipse cx="48" cy="48" rx="42" ry="15" transform="rotate(-35 48 48)" fill="none" stroke="#60a5fa" stroke-width="3"/>
-  <circle cx="80" cy="27" r="7" fill="#f97316"/>
+  <defs>
+    <radialGradient id="readme-planet" cx=".36" cy=".28" r=".95">
+      <stop offset="0" stop-color="#f0f9ff" />
+      <stop offset=".52" stop-color="#93c5fd" />
+      <stop offset="1" stop-color="#2f6ef0" />
+    </radialGradient>
+    <radialGradient id="readme-planet-shade" cx=".34" cy=".3" r="1">
+      <stop offset="0" stop-color="#172554" stop-opacity="0" />
+      <stop offset=".78" stop-color="#172554" stop-opacity="0" />
+      <stop offset="1" stop-color="#172554" stop-opacity=".3" />
+    </radialGradient>
+    <linearGradient id="readme-ring" x1="26" y1="176" x2="230" y2="80" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fdba74" />
+      <stop offset=".45" stop-color="#38bdf8" />
+      <stop offset="1" stop-color="#a5f3fc" />
+    </linearGradient>
+  </defs>
+  <!-- ring behind the planet -->
+  <path d="M 181.5 135.5 A 102 32 -24 1 0 97.8 172.8" fill="none" stroke="url(#readme-ring)" stroke-width="11" opacity=".4" />
+  <circle cx="128" cy="128" r="54" fill="url(#readme-planet)" />
+  <circle cx="128" cy="128" r="54" fill="url(#readme-planet-shade)" />
+  <circle cx="105" cy="105" r="9" fill="#ffffff" opacity=".85" />
+  <!-- ring passing in front of the planet -->
+  <path d="M 181.5 135.5 A 102 32 -24 0 1 97.8 172.8" fill="none" stroke="url(#readme-ring)" stroke-width="13" stroke-linecap="round" />
+  <circle cx="184" cy="83" r="10" fill="#f97316" />
 </svg>

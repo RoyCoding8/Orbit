@@ -330,6 +330,6 @@ describe("App shell", () => {
     } else expect(screen.queryByRole("button", { name: "Choose project" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Refresh chats" }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("transcript_ingest", client === "pi" ? { client, projectRoot: "D:/chosen-project" } : { client }));
-    expect(await screen.findByText("Indexed 0 messages from 0 sessions.")).toBeInTheDocument();
+    expect(await screen.findByText("Refreshed 0 chats. Re-indexed 0 messages from changed files.")).toBeInTheDocument();
   });
 });

@@ -1,7 +1,7 @@
 use super::archive::{export_codex_archive, import_codex_archive, ArchiveReport};
 use super::ingest::{
-    open_database, prune_vanished_sessions, replace_indexed_session, IndexedMessage,
-    IndexedSession, IngestReport,
+    file_fingerprint, file_stamp, open_database, prune_vanished_sessions, replace_indexed_session,
+    unchanged_source, IndexedMessage, IndexedSession, IngestReport,
 };
 use super::TranscriptError;
 use rusqlite::Connection;
@@ -21,6 +21,12 @@ pub fn ingest(config_root: &Path, app_data_dir: &Path) -> Result<IngestReport, T
     }
 
     let titles = read_titles(&config_root.join("session_index.jsonl"));
+    // Titles are applied when a rollout is indexed, so the titles file's own
+    // stamp rides along in every rollout fingerprint: a title edit forces the
+    // affected rollouts to re-index even though their files never changed.
+    let titles_stamp = file_stamp(&config_root.join("session_index.jsonl"))
+        .map(|(nanos, len)| format!("{nanos}:{len}"))
+        .unwrap_or_else(|| "0".into());
     let mut files = Vec::new();
     for root in roots.iter().filter(|root| root.is_dir()) {
         collect_rollouts(root, &mut files)?;
@@ -38,8 +44,17 @@ pub fn ingest(config_root: &Path, app_data_dir: &Path) -> Result<IngestReport, T
         skipped_state_lines: 0,
     };
     for path in files {
-        seen_paths.push(path.to_string_lossy().into_owned());
-        match ingest_rollout(&mut connection, &path, &titles) {
+        let source_path = path.to_string_lossy().into_owned();
+        seen_paths.push(source_path.clone());
+        let fingerprint =
+            file_fingerprint(&path, None).map(|stamp| format!("{stamp}|{titles_stamp}"));
+        if let Some(fingerprint) = &fingerprint {
+            if unchanged_source(&connection, &source_path, fingerprint)? {
+                report.sessions += 1;
+                continue;
+            }
+        }
+        match ingest_rollout(&mut connection, &path, &titles, fingerprint.as_deref()) {
             Ok((session_id, lines, messages, malformed, skipped)) => {
                 if session_id.is_empty() {
                     report.skipped_files += 1;
@@ -128,6 +143,7 @@ fn ingest_rollout(
     connection: &mut Connection,
     path: &Path,
     titles: &HashMap<String, String>,
+    fingerprint: Option<&str>,
 ) -> Result<(String, usize, usize, usize, usize), TranscriptError> {
     let contents = read_rollout(path)?;
     let lines = contents.lines().collect::<Vec<_>>();
@@ -230,6 +246,7 @@ fn ingest_rollout(
             source_path: path,
             updated_at: updated_at.as_deref(),
             title,
+            fingerprint,
         },
         &messages,
         &errors,
@@ -570,7 +587,27 @@ mod tests {
                 .len(),
             1
         );
-        assert_eq!(fs::read_to_string(rollout).unwrap().lines().count(), 4);
+        assert_eq!(fs::read_to_string(&rollout).unwrap().lines().count(), 4);
+        let cache = temp.path().join("appdata/codex");
+        assert_eq!(ingest(&home, &cache).unwrap().messages_indexed, 0);
+        for title in ["Native title", "Renamed native conversation"] {
+            fs::write(
+                home.join("session_index.jsonl"),
+                format!(
+                    "{}\n",
+                    json!({
+                        "id": "00000000-0000-4000-8000-000000000001", "thread_name": title,
+                    })
+                ),
+            )
+            .unwrap();
+            ingest(&home, &cache).unwrap();
+            assert_eq!(
+                list_sessions(&cache).unwrap()[0].title.as_deref(),
+                Some(title)
+            );
+            assert_eq!(ingest(&home, &cache).unwrap().messages_indexed, 0);
+        }
     }
 
     #[test]

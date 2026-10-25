@@ -74,6 +74,35 @@ it.each(["success", "cancel", "failure"])("backs up before native deletion: %s",
   else expect(ipc).toHaveBeenCalledWith("transcript_delete", {sessionId: "alpha/one", backupDirectory: "C:/saved-chats"});
 });
 
+it.each(["updated", "deleted", "empty"])("refreshes the open chat when its source is %s", async outcome => {
+  let refreshed = false;
+  mockIPC(command => {
+    if (command === "transcript_list_sessions") return {
+      sessions: !refreshed || outcome === "updated" ? SESSIONS : outcome === "deleted" ? [SESSIONS[1]] : [],
+      source: "C:/native-chats", warnings: [],
+    };
+    if (command === "transcript_thread_page") return [message(refreshed ? "fresh content" : "old content")];
+    if (command === "transcript_ingest") {
+      refreshed = true;
+      return { sessions: outcome === "empty" ? 0 : 1, linesRead: 1, messagesIndexed: 1,
+        malformedLines: 0, skippedFiles: 0, skippedStateLines: 0 };
+    }
+    throw new Error(command);
+  });
+  render(<Transcripts />);
+  fireEvent.click(await screen.findByRole("button", { name: /alpha\/one/ }));
+  await screen.findByText("old content");
+  fireEvent.click(screen.getByRole("button", { name: "Refresh chats" }));
+  if (outcome === "empty") {
+    await screen.findByText("No chats found in this source.");
+    expect(screen.queryByRole("heading", { name: /Session alpha/ })).not.toBeInTheDocument();
+  } else {
+    await screen.findByText("fresh content");
+    expect(screen.getByRole("heading", { name: `Session ${outcome === "deleted" ? "beta/one" : "alpha/one"}` })).toBeInTheDocument();
+  }
+  expect(screen.queryByText("old content")).not.toBeInTheDocument();
+});
+
 it.each(["success", "failure"])("ignores an obsolete session-list %s after a newer load", async outcome => {
   let release: () => void = () => { throw new Error("Expected a pending request"); };
   let loads = 0;

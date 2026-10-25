@@ -474,7 +474,8 @@ async fn skill_restore(
 async fn skills_ledger(client: Option<Client>) -> Result<Vec<ledger::LedgerRow>, String> {
     run_blocking(move || {
         let harness = SelectedHarness::from_env(client);
-        ledger::read_applied(harness.config_root())
+        let rows = ledger::read_applied(harness.config_root())?;
+        Ok(ledger::rows_with_saved_payloads(rows))
     })
     .await
 }

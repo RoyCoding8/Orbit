@@ -160,14 +160,18 @@ export function Transcripts() {
         .filter(Boolean)
         .join(", ");
       setNotice(
-        `Indexed ${report.messagesIndexed.toLocaleString()} messages from ${report.sessions} sessions.${skipped ? ` Skipped: ${skipped}.` : ""}`,
+        `Refreshed ${report.sessions} chats. Re-indexed ${report.messagesIndexed.toLocaleString()} messages from changed files.${skipped ? ` Skipped: ${skipped}.` : ""}`,
       );
-      if (
-        !selectedSession &&
-        selection === threadRequest.current &&
-        nextSessions?.[0]
-      )
-        await selectSession(nextSessions[0].sessionId);
+      setHits([]);
+      setSearched(false);
+      if (selection === threadRequest.current && nextSessions) {
+        const next = nextSessions.find(session => session.sessionId === selectedSession) ?? nextSessions[0];
+        if (next) await selectSession(next.sessionId);
+        else {
+          threadRequest.current += 1;
+          setThread(null);
+        }
+      }
     } catch (error) {
       setNotice(`Could not index transcripts. ${String(error)}`);
     } finally {

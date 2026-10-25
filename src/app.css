@@ -140,6 +140,8 @@ p { margin: 0; }
   overscroll-behavior: contain;
 }
 
+.content-pane > *, .config-page > *, .hooks-page > * { flex-shrink: 0; }
+
 .pane-heading {
   display: flex;
   align-items: flex-start;

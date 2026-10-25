@@ -5,8 +5,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     source_path TEXT NOT NULL,
     updated_at TEXT,
     title TEXT,
+    fingerprint TEXT,
     message_count INTEGER NOT NULL DEFAULT 0
 );
+CREATE INDEX IF NOT EXISTS sessions_source_path ON sessions(source_path);
 CREATE TABLE IF NOT EXISTS messages (
     session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
     uuid TEXT NOT NULL,

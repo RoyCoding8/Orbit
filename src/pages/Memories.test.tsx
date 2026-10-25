@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { Memories, type MemoryCatalog } from "./Memories";
@@ -56,6 +56,8 @@ function installCatalog(initial = catalog) {
 }
 
 describe("Memories", () => {
+  beforeAll(async () => { await import("../components/MarkdownPreview"); });
+
   it("shows ordinary Windows paths while saving with the original canonical project identity", async () => {
     const projectRoot = "\\\\?\\D:\\AI\\Orbit";
     const ipc = installCatalog({

@@ -56,7 +56,14 @@ export function App() {
       <div className="application-shell" data-theme={theme}>
         <header className="topbar">
           <div className="brand-lockup">
-            <span className="brand-mark" aria-hidden="true">O</span>
+            <span className="brand-mark" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="24" height="24" focusable="false">
+                <path d="M16.91 12.98A9.5 3.2-24 1 0 9.45 16.3" fill="none" stroke="currentColor" strokeWidth="1.4" opacity=".45" />
+                <circle cx="12" cy="12" r="5" fill="currentColor" />
+                <circle cx="10.2" cy="10.2" r="1.2" fill="#ffffff" opacity=".85" />
+                <path d="M16.91 12.98A9.5 3.2-24 0 1 9.45 16.3" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+              </svg>
+            </span>
             <h1>Orbit</h1>
           </div>
           <div className="workspace-controls">
