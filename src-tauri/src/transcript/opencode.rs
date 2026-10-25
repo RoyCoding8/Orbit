@@ -47,6 +47,8 @@ struct Manifest {
 struct NativeSessionListItem {
     id: String,
     title: Option<String>,
+    #[serde(default)]
+    time: Value,
     #[serde(skip)]
     directory: PathBuf,
 }
@@ -99,6 +101,59 @@ fn ingest_with_environment(
     }
     prune_vanished_sessions(&mut connection, &seen_paths)?;
     Ok(report)
+}
+
+pub(super) fn metadata() -> Result<Vec<super::catalog::Metadata>, String> {
+    metadata_with_environment(&CliEnvironment::default())
+}
+
+fn metadata_with_environment(
+    environment: &CliEnvironment,
+) -> Result<Vec<super::catalog::Metadata>, String> {
+    list_native_sessions(None, environment, SESSION_PAGE_SIZE).map(|sessions| {
+        sessions
+            .into_iter()
+            .map(|session| {
+                let updated_at = session.time["updated"]
+                    .as_i64()
+                    .map(|time| time.to_string());
+                super::catalog::Metadata {
+                    id: format!("opencode:{}", session.id),
+                    path: PathBuf::from(format!("opencode://session/{}", session.id)),
+                    project: session.directory.to_string_lossy().into_owned(),
+                    title: session.title,
+                    fingerprint: updated_at.as_ref().map(|time| format!("opencode:{time}")),
+                    updated_at,
+                }
+            })
+            .collect()
+    })
+}
+
+pub(super) fn index_session(
+    connection: &mut Connection,
+    id: &str,
+    project: &str,
+) -> Result<IngestReport, String> {
+    index_session_with_environment(connection, id, project, &CliEnvironment::default())
+}
+
+fn index_session_with_environment(
+    connection: &mut Connection,
+    id: &str,
+    project: &str,
+    environment: &CliEnvironment,
+) -> Result<IngestReport, String> {
+    let native_id = native_session_id(id)?;
+    let bytes = export_native(&native_id, Some(Path::new(project)), environment)?;
+    let source = PathBuf::from(format!("opencode://session/{native_id}"));
+    let (indexed, count) = index_export(connection, &bytes, id, &source)?;
+    Ok(IngestReport {
+        sessions: 1,
+        messages_indexed: indexed,
+        lines_read: count,
+        ..Default::default()
+    })
 }
 
 pub fn export_archive(
@@ -337,6 +392,7 @@ fn index_export(
         .and_then(Value::as_i64)
         .map(|value| value.to_string());
     let title = info.get("title").and_then(Value::as_str);
+    let fingerprint = updated_at.as_ref().map(|time| format!("opencode:{time}"));
     let records = transfer
         .get("messages")
         .and_then(Value::as_array)
@@ -380,7 +436,7 @@ fn index_export(
             source_path,
             updated_at: updated_at.as_deref(),
             title,
-            fingerprint: None,
+            fingerprint: fingerprint.as_deref(),
         },
         &messages,
         &[],
@@ -1303,6 +1359,39 @@ mod tests {
             3,
             "adapter follows the page cursor beyond the requested two-session page"
         );
+        let metadata = metadata_with_environment(&environment).unwrap();
+        assert_eq!(metadata.len(), 5);
+        let source = metadata
+            .iter()
+            .find(|entry| entry.id == format!("opencode:{source_id}"))
+            .unwrap();
+        assert_eq!(source.title.as_deref(), Some("Orbit V2 fixture"));
+        assert_eq!(source.project, project_a.to_string_lossy());
+        let selected_cache = app_data.join("selected-only");
+        let mut selected_connection = open_database(&selected_cache).unwrap();
+        let selected = index_session_with_environment(
+            &mut selected_connection,
+            &source.id,
+            &source.project,
+            &environment,
+        )
+        .unwrap();
+        assert_eq!(selected.messages_indexed, 2);
+        let indexed = super::super::ingest::list_sessions(&selected_cache).unwrap();
+        assert_eq!(indexed.len(), 1);
+        assert_eq!(indexed[0].session_id, source.id);
+        assert_eq!(
+            super::super::spine::thread_page(&selected_cache, &source.id, 0, 10).unwrap()[0].text,
+            "Orbit V2 native fixture message 0"
+        );
+        let stamp: Option<String> = selected_connection
+            .query_row(
+                "SELECT fingerprint FROM sessions WHERE session_id = ?1",
+                [&source.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stamp, source.fingerprint);
         let report = ingest_with_environment(&app_data, &environment).unwrap();
         assert_eq!(report.sessions, 5);
         assert_eq!(

@@ -90,7 +90,7 @@ pub fn catalog(harness: &CodexHarness, project: &Path) -> Result<MemoryCatalog, 
     add_group(
         &mut groups,
         project_group,
-        &format!("Project instructions · {}", project.display()),
+        "Project instructions",
         MemorySource::ProjectInstructions,
     );
     let fallback_names = fallback_filenames(harness)?;
@@ -588,6 +588,15 @@ mod tests {
         let root_instruction = std::fs::canonicalize(root_instruction).unwrap();
 
         let catalog = catalog(&harness, &nested).unwrap();
+        assert_eq!(
+            catalog
+                .groups
+                .iter()
+                .find(|group| group.id == "project-instructions")
+                .unwrap()
+                .label,
+            "Project instructions"
+        );
         let generated: Vec<_> = catalog
             .files
             .iter()

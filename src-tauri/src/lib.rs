@@ -486,11 +486,19 @@ async fn transcript_ingest(
     project_roots: State<'_, ProjectRoots>,
     project_root: Option<String>,
     client: Option<Client>,
+    on_progress: tauri::ipc::Channel<transcript::catalog::IndexProgress>,
 ) -> Result<transcript::ingest::IngestReport, String> {
     let roots = project_roots.inner().clone();
     run_blocking(move || {
         let harness = SelectedHarness::from_env(client);
-        harness.transcript_ingest(&app_data_dir(&app)?, &roots.resolve(project_root)?)
+        transcript::catalog::index_all(
+            &harness,
+            &app_data_dir(&app)?,
+            &roots.resolve(project_root)?,
+            |progress| {
+                let _ = on_progress.send(progress);
+            },
+        )
     })
     .await
 }
@@ -509,20 +517,8 @@ async fn transcript_list_sessions(
         let app_dir = app_data_dir(&app)?;
         let mut warnings = Vec::new();
         if refresh.unwrap_or(false) {
-            let report = harness
-                .transcript_ingest(&app_dir, &roots.resolve(project_root)?)
-                .map_err(|error| {
-                    format!(
-                        "Could not read chats from {}: {error}",
-                        harness.config_root().display()
-                    )
-                })?;
-            if report.skipped_files > 0 {
-                warnings.push(format!("{} unreadable chat files", report.skipped_files));
-            }
-            if report.malformed_lines > 0 {
-                warnings.push(format!("{} malformed records", report.malformed_lines));
-            }
+            warnings =
+                transcript::catalog::refresh(&harness, &app_dir, &roots.resolve(project_root)?)?;
         }
         Ok(SessionCatalog {
             warnings,
@@ -576,7 +572,9 @@ async fn transcript_thread_page(
 ) -> Result<Vec<transcript::TranscriptMessage>, String> {
     run_blocking(move || {
         let harness = SelectedHarness::from_env(client);
-        let cache = harness.transcript_cache(&app_data_dir(&app)?);
+        let app_dir = app_data_dir(&app)?;
+        transcript::catalog::ensure_loaded(&harness, &app_dir, &session_id)?;
+        let cache = harness.transcript_cache(&app_dir);
         transcript::spine::thread_page(&cache, &session_id, offset, limit)
             .map_err(|e| e.to_string())
     })
@@ -623,7 +621,9 @@ async fn transcript_export_markdown(
 ) -> Result<String, String> {
     run_blocking(move || {
         let harness = SelectedHarness::from_env(client);
-        let cache = harness.transcript_cache(&app_data_dir(&app)?);
+        let app_dir = app_data_dir(&app)?;
+        transcript::catalog::ensure_loaded(&harness, &app_dir, &session_id)?;
+        let cache = harness.transcript_cache(&app_dir);
         transcript::spine::export_markdown(&cache, &session_id).map_err(|e| e.to_string())
     })
     .await

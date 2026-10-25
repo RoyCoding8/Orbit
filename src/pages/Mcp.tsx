@@ -6,6 +6,7 @@ import {
   type FormEvent,
 } from "react";
 import { useHarness } from "../HarnessContext";
+import { displayPath } from "../pathDisplay";
 import { JsonValue } from "../components/JsonValue";
 import { JsonEditor } from "../components/JsonEditor";
 import { M3eButton } from "@m3e/react/button";
@@ -276,14 +277,14 @@ export function McpPage() {
       </div>
       {error && (
         <p className="mcp-error" role="alert">
-          {error}
+          {displayPath(error)}
         </p>
       )}
       {loadState.kind === "loading" ? (
         <p role="status">Loading MCP servers…</p>
       ) : loadState.kind === "error" ? (
         <p className="mcp-error" role="alert">
-          Could not load MCP servers. {loadState.message}
+          Could not load MCP servers. {displayPath(loadState.message)}
         </p>
       ) : servers.length === 0 ? (
         <div className="empty-panel">
@@ -439,7 +440,7 @@ export function McpPage() {
             </div>
             {editorError && (
               <p className="mcp-error" role="alert">
-                {editorError}
+              {displayPath(editorError)}
               </p>
             )}
             <label>

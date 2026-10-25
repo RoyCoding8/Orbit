@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHarness } from "../HarnessContext";
+import { displayPath } from "../pathDisplay";
 import { JsonEditor } from "../components/JsonEditor";
 import "./ListControls.css";
 
@@ -272,7 +273,7 @@ function CommandHooks({ policy }: { policy: HookPolicy }) {
             <option value="project">Project</option>
           </select>
           <p className="layer-path">
-            {source?.label ?? (layer === "user" ? policy.userPath : projectRoot ? `${projectRoot}/${policy.projectPath}` : `Choose a project to edit ${policy.projectPath}`)}
+            {displayPath(source?.label ?? (layer === "user" ? policy.userPath : projectRoot ? `${projectRoot}/${policy.projectPath}` : `Choose a project to edit ${policy.projectPath}`))}
           </p>
           <label className="field-label" htmlFor="hook-event">
             Event
@@ -382,7 +383,7 @@ function CommandHooks({ policy }: { policy: HookPolicy }) {
           </div>
           {error && (
             <p className="inline-error" role="alert">
-              {error}
+          {displayPath(error)}
             </p>
           )}
           {loadState === "loading" ? (
@@ -423,7 +424,7 @@ function CommandHooks({ policy }: { policy: HookPolicy }) {
                       <p className="hook-meta">
                         {hook.layer} scope · matcher: {hook.matcher || "all"}
                       </p>
-                      {hook.source_path && <p className="layer-path">{hook.source_path}{!hook.editable && " · Inherited, read-only"}</p>}
+                    {hook.source_path && <p className="layer-path">{displayPath(hook.source_path)}{!hook.editable && " · Inherited, read-only"}</p>}
                       {hook.commands.map((value, i) => (
                         <code className="hook-command" key={`${hook.id}-${i}`} tabIndex={0}>
                           {value}

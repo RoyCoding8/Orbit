@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     updated_at TEXT,
     title TEXT,
     fingerprint TEXT,
+    catalog_fingerprint TEXT,
+    indexed INTEGER NOT NULL DEFAULT 1,
     message_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS sessions_source_path ON sessions(source_path);

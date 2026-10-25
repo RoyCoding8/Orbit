@@ -176,7 +176,7 @@ pub(crate) fn search_connection(
         "SELECT m.session_id, s.project, m.uuid, m.position, m.message_type, m.text \
          FROM messages_fts f JOIN messages m ON m.session_id=f.session_id AND m.uuid=f.uuid \
          JOIN sessions s ON s.session_id=m.session_id \
-         WHERE messages_fts MATCH ?1 ORDER BY rank LIMIT ?2",
+         WHERE s.indexed = 1 AND messages_fts MATCH ?1 ORDER BY rank LIMIT ?2",
     )?;
     let rows = statement.query_map(params![match_query, limit.clamp(1, 200) as i64], |row| {
         Ok((

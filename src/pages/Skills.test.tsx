@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { Skills } from "./Skills";
@@ -67,6 +67,8 @@ describe("Skills loading", () => {
 });
 
 describe("Skills editor", () => {
+  beforeAll(async () => { await import("../components/MarkdownPreview"); });
+
   it("searches skill metadata and content without replacing an open draft", async () => {
     mockIPC(command => command === "skills_inventory" ? [SKILL, { ...SKILL, id: "beta", name: "Beta", description: "Another skill", content: "Contains rare phrase." }] : []);
     render(<Skills />);

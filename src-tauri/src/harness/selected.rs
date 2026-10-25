@@ -432,8 +432,8 @@ impl SelectedHarness {
                 transcript::opencode::import_archive(h.config_root(), source, project)
             }
         }?;
-        self.transcript_ingest(app, project)
-            .map_err(|error| format!("Chat imported, but indexing failed: {error}"))?;
+        transcript::catalog::refresh(self, app, project)
+            .map_err(|error| format!("Chat imported, but discovery failed: {error}"))?;
         Ok(report)
     }
 

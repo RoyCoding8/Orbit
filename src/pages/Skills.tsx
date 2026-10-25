@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHarness } from "../HarnessContext";
+import { displayPath } from "../pathDisplay";
 import { open } from "@tauri-apps/plugin-dialog";
 import { MarkdownEditor } from "../components/MarkdownEditor";
 import "./ListControls.css";
@@ -177,17 +178,17 @@ export function Skills() {
           </button>
         </div>
       </div>
-      {profile.projectSkills && <p className="supporting-copy">Project: {projectRoot ?? "Current project"}. {profile.skillsNote}</p>}
+      {profile.projectSkills && <p className="supporting-copy">Project: {displayPath(projectRoot ?? "Current project")}. {profile.skillsNote}</p>}
       {error && (
         <p className="inline-error" role="alert">
-          {error}
+          {displayPath(error)}
         </p>
       )}
       {loadState.kind === "loading" ? (
         <p role="status">Loading skills…</p>
       ) : loadState.kind === "error" ? (
         <p className="inline-error" role="alert">
-          Could not load skills. {loadState.message}
+          Could not load skills. {displayPath(loadState.message)}
         </p>
       ) : (
         <>
@@ -241,7 +242,7 @@ export function Skills() {
                     <details className="collection-card-details">
                       <summary>Skill details</summary>
                       <p className="supporting-copy">{skill.description || "No description in frontmatter."}</p>
-                      <p className="skill-id">Path: {skill.path}</p>
+                      <p className="skill-id">Path: {displayPath(skill.path)}</p>
                     </details>
                   </div>
                   {profile.skillModes.length > 0 && <><label className="state-toggle">
@@ -367,7 +368,7 @@ export function Skills() {
             </p>
             {editError && (
               <p className="inline-error" role="alert">
-                {editError}
+                {displayPath(editError)}
               </p>
             )}
             <div className="diff-columns">

@@ -354,3 +354,7 @@ p { margin: 0; }
 .inline-note { margin-top: 8px; color: var(--md-sys-color-error, #b3261e); font-size: 12px; }
 .load-more { justify-self: center; }
 @media (max-width: 900px) { .transcript-layout { grid-template-columns: minmax(0, 1fr); } .session-list { max-height: min(22vh, 240px); } }
+
+.chat-index-progress { display: grid; grid-template-columns: minmax(100px, 240px) minmax(0, 1fr); gap: 4px 12px; align-items: center; font-size: 13px; margin: 12px 0; }
+.chat-index-progress progress { width: 100%; accent-color: var(--md-sys-color-primary); }
+.chat-index-progress small { grid-column: 1 / -1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--md-sys-color-on-surface-variant); }

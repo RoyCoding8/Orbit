@@ -89,92 +89,106 @@ pub fn ingest(
                 continue;
             }
         }
-        let doc = match read_document(&path, false) {
-            Ok(doc) => doc,
-            Err(_) => {
-                report.skipped_files += 1;
-                continue;
+        match index_file(&mut connection, &path, fingerprint.as_deref()) {
+            Ok(indexed) => {
+                report.sessions += indexed.sessions;
+                report.lines_read += indexed.lines_read;
+                report.messages_indexed += indexed.messages_indexed;
+                report.malformed_lines += indexed.malformed_lines;
+                report.skipped_state_lines += indexed.skipped_state_lines;
             }
-        };
-        let mut parents: HashMap<String, Option<String>> = HashMap::new();
-        let mut messages = Vec::new();
-        for (position, entry) in &doc.entries {
-            let Some(id) = entry["id"].as_str() else {
-                report.skipped_state_lines += 1;
-                continue;
-            };
-            let parent = entry["parentId"]
-                .as_str()
-                .and_then(|id| parents.get(id))
-                .cloned()
-                .flatten();
-            let kind = entry["type"].as_str().unwrap_or("");
-            let (role, text) = match kind {
-                "message" => (
-                    entry["message"]["role"].as_str().unwrap_or(""),
-                    text_content(&entry["message"]["content"]),
-                ),
-                "custom_message" => ("custom", text_content(&entry["content"])),
-                "compaction" | "branch_summary" => {
-                    (kind, entry["summary"].as_str().unwrap_or("").to_owned())
-                }
-                _ => ("", String::new()),
-            };
-            if role.is_empty() {
-                parents.insert(id.to_owned(), parent);
-                report.skipped_state_lines += 1;
-                continue;
-            }
-            let role = if role == "toolResult" {
-                "tool_result"
-            } else {
-                role
-            };
-            let images = entry["message"]["content"].as_array().map_or(0, |blocks| {
-                blocks
-                    .iter()
-                    .filter(|block| block["type"] == "image")
-                    .count()
-            });
-            messages.push(IndexedMessage {
-                uuid: id.to_owned(),
-                parent_uuid: parent,
-                message_type: role.to_owned(),
-                text,
-                raw_json: entry.to_string(),
-                position: *position,
-                attachment: (images > 0)
-                    .then(|| format!("{images} inline image(s), preserved in the native archive")),
-                tool_result: (role == "tool_result")
-                    .then(|| text_content(&entry["message"]["content"])),
-                tool_result_note: None,
-            });
-            parents.insert(id.to_owned(), Some(id.to_owned()));
+            Err(TranscriptError::Io(_)) => report.skipped_files += 1,
+            Err(error) => return Err(error),
         }
-        let id = format!("pi:{}", doc.header["id"].as_str().unwrap());
-        let title = session_title(&doc);
-        report.messages_indexed += replace_indexed_session(
-            &mut connection,
-            IndexedSession {
-                id: &id,
-                project: doc.header["cwd"].as_str().unwrap(),
-                source_path: &path,
-                updated_at: doc
-                    .entries
-                    .last()
-                    .and_then(|(_, entry)| entry["timestamp"].as_str())
-                    .or(doc.header["timestamp"].as_str()),
-                title: title.as_deref(),
-                fingerprint: fingerprint.as_deref(),
-            },
-            &messages,
-            &doc.errors,
-        )?;
-        report.sessions += 1;
-        report.lines_read += doc.lines;
-        report.malformed_lines += doc.errors.len();
     }
     prune_vanished_sessions(&mut connection, &seen)?;
+    Ok(report)
+}
+
+pub(super) fn index_file(
+    connection: &mut rusqlite::Connection,
+    path: &Path,
+    fingerprint: Option<&str>,
+) -> Result<IngestReport, TranscriptError> {
+    let mut report = IngestReport::default();
+    let doc = read_document(path, false).map_err(invalid)?;
+    let mut parents: HashMap<String, Option<String>> = HashMap::new();
+    let mut messages = Vec::new();
+    for (position, entry) in &doc.entries {
+        let Some(id) = entry["id"].as_str() else {
+            report.skipped_state_lines += 1;
+            continue;
+        };
+        let parent = entry["parentId"]
+            .as_str()
+            .and_then(|id| parents.get(id))
+            .cloned()
+            .flatten();
+        let kind = entry["type"].as_str().unwrap_or("");
+        let (role, text) = match kind {
+            "message" => (
+                entry["message"]["role"].as_str().unwrap_or(""),
+                text_content(&entry["message"]["content"]),
+            ),
+            "custom_message" => ("custom", text_content(&entry["content"])),
+            "compaction" | "branch_summary" => {
+                (kind, entry["summary"].as_str().unwrap_or("").to_owned())
+            }
+            _ => ("", String::new()),
+        };
+        if role.is_empty() {
+            parents.insert(id.to_owned(), parent);
+            report.skipped_state_lines += 1;
+            continue;
+        }
+        let role = if role == "toolResult" {
+            "tool_result"
+        } else {
+            role
+        };
+        let images = entry["message"]["content"].as_array().map_or(0, |blocks| {
+            blocks
+                .iter()
+                .filter(|block| block["type"] == "image")
+                .count()
+        });
+        messages.push(IndexedMessage {
+            uuid: id.to_owned(),
+            parent_uuid: parent,
+            message_type: role.to_owned(),
+            text,
+            raw_json: entry.to_string(),
+            position: *position,
+            attachment: (images > 0)
+                .then(|| format!("{images} inline image(s), preserved in the native archive")),
+            tool_result: (role == "tool_result")
+                .then(|| text_content(&entry["message"]["content"])),
+            tool_result_note: None,
+        });
+        parents.insert(id.to_owned(), Some(id.to_owned()));
+    }
+    let id = format!("pi:{}", doc.header["id"].as_str().unwrap());
+    let title = session_title(&doc);
+    report.messages_indexed += replace_indexed_session(
+        connection,
+        IndexedSession {
+            id: &id,
+            project: doc.header["cwd"].as_str().unwrap(),
+            source_path: path,
+            updated_at: doc
+                .entries
+                .last()
+                .and_then(|(_, entry)| entry["timestamp"].as_str())
+                .or(doc.header["timestamp"].as_str()),
+            title: title.as_deref(),
+            fingerprint,
+        },
+        &messages,
+        &doc.errors,
+    )?;
+    report.sessions += 1;
+    report.lines_read += doc.lines;
+    report.malformed_lines += doc.errors.len();
     Ok(report)
 }
 
@@ -487,7 +501,7 @@ fn text_content(value: &Value) -> String {
         .join("\n")
 }
 
-fn session_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+pub(super) fn session_files(root: &Path) -> Result<Vec<PathBuf>, String> {
     ensure_plain_components(root)?;
     if !root.exists() {
         return Ok(Vec::new());
@@ -514,7 +528,7 @@ fn session_files(root: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
-fn session_roots(config: &Path, project: &Path) -> Result<Vec<PathBuf>, String> {
+pub(super) fn session_roots(config: &Path, project: &Path) -> Result<Vec<PathBuf>, String> {
     let mut roots =
         vec![
             crate::history::canonical_location(&default_session_root(config, project)?)

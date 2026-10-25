@@ -184,9 +184,9 @@ export function Memories() {
         </div>
       </header>
 
-      {error && <p className="inline-error" role="alert">{error}</p>}
+      {error && <p className="inline-error" role="alert">{displayPath(error)}</p>}
       {loadState.kind === "loading" ? <p role="status">Loading project memories…</p> : null}
-      {loadState.kind === "error" ? <div className="empty-panel"><h3>Could not load memories</h3><p className="inline-error">{loadState.message}</p><button className="action-button" onClick={() => void load()}>Retry</button></div> : null}
+          {loadState.kind === "error" ? <div className="empty-panel"><h3>Could not load memories</h3><p className="inline-error">{displayPath(loadState.message)}</p><button className="action-button" onClick={() => void load()}>Retry</button></div> : null}
       {loadState.kind === "ready" && catalog ? (
         <>
             <div className="memory-project-banner"><span>Authorized project</span><code>{displayPath(catalog.projectRoot)}</code></div>

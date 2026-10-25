@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useHarness } from "../HarnessContext";
+import { displayPath } from "../pathDisplay";
 import { clients, harnesses, isClient, type Client } from "../harnesses";
 
 type Preview = {
@@ -80,12 +81,12 @@ export function ChatConversion({ sessionId, onClose, onConverted }: {
     </div>
     <div className="conversion-body">
       {previewState.kind === "loading" && <p role="status">Reading the native conversation…</p>}
-      {previewState.kind === "error" && <p role="alert" className="inline-error">{previewState.message}</p>}
+      {previewState.kind === "error" && <p role="alert" className="inline-error">{displayPath(previewState.message)}</p>}
       {previewState.kind === "ready" && <>
         <p><strong>{previewState.preview.title}</strong> · {previewState.preview.messages} messages</p>
         {result ? <div role="status">
           <p>Created {harnesses[target].label} chat <strong>{result.sessionId}</strong>.</p>
-          <p>Working directory: {result.workingDirectory}</p>
+          <p>Working directory: {displayPath(result.workingDirectory)}</p>
           <p>Select {harnesses[target].label} to browse the converted chat.</p>
         </div> : <>
           <label htmlFor="conversion-target">Destination agent</label>
@@ -95,7 +96,7 @@ export function ChatConversion({ sessionId, onClose, onConverted }: {
             {destinations.map(candidate => <option key={candidate} value={candidate}>{harnesses[candidate].label}</option>)}
           </select>
           <p className="quiet-copy">Kiro cannot be a destination because its current interface does not support creating a chat from a transcript.</p>
-          <p>Working directory: <span className="conversion-path">{projectRoot ?? previewState.preview.workingDirectory}</span></p>
+          <p>Working directory: <span className="conversion-path">{displayPath(projectRoot ?? previewState.preview.workingDirectory)}</span></p>
           <div className="dialog-actions">
             <button type="button" className="secondary-action" disabled={busy} onClick={() => void chooseDirectory()}>Change working directory</button>
             {projectRoot && <button type="button" className="text-button" disabled={busy} onClick={() => setProjectRoot(null)}>Use original directory</button>}
@@ -107,7 +108,7 @@ export function ChatConversion({ sessionId, onClose, onConverted }: {
           <ul>{(result?.notes ?? previewState.preview.notes).map(note => <li key={note}>{note}</li>)}</ul>
         </details>
       </>}
-      {error && <p role="alert" className="inline-error">{error}</p>}
+      {error && <p role="alert" className="inline-error">{displayPath(error)}</p>}
     </div>
     <div className="dialog-actions">
       <button type="button" className="secondary-action" disabled={busy} onClick={onClose}>{result ? "Done" : "Cancel"}</button>

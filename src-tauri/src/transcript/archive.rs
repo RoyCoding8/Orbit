@@ -487,10 +487,7 @@ pub(super) fn import_codex_archive(
             }
         })
         .ok_or_else(|| "Archived Codex rollout has no session metadata.".to_owned())?;
-    let source_id = source_meta
-        .get("session_id")
-        .or_else(|| source_meta.get("id"))
-        .and_then(Value::as_str)
+    let source_id = super::codex::metadata_id(&source_meta)
         .ok_or_else(|| "Archived Codex session metadata has no ID.".to_owned())?;
     if source_id != manifest.source_session_id {
         return Err("Codex archive session ID does not match its rollout.".to_owned());

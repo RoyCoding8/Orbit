@@ -307,7 +307,6 @@ describe("App shell", () => {
     vi.mocked(invoke).mockImplementation(async command => {
       if (command === "config_load") return { layers: [{ name: "user", path: "D:/config/opencode.jsonc", values: { model: "openai/example" } }], effective: { model: { value: "openai/example", source: "user" } } };
       if (command === "project_choose") return "D:/chosen-project";
-      if (command === "transcript_ingest") return { sessions: 0, messagesIndexed: 0, linesRead: 0, skippedFiles: 0, skippedStateLines: 0, malformedLines: 0 };
       if (command === "transcript_list_sessions") return {sessions: [], source: "D:/native-chats", warnings: []};
       return [];
     });
@@ -326,10 +325,11 @@ describe("App shell", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: `Import ${label} archive` })).toBeEnabled());
     if (client === "pi") {
       fireEvent.click(screen.getByRole("button", { name: "Choose project" }));
-      expect(await screen.findByText("Indexing project: D:/chosen-project")).toBeInTheDocument();
+      expect(await screen.findByText("Additional project: D:/chosen-project")).toBeInTheDocument();
     } else expect(screen.queryByRole("button", { name: "Choose project" })).toBeNull();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Refresh chats" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Refresh chats" }));
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith("transcript_ingest", client === "pi" ? { client, projectRoot: "D:/chosen-project" } : { client }));
-    expect(await screen.findByText("Refreshed 0 chats. Re-indexed 0 messages from changed files.")).toBeInTheDocument();
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("transcript_list_sessions", { client, refresh: true, projectRoot: client === "pi" ? "D:/chosen-project" : null }));
+    expect(await screen.findByText(/Found 0 .* chats/)).toBeInTheDocument();
   });
 });

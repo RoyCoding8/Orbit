@@ -23,6 +23,10 @@ describe.each(pages)("$name load feedback", ({ Component, command, loading, empt
     expect(screen.queryByText(empty)).not.toBeInTheDocument();
     if (command === "transcript_list_sessions") expect(screen.getByRole("button", { name: "Refresh chats" })).toBeDisabled();
     await act(async () => { finish(command === "transcript_list_sessions" ? {sessions: [], source: "C:/native-chats", warnings: []} : []); });
+    if (command === "transcript_list_sessions") {
+      expect(screen.queryByText(empty)).not.toBeInTheDocument();
+      await act(async () => { finish({ sessions: [], source: "C:/native-chats", warnings: [] }); });
+    }
     expect(await screen.findByText(empty)).toBeInTheDocument();
     expect(screen.queryByText(loading)).not.toBeInTheDocument();
     if (command === "transcript_list_sessions") expect(screen.getByRole("button", { name: "Refresh chats" })).toBeEnabled();

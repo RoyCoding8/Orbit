@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod catalog;
 pub mod codex;
 pub mod conversion;
 pub mod deletion;
@@ -35,6 +36,7 @@ pub struct SessionSummary {
     pub project: String,
     pub updated_at: Option<String>,
     pub message_count: usize,
+    pub indexed: bool,
 }
 
 #[derive(Default)]

@@ -31,11 +31,14 @@ function ipcFor(load: (payload?: InvokeArgs) => unknown, chooseProject: () => un
 }
 
 describe("Config project selection", () => {
-  it("displays the resolved native settings path instead of guessing the user directory", async () => {
-    mockIPC(ipcFor(() => SNAPSHOT));
+  it.each([
+    ["D:/fixture-config/settings.json", "D:/fixture-config/settings.json"],
+    ["\\\\?\\D:\\fixture-config\\settings.json", "D:\\fixture-config\\settings.json"],
+  ])("displays the resolved native settings path %s", async (path, displayed) => {
+    mockIPC(ipcFor(() => ({ ...SNAPSHOT, layers: [{ ...SNAPSHOT.layers[0], path }] })));
     render(<Config />);
 
-    expect(await screen.findByText("D:/fixture-config/settings.json")).toBeInTheDocument();
+    expect(await screen.findByText(displayed)).toBeInTheDocument();
     expect(screen.queryByText("~/.claude/settings.json")).not.toBeInTheDocument();
   });
 

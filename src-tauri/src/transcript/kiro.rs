@@ -24,13 +24,13 @@ const MAX_SESSION_LOG_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_RECORD_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
-struct SessionHeader {
-    session_id: String,
-    cwd: String,
+pub(super) struct SessionHeader {
+    pub(super) session_id: String,
+    pub(super) cwd: String,
     #[serde(default)]
-    title: Option<String>,
+    pub(super) title: Option<String>,
     #[serde(default)]
-    updated_at: Option<String>,
+    pub(super) updated_at: Option<String>,
 }
 
 /// Read the documented CLI v2 ACP session files beneath `KIRO_HOME` and
@@ -312,8 +312,8 @@ fn write_new_file(destination: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(|error| format!("Could not sync the Kiro backup manifest: {error}"))
 }
 
-fn read_header(path: &Path) -> Result<Option<SessionHeader>, TranscriptError> {
-    if fs::metadata(path)?.len() > MAX_RECORD_BYTES as u64 {
+pub(super) fn read_header(path: &Path) -> Result<Option<SessionHeader>, TranscriptError> {
+    if !plain_file(path)? || fs::metadata(path)?.len() > MAX_RECORD_BYTES as u64 {
         return Ok(None);
     }
     let bytes = fs::read(path)?;
@@ -328,7 +328,7 @@ fn plain_file(path: &Path) -> Result<bool, TranscriptError> {
     }
 }
 
-fn ingest_session(
+pub(super) fn ingest_session(
     connection: &mut Connection,
     header: &SessionHeader,
     source_path: &Path,

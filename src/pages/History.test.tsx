@@ -13,6 +13,34 @@ const version = {
 };
 const log = { ...version, status: "applied" };
 
+it("displays ordinary Windows paths in versions, logs and restore prompts while preserving project identity", async () => {
+  const projectRoot = "\\\\?\\D:\\AI\\Orbit";
+  const target = `${projectRoot}\\AGENTS.md`;
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  vi.mocked(invoke).mockImplementation(async command => {
+    if (command === "history_load") return {
+      versions: [{ ...version, scopeLabel: projectRoot, target }],
+      logs: [{ ...log, scopeLabel: projectRoot, target }],
+    };
+    if (command === "project_choose") return projectRoot;
+    if (command === "history_restore") return null;
+    throw new Error(command);
+  });
+  render(<History />);
+  expect(await screen.findByRole("heading", { name: "D:\\AI\\Orbit" })).toBeInTheDocument();
+  expect(screen.getByText("D:\\AI\\Orbit\\AGENTS.md")).toHaveAttribute("title", "D:\\AI\\Orbit\\AGENTS.md");
+  fireEvent.change(screen.getByRole("searchbox", { name: "Search history" }), { target: { value: target } });
+  expect(screen.getByText("Showing 1 of 1 versions and 1 of 1 logs")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Choose project" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("history_load", { projectRoot }));
+  fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("history_restore", { projectRoot, id: "operation-1", expectedCurrentChecksum: "current" }));
+  expect(confirm).toHaveBeenCalledWith(expect.stringContaining("at D:\\AI\\Orbit\\AGENTS.md"));
+  fireEvent.click(screen.getByRole("tab", { name: /Logs/ }));
+  expect(screen.getByText("D:\\AI\\Orbit\\AGENTS.md")).toBeInTheDocument();
+  expect(document.body.textContent).not.toContain("\\\\?\\");
+});
+
 it("keeps a failed restore visible and sends the chosen project and current checksum", async () => {
   vi.spyOn(window, "confirm").mockReturnValue(true);
   vi.mocked(invoke).mockImplementation(async command => {

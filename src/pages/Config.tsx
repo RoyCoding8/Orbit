@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHarness } from "../HarnessContext";
+import { displayPath } from "../pathDisplay";
 import { M3eButton } from "@m3e/react/button";
 import "@m3e/web/button";
 import { JsonValue } from "../components/JsonValue";
@@ -183,7 +184,7 @@ export function Config() {
               </button>
             ))}
           </div>
-          <p className="layer-path">{selectedLayer?.path}</p>
+          <p className="layer-path">{selectedLayer && displayPath(selectedLayer.path)}</p>
           <label className="field-label" htmlFor="setting-key">
             Setting key
           </label>
@@ -230,12 +231,12 @@ export function Config() {
           {snapshot.layers.some(layer => layer.name === "project_parent") && (
             <details>
               <summary>Inherited project files</summary>
-              {snapshot.layers.filter(layer => layer.name === "project_parent").map(layer => <p key={layer.path} className="layer-path">{layer.path}</p>)}
+              {snapshot.layers.filter(layer => layer.name === "project_parent").map(layer => <p key={layer.path} className="layer-path">{displayPath(layer.path)}</p>)}
             </details>
           )}
           {error && (
             <p className="config-error" role="alert">
-              {error}
+              {displayPath(error)}
             </p>
           )}
           <div className="effective-search">

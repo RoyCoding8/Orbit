@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHarness } from "../HarnessContext";
+import { displayPath } from "../pathDisplay";
 import "./History.css";
 
 type Scope = "global" | "project" | "other";
@@ -68,7 +69,7 @@ function parseScopeFilter(value: string): ScopeFilter {
 }
 
 function matchesSearch(query: string, fields: readonly (string | null | undefined)[]): boolean {
-  return !query || fields.some((field) => field?.toLocaleLowerCase().includes(query));
+  return !query || fields.some((field) => field && displayPath(field).toLocaleLowerCase().includes(query));
 }
 
 export function History() {
@@ -108,7 +109,7 @@ export function History() {
     };
   }, [load]);
 
-  const normalizedSearch = search.trim().toLocaleLowerCase();
+  const normalizedSearch = displayPath(search.trim()).toLocaleLowerCase();
   const scopedVersions = useMemo(
     () =>
       snapshot.versions.filter(
@@ -183,8 +184,8 @@ export function History() {
   const restore = (version: HistoryVersion) => {
     const targetDescription =
       version.currentChecksum === null
-        ? `create the currently absent target at ${version.target}`
-        : `replace the current target at ${version.target}`;
+        ? `create the currently absent target at ${displayPath(version.target)}`
+        : `replace the current target at ${displayPath(version.target)}`;
     if (
       !window.confirm(
         `Restore this ${version.kind} version and ${targetDescription}? The state being replaced will be saved as a new version.`,
@@ -252,8 +253,8 @@ export function History() {
       </div>
 
       <div className="history-toolbar">
-        <p className="history-project" title={projectRoot ?? "Current project"}>
-          {projectRoot ?? "Current project"}
+        <p className="history-project" title={displayPath(projectRoot ?? "Current project")}>
+          {displayPath(projectRoot ?? "Current project")}
         </p>
         <label className="history-scope-filter">
           Scope
@@ -288,7 +289,7 @@ export function History() {
         Showing {visibleVersions.length} of {scopedVersions.length} versions and {visibleLogs.length} of {scopedLogs.length} logs
       </p>
 
-      {error && <p className="history-error" role="alert">{error}</p>}
+      {error && <p className="history-error" role="alert">{displayPath(error)}</p>}
       {loadState === "loading" && (
         <p className="history-quiet" role="status">Loading history…</p>
       )}
@@ -338,7 +339,7 @@ export function History() {
           {versionsByGroup.map((group) => (
             <details className="history-group" key={`${group[0].scopeId}:${group[0].scopeLabel}`} open={versionsByGroup[0] === group}>
               <summary className="history-group-heading">
-                <h3>{group[0].scopeLabel}</h3>
+                <h3>{displayPath(group[0].scopeLabel)}</h3>
                 <span>{group.length}</span>
               </summary>
               <div className="history-list">
@@ -346,10 +347,10 @@ export function History() {
                   <article className="history-version" key={version.id}>
                     <div className="history-version-copy">
                       <div className="history-version-title">
-                        <h4>{version.resourceKind} · {version.resourceId}</h4>
+                        <h4>{version.resourceKind} · {displayPath(version.resourceId)}</h4>
                         <span className="history-kind">{version.kind} version</span>
                       </div>
-                      <p className="history-target" title={version.target}>{version.target}</p>
+                      <p className="history-target" title={displayPath(version.target)}>{displayPath(version.target)}</p>
                       <p className="history-meta">
                         {formatTime(version.timestamp)} · {version.action} · {targetState(version.currentChecksum)}
                       </p>
@@ -403,14 +404,14 @@ export function History() {
               <article className="history-log" key={entry.id}>
                 <div className="history-version-copy">
                   <div className="history-version-title">
-                    <h4>{entry.resourceKind} · {entry.resourceId}</h4>
+                    <h4>{entry.resourceKind} · {displayPath(entry.resourceId)}</h4>
                     <span className={`history-status status-${entry.status}`}>{entry.status}</span>
                   </div>
-                  <p className="history-target" title={entry.target ?? undefined}>
-                    {entry.target ?? "Target not recorded"}
+                  <p className="history-target" title={entry.target ? displayPath(entry.target) : undefined}>
+                    {displayPath(entry.target ?? "Target not recorded")}
                   </p>
                   <p className="history-meta">
-                    {entry.scopeLabel} · {formatTime(entry.timestamp)} · {entry.action}
+                    {displayPath(entry.scopeLabel)} · {formatTime(entry.timestamp)} · {entry.action}
                   </p>
                   <p className="history-meta">
                     {entry.backupStatus === null ? "No saved payload" : backupLabels[entry.backupStatus]}

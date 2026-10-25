@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IngestReport {
     pub sessions: usize,
@@ -47,7 +47,8 @@ pub(super) struct IndexedSession<'a> {
 /// Version 5 adds the source fingerprint that lets unchanged session files
 /// skip full re-indexing instead of being re-read on every scan.
 /// Version 6 indexes source paths for incremental lookups.
-const SCHEMA_VERSION: i64 = 6;
+/// Version 7 separates catalog freshness from optional message indexing.
+const SCHEMA_VERSION: i64 = 7;
 
 pub fn open_database(app_data_dir: &Path) -> Result<Connection, TranscriptError> {
     fs::create_dir_all(app_data_dir)?;
@@ -84,6 +85,9 @@ pub fn open_database(app_data_dir: &Path) -> Result<Connection, TranscriptError>
     }
     if matches!(version, 3 | 4) {
         transaction.execute("ALTER TABLE sessions ADD COLUMN fingerprint TEXT", [])?;
+    }
+    if (3..7).contains(&version) {
+        transaction.execute_batch("ALTER TABLE sessions ADD COLUMN catalog_fingerprint TEXT; ALTER TABLE sessions ADD COLUMN indexed INTEGER NOT NULL DEFAULT 1;")?;
     }
     if version != SCHEMA_VERSION {
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -160,7 +164,7 @@ pub fn ingest_projects(
 
 /// The database identity includes the complete source name so files differing
 /// only by extension case remain distinct on case-sensitive filesystems.
-fn qualified_session_id(project: &str, path: &Path) -> String {
+pub(super) fn qualified_session_id(project: &str, path: &Path) -> String {
     let file_name = path
         .file_name()
         .unwrap_or_default()
@@ -281,7 +285,7 @@ pub(super) fn unchanged_source(
         .is_some())
 }
 
-fn ingest_session(
+pub(super) fn ingest_session(
     connection: &mut Connection,
     path: &Path,
     project: &str,
@@ -323,7 +327,7 @@ fn ingest_session(
         .find_map(|value| value.get("uuid").and_then(Value::as_str))
         .map(str::to_owned);
     let spills = read_spills(path, &tool_ids, fallback_message.as_deref());
-    let fingerprint = fingerprint.filter(|_| spills.values().all(|(_, note)| note.is_none()));
+    let fingerprint = fingerprint.filter(|_| spills.complete);
     let mut malformed = 0usize;
     let mut skipped_state = 0usize;
     let mut messages = Vec::new();
@@ -357,7 +361,8 @@ fn ingest_session(
             .unwrap_or("unknown");
         let text = message_text(&value);
         let attachment = attachment_text(&value);
-        let (tool_result, tool_result_note) = spills.get(uuid).cloned().unwrap_or((None, None));
+        let (tool_result, tool_result_note) =
+            spills.attached.get(uuid).cloned().unwrap_or((None, None));
         messages.push(IndexedMessage {
             uuid: uuid.to_owned(),
             parent_uuid: parent_uuid.map(str::to_owned),
@@ -400,40 +405,40 @@ pub(super) fn replace_indexed_session(
         title,
         fingerprint,
     } = session;
+    let source = source_path.to_string_lossy();
     let transaction = connection.transaction()?;
+    let previous = {
+        let mut statement = transaction.prepare_cached(
+            "SELECT session_id FROM sessions WHERE session_id = ?1 OR source_path = ?2",
+        )?;
+        let rows =
+            statement.query_map(params![session_id, source], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    for id in previous {
+        transaction.execute("DELETE FROM sessions WHERE session_id = ?1", [&id])?;
+        transaction.execute("DELETE FROM messages_fts WHERE session_id = ?1", [&id])?;
+    }
     transaction.execute(
-        "DELETE FROM messages_fts WHERE session_id = ?1",
-        [session_id],
-    )?;
-    transaction.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id])?;
-    transaction.execute(
-        "INSERT INTO sessions(session_id, project, source_path, updated_at, message_count, title, fingerprint) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)",
-        params![session_id, project, source_path.to_string_lossy(), updated_at, title, fingerprint],
+        "INSERT INTO sessions(session_id, project, source_path, updated_at, message_count, title, fingerprint, catalog_fingerprint) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?6)",
+        params![session_id, project, source, updated_at, title, fingerprint],
     )?;
     for (position, error) in errors {
-        transaction.execute(
+        transaction.prepare_cached(
             "INSERT INTO transcript_ingest_errors(session_id, position, error) VALUES (?1, ?2, ?3)",
-            params![session_id, position, error],
-        )?;
+        )?.execute(params![session_id, position, error])?;
     }
     for message in messages {
-        transaction.execute(
+        transaction.prepare_cached(
             "INSERT OR REPLACE INTO messages(session_id, uuid, parent_uuid, message_type, text, raw_json, position, attachment, tool_result, tool_result_note) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![session_id, message.uuid, message.parent_uuid, message.message_type, message.text, message.raw_json, message.position, message.attachment, message.tool_result, message.tool_result_note],
-        )?;
-        transaction.execute(
-            "DELETE FROM messages_fts WHERE session_id = ?1 AND uuid = ?2",
-            params![session_id, message.uuid],
-        )?;
-        let search_text = match &message.tool_result {
-            Some(result) => format!("{}\n{result}", message.text),
-            None => message.text.clone(),
-        };
-        transaction.execute(
-            "INSERT INTO messages_fts(session_id, uuid, text) VALUES (?1, ?2, ?3)",
-            params![session_id, message.uuid, search_text],
-        )?;
+        )?.execute(params![session_id, message.uuid, message.parent_uuid, message.message_type, message.text, message.raw_json, message.position, message.attachment, message.tool_result, message.tool_result_note])?;
     }
+    transaction.execute(
+        "INSERT INTO messages_fts(session_id, uuid, text)
+         SELECT session_id, uuid, CASE WHEN tool_result IS NULL THEN text ELSE text || char(10) || tool_result END
+         FROM messages WHERE session_id = ?1",
+        [session_id],
+    )?;
     let indexed = transaction.query_row(
         "SELECT count(*) FROM messages WHERE session_id = ?1",
         [session_id],
@@ -541,7 +546,7 @@ fn collect_tool_ids(value: &Value, message_uuid: &str, owners: &mut HashMap<Stri
 
 /// Tool results for a Claude session live beside its transcript under the
 /// site-stem `tool-results` directory.
-fn spill_directory(session_path: &Path) -> PathBuf {
+pub(super) fn spill_directory(session_path: &Path) -> PathBuf {
     let stem = session_path.file_stem().unwrap_or_default();
     session_path
         .parent()
@@ -550,20 +555,38 @@ fn spill_directory(session_path: &Path) -> PathBuf {
         .join("tool-results")
 }
 
+struct SpillRead {
+    attached: HashMap<String, (Option<String>, Option<String>)>,
+    complete: bool,
+}
+
 fn read_spills(
     session_path: &Path,
     tool_ids: &HashMap<String, String>,
     fallback_message: Option<&str>,
-) -> HashMap<String, (Option<String>, Option<String>)> {
+) -> SpillRead {
     let spill_dir = spill_directory(session_path);
     let mut attached = HashMap::new();
-    let Ok(entries) = fs::read_dir(spill_dir) else {
-        return attached;
+    let entries = match fs::read_dir(spill_dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return SpillRead {
+                attached,
+                complete: error.kind() == std::io::ErrorKind::NotFound,
+            }
+        }
     };
-    for entry in entries.flatten() {
-        if !entry.file_type().is_ok_and(|file_type| file_type.is_file())
-            || entry.path().extension().is_none_or(|ext| ext != "json")
-        {
+    let mut complete = true;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            complete = false;
+            continue;
+        };
+        let Ok(file_type) = entry.file_type() else {
+            complete = false;
+            continue;
+        };
+        if !file_type.is_file() || entry.path().extension().is_none_or(|ext| ext != "json") {
             continue;
         }
         let path = entry.path();
@@ -623,6 +646,7 @@ fn read_spills(
                 }
             }
             Err(_) => {
+                complete = false;
                 let key = target
                     .or_else(|| fallback_message.map(str::to_owned))
                     .unwrap_or(stem.clone());
@@ -634,7 +658,7 @@ fn read_spills(
             }
         }
     }
-    attached
+    SpillRead { attached, complete }
 }
 
 fn attach_spill_note(
@@ -665,7 +689,7 @@ fn find_tool_link(value: &Value) -> Option<String> {
 
 pub fn list_sessions(app_data_dir: &Path) -> Result<Vec<SessionSummary>, TranscriptError> {
     let connection = open_database(app_data_dir)?;
-    let mut statement = connection.prepare("SELECT session_id, project, updated_at, message_count, title FROM sessions ORDER BY updated_at DESC, session_id")?;
+    let mut statement = connection.prepare("SELECT session_id, project, updated_at, message_count, title, indexed FROM sessions ORDER BY updated_at DESC, session_id")?;
     let rows = statement.query_map([], |row| {
         Ok(SessionSummary {
             session_id: row.get(0)?,
@@ -673,6 +697,7 @@ pub fn list_sessions(app_data_dir: &Path) -> Result<Vec<SessionSummary>, Transcr
             project: row.get(1)?,
             updated_at: row.get(2)?,
             message_count: row.get::<_, i64>(3)? as usize,
+            indexed: row.get(5)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -680,7 +705,7 @@ pub fn list_sessions(app_data_dir: &Path) -> Result<Vec<SessionSummary>, Transcr
 
 #[cfg(test)]
 fn read_spills_for_tests(session_path: &Path) -> HashMap<String, (Option<String>, Option<String>)> {
-    read_spills(session_path, &HashMap::new(), None)
+    read_spills(session_path, &HashMap::new(), None).attached
 }
 
 #[cfg(test)]
@@ -703,7 +728,7 @@ mod tests {
 
     #[test]
     fn previous_incremental_caches_preserve_sessions_and_gain_indexed_source_lookups() {
-        for (version, expected_unchanged) in [(4, false), (5, true)] {
+        for (version, expected_unchanged) in [(4, false), (5, true), (6, true)] {
             let directory = crate::test_support::tempdir().unwrap();
             let data_dir = directory.path().join("db");
             fs::create_dir_all(&data_dir).unwrap();
@@ -714,7 +739,7 @@ mod tests {
                  INSERT INTO sessions VALUES ('legacy', 'project', 'legacy.jsonl', NULL, NULL, 1);",
             )
             .unwrap();
-            if version == 5 {
+            if version >= 5 {
                 connection.execute_batch("ALTER TABLE sessions ADD COLUMN fingerprint TEXT; UPDATE sessions SET fingerprint = '0:0|0';").unwrap();
             }
             connection
@@ -726,6 +751,7 @@ mod tests {
             assert_eq!(sessions.len(), 1);
             assert_eq!(sessions[0].session_id, "legacy");
             assert_eq!(sessions[0].message_count, 1);
+            assert!(sessions[0].indexed);
             assert_eq!(
                 unchanged_source(&connection, "legacy.jsonl", "0:0|0").unwrap(),
                 expected_unchanged
@@ -952,7 +978,7 @@ mod tests {
     }
 
     #[test]
-    fn unlinked_spill_is_reported_on_the_session_thread() {
+    fn unlinked_spill_is_reported_without_reparsing_unchanged_sessions() {
         let temp = crate::test_support::tempdir().unwrap();
         let project = temp.path().join("projects").join("munged");
         let spills = project.join("session-1").join("tool-results");
@@ -974,6 +1000,12 @@ mod tests {
             )
             .unwrap();
         assert!(note.contains("no matching tool call"));
+        assert_eq!(
+            ingest_projects(temp.path(), &temp.path().join("db"))
+                .unwrap()
+                .lines_read,
+            0
+        );
     }
 
     #[test]

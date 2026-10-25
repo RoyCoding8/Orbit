@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useHarness } from "../HarnessContext";
 import { open } from "@tauri-apps/plugin-dialog";
+import { Channel } from "@tauri-apps/api/core";
+import { displayPath } from "../pathDisplay";
 import { ChatConversion } from "./ChatConversion";
 
 type Session = {
@@ -9,6 +11,7 @@ type Session = {
   project: string;
   updatedAt: string | null;
   messageCount: number;
+  indexed: boolean;
 };
 type SessionCatalog = { sessions: Session[]; source: string; warnings: string[] };
 type Message = {
@@ -41,6 +44,9 @@ type IngestReport = {
   skippedFiles: number;
   skippedStateLines: number;
 };
+type IndexProgress = { completed: number; total: number; failed: number; title: string | null };
+type Indexing = { kind: "idle" } | { kind: "running"; progress: IndexProgress | null };
+
 type ArchiveReport = {
   action: "exported" | "imported";
   sourceSessionId: string;
@@ -63,8 +69,7 @@ function groupSessions(sessions: Session[]) {
   const projects = new Map<string, { key: string; project: string; sessions: Session[] }>();
   for (const session of sessions) {
     const project = session.project.trim() || "Unknown project";
-    const path = project.replace(/^\\\\\?\\UNC\\/i, "//").replace(/^\\\\\?\\/, "")
-      .replaceAll("\\", "/").replace(/\/+$/, "") || "/";
+    const path = displayPath(project).replaceAll("\\", "/").replace(/\/+$/, "") || "/";
     const key = /^[a-z]:\//i.test(path) || path.startsWith("//") ? path.toLowerCase() : path;
     const group = projects.get(key);
     if (group) group.sessions.push(session);
@@ -84,11 +89,14 @@ export function Transcripts() {
   >("loading");
   const [thread, setThread] = useState<Thread | null>(null);
   const sessionRequest = useRef(0);
-  const threadRequest = useRef(0);
+  const threadRequest = useRef<{ sessionId: string; loading: boolean } | null>(null);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [searched, setSearched] = useState(false);
   const [pending, setPending] = useState(false);
+  const [discovering, setDiscovering] = useState(true);
+  const [indexing, setIndexing] = useState<Indexing>({ kind: "idle" });
+  const indexRequest = useRef(0);
   const [converting, setConverting] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState("");
@@ -99,12 +107,13 @@ export function Transcripts() {
   const focusUuid = thread?.focusUuid;
   const busy = pending || sessionState === "loading" || thread?.loading === true;
 
+  const normalizedFilter = displayPath(filter.trim()).toLowerCase();
   const groups = groupSessions(sessions.filter(session =>
-    `${session.project} ${session.title ?? ""} ${session.sessionId}`.toLowerCase().includes(filter.toLowerCase().trim())));
+    displayPath(`${session.project} ${session.title ?? ""} ${session.sessionId}`).toLowerCase().includes(normalizedFilter)));
 
   const refreshSessions = useCallback(async (refresh = false, projectRoot: string | null = null) => {
     const request = ++sessionRequest.current;
-    setSessionState("loading");
+    setSessionState(current => current === "ready" ? current : "loading");
     try {
       const result = await invoke<SessionCatalog>("transcript_list_sessions", { refresh, projectRoot });
       if (request !== sessionRequest.current) return;
@@ -120,67 +129,9 @@ export function Transcripts() {
     }
   }, [invoke, label]);
 
-  useEffect(() => {
-    void refreshSessions(true).catch(error => setNotice(`Could not find chats. ${String(error)}`));
-    return () => {
-      sessionRequest.current += 1;
-      threadRequest.current += 1;
-    };
-  }, [refreshSessions, label]);
-  useEffect(() => {
-    setDeleteError("");
-    if (deleting) deleteDialog.current?.showModal();
-    else deleteDialog.current?.close();
-  }, [deleting]);
-  useEffect(() => {
-    if (focusUuid)
-      document
-        .querySelector(`[data-message-uuid="${CSS.escape(focusUuid)}"]`)
-        ?.scrollIntoView({ block: "center" });
-  }, [focusUuid, messages]);
-
-  const indexSource = async () => {
-    const selection = threadRequest.current;
-    setPending(true);
-    setNotice("Reading transcript files into the local index…");
-    try {
-      const report = await invoke<IngestReport>("transcript_ingest", profile.transcripts.scope === "project" ? { projectRoot } : undefined);
-      const nextSessions = await refreshSessions();
-      const skipped = [
-        report.malformedLines > 0
-          ? `${report.malformedLines} malformed lines`
-          : null,
-        report.skippedStateLines > 0
-          ? `${report.skippedStateLines} state lines`
-          : null,
-        report.skippedFiles > 0
-          ? `${report.skippedFiles} unreadable files`
-          : null,
-      ]
-        .filter(Boolean)
-        .join(", ");
-      setNotice(
-        `Refreshed ${report.sessions} chats. Re-indexed ${report.messagesIndexed.toLocaleString()} messages from changed files.${skipped ? ` Skipped: ${skipped}.` : ""}`,
-      );
-      setHits([]);
-      setSearched(false);
-      if (selection === threadRequest.current && nextSessions) {
-        const next = nextSessions.find(session => session.sessionId === selectedSession) ?? nextSessions[0];
-        if (next) await selectSession(next.sessionId);
-        else {
-          threadRequest.current += 1;
-          setThread(null);
-        }
-      }
-    } catch (error) {
-      setNotice(`Could not index transcripts. ${String(error)}`);
-    } finally {
-      setPending(false);
-    }
-  };
-
-  const selectSession = async (sessionId: string, uuid?: string) => {
-    const request = ++threadRequest.current;
+  const selectSession = useCallback(async (sessionId: string, uuid?: string) => {
+    const request = { sessionId, loading: true };
+    threadRequest.current = request;
     setThread({
       sessionId,
       messages: [],
@@ -218,18 +169,104 @@ export function Transcripts() {
         loading: false,
         focusUuid: uuid ?? null,
       });
+      const catalogRequest = sessionRequest.current;
+      const catalog = await invoke<SessionCatalog>("transcript_list_sessions", { refresh: false, projectRoot: null });
+      if (catalogRequest === sessionRequest.current) setSessions(catalog.sessions);
     } catch (error) {
       if (request === threadRequest.current)
         setNotice(`Could not open this session. ${String(error)}`);
     } finally {
+      request.loading = false;
       if (request === threadRequest.current)
         setThread((current) => current && { ...current, loading: false });
+    }
+  }, [invoke]);
+
+  const refreshThread = useCallback(async (nextSessions: Session[], selection = threadRequest.current) => {
+    if (!selection || selection !== threadRequest.current) return;
+    const next = nextSessions.find(session => session.sessionId === selection.sessionId);
+    if (next) {
+      if (!selection.loading) await selectSession(next.sessionId);
+    }
+    else {
+      threadRequest.current = null;
+      setThread(null);
+    }
+  }, [selectSession]);
+
+  useEffect(() => {
+    let active = true;
+    setDiscovering(true);
+    void (async () => {
+      try {
+        const cached = await refreshSessions();
+        if (!active || !cached) return;
+        setNotice(cached.length ? `Updating ${label} chats…` : `Finding ${label} chats…`);
+        const nextSessions = await refreshSessions(true);
+        if (active && nextSessions && threadRequest.current) await refreshThread(nextSessions);
+      } catch (error) {
+        if (active) setNotice(`Could not find chats. ${String(error)}`);
+      } finally {
+        if (active) setDiscovering(false);
+      }
+    })();
+    return () => {
+      active = false;
+      sessionRequest.current += 1;
+      threadRequest.current = null;
+      indexRequest.current += 1;
+    };
+  }, [refreshSessions, refreshThread, label]);
+  useEffect(() => {
+    setDeleteError("");
+    if (deleting) deleteDialog.current?.showModal();
+    else deleteDialog.current?.close();
+  }, [deleting]);
+  useEffect(() => {
+    if (focusUuid)
+      document
+        .querySelector(`[data-message-uuid="${CSS.escape(focusUuid)}"]`)
+        ?.scrollIntoView({ block: "center" });
+  }, [focusUuid, messages]);
+
+  const discover = async () => {
+    const selection = threadRequest.current;
+    setDiscovering(true);
+    try {
+      const nextSessions = await refreshSessions(true, projectRoot);
+      setHits([]);
+      setSearched(false);
+      if (nextSessions) await refreshThread(nextSessions, selection);
+    } catch (error) {
+      setNotice(`Could not refresh chats. ${String(error)}`);
+    } finally { setDiscovering(false); }
+  };
+
+  const indexSource = async () => {
+    const request = ++indexRequest.current;
+    setIndexing({ kind: "running", progress: null });
+    const onProgress = new Channel<IndexProgress>(progress => {
+      if (request === indexRequest.current) setIndexing({ kind: "running", progress });
+    });
+    try {
+      const report = await invoke<IngestReport>("transcript_ingest", { projectRoot, onProgress });
+      if (request !== indexRequest.current) return;
+      await refreshSessions();
+      setHits([]);
+      setSearched(false);
+      setNotice(`Indexed ${report.sessions} chats for message search.${report.skippedFiles ? ` Could not index ${report.skippedFiles} sources; retry indexing to try them again.` : ""}${report.malformedLines ? ` Skipped ${report.malformedLines} malformed records.` : ""}`);
+    } catch (error) {
+      if (request === indexRequest.current) setNotice(`Indexing stopped. Completed chats remain searchable. ${String(error)}`);
+    } finally {
+      onProgress.onmessage = () => {};
+      if (request === indexRequest.current) setIndexing({ kind: "idle" });
     }
   };
 
   const loadMore = async () => {
     if (!thread || busy) return;
-    const request = ++threadRequest.current;
+    const request = { sessionId: thread.sessionId, loading: true };
+    threadRequest.current = request;
     setThread({ ...thread, loading: true });
     try {
       const page = await invoke<Message[]>("transcript_thread_page", {
@@ -248,6 +285,7 @@ export function Transcripts() {
       if (request === threadRequest.current)
         setNotice(`Could not load more messages. ${String(error)}`);
     } finally {
+      request.loading = false;
       if (request === threadRequest.current)
         setThread((current) => current && { ...current, loading: false });
     }
@@ -360,7 +398,7 @@ export function Transcripts() {
       const report = await invoke<{ path: string; deletedSessions: string[]; warning: string | null }>("transcript_delete", {
         sessionId: deleting, backupDirectory,
       });
-      threadRequest.current += 1;
+      threadRequest.current = null;
       setThread(null);
       setHits(current => current.filter(hit => !report.deletedSessions.includes(hit.sessionId)));
       setSessions(current => current.filter(session => !report.deletedSessions.includes(session.sessionId)));
@@ -404,19 +442,30 @@ export function Transcripts() {
           <button
             className="primary-action"
             type="button"
-            onClick={() => void indexSource()}
-            disabled={busy}
+            onClick={() => void discover()}
+            disabled={busy || discovering || indexing.kind === "running"}
+            aria-busy={discovering}
           >
-            {pending ? "Working…" : "Refresh chats"}
+            Refresh chats
+          </button>
+          <button className="secondary-action" type="button" onClick={() => void indexSource()}
+            disabled={busy || discovering || indexing.kind === "running" || sessions.length === 0}>
+            Index chats
           </button>
         </div>
       </div>
       {profile.transcripts.note && <p className="supporting-copy">{profile.transcripts.note}</p>}
-      {source && <p className="quiet-copy">Chat source: {source}</p>}
-      {profile.transcripts.scope === "project" && <p className="quiet-copy">Indexing project: {projectRoot ?? "Launch folder"}</p>}
+      {source && <p className="quiet-copy">Chat source: {displayPath(source)}</p>}
+      {profile.transcripts.scope === "project" && <p className="quiet-copy">Additional project: {displayPath(projectRoot ?? "Launch folder")}</p>}
       <p className="transcript-notice" role="status">
-        {notice}
+        {displayPath(notice)}
       </p>
+      {indexing.kind === "running" && <div className="chat-index-progress" role="status">
+        <progress aria-label="Chat indexing" max={indexing.progress?.total || 1} value={indexing.progress?.total ? indexing.progress.completed : undefined} />
+        <span>{indexing.progress ? `${indexing.progress.completed} of ${indexing.progress.total} chats processed${indexing.progress.failed ? ` · ${indexing.progress.failed} failed` : ""}` : "Preparing chat index…"}</span>
+        {indexing.progress?.title && <small>{indexing.progress.title}</small>}
+      </div>}
+      <p className="quiet-copy">{sessions.filter(session => session.indexed).length} of {sessions.length} chats indexed. Message search covers indexed chats. Open a chat to load it, or index all chats for search.</p>
       <form
         className="transcript-search"
         onSubmit={(event) => void search(event)}
@@ -440,16 +489,16 @@ export function Transcripts() {
           <label className="chat-filter">Filter projects and chats
             <input value={filter} onChange={event => setFilter(event.target.value)} placeholder="Project, chat name or ID" />
           </label>
-          {sessionState === "loading" ? (
+          {sessionState === "loading" || (discovering && sessions.length === 0) ? (
             <p className="quiet-copy" role="status">
               Finding chats…
             </p>
-          ) : sessionState === "error" ? null : sessions.length === 0 ? (
+          ) : sessionState === "error" && sessions.length === 0 ? null : sessions.length === 0 ? (
             <p className="quiet-copy">No chats found in this source.</p>
           ) : (
             groups.map(group => <details className="chat-project" key={group.key} open>
               <summary><strong>{group.project.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || group.project}</strong><span>{group.sessions.length} chats</span></summary>
-              <p className="chat-project-path">{group.project}</p>
+              <p className="chat-project-path">{displayPath(group.project)}</p>
               {group.sessions.map((session) => (
               <button
                 key={session.sessionId}
@@ -458,8 +507,7 @@ export function Transcripts() {
               >
                 <strong>{session.title ?? session.sessionId}</strong>
                 <span>
-                  {session.messageCount.toLocaleString()}{" "}
-                  messages
+                  {session.indexed ? `${session.messageCount.toLocaleString()} ${session.messageCount === 1 ? "message" : "messages"} · Indexed` : "Not indexed"}
                 </span>
               </button>
               ))}
@@ -487,7 +535,7 @@ export function Transcripts() {
                   onClick={() => void selectSession(hit.sessionId, hit.uuid)}
                 >
                   <strong>
-                    {hit.project} · {hit.sessionId} · line {hit.position}
+                    {displayPath(hit.project)} · {hit.sessionId} · line {hit.position}
                   </strong>
                   <span>
                     {hit.before && `${hit.before.slice(0, 140)} … `}
@@ -506,7 +554,7 @@ export function Transcripts() {
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <button type="button" className="secondary-action" disabled={busy}
                   onClick={() => setConverting(selectedSession)}>Convert chat</button>
-                <button type="button" className="secondary-action" disabled={busy || profile.transcripts.archive !== "migration"}
+                <button type="button" className="secondary-action" disabled={busy || indexing.kind === "running" || profile.transcripts.archive !== "migration"}
                   title={profile.transcripts.archive === "migration" ? undefined : "Deletion requires a chat archive that Orbit can restore."}
                   onClick={() => setDeleting(selectedSession)}>Delete chat</button>
                 <button
@@ -535,6 +583,7 @@ export function Transcripts() {
             </p>
           )}
           <div className="thread-list" role="region" tabIndex={0} aria-label="Transcript messages">
+            {thread?.loading && <p role="status" className="quiet-copy">Loading chat…</p>}
             {messages.map((message) => (
               <article
                 className="message-card"
@@ -565,7 +614,7 @@ export function Transcripts() {
                   </details>
                 )}
                 {message.toolResultNote && (
-                  <p className="inline-note">{message.toolResultNote}</p>
+                  <p className="inline-note">{displayPath(message.toolResultNote)}</p>
                 )}
               </article>
             ))}

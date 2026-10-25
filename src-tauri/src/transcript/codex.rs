@@ -1,14 +1,14 @@
 use super::archive::{export_codex_archive, import_codex_archive, ArchiveReport};
 use super::ingest::{
-    file_fingerprint, file_stamp, open_database, prune_vanished_sessions, replace_indexed_session,
+    file_fingerprint, open_database, prune_vanished_sessions, replace_indexed_session,
     unchanged_source, IndexedMessage, IndexedSession, IngestReport,
 };
 use super::TranscriptError;
-use rusqlite::Connection;
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 pub fn ingest(config_root: &Path, app_data_dir: &Path) -> Result<IngestReport, TranscriptError> {
@@ -21,12 +21,6 @@ pub fn ingest(config_root: &Path, app_data_dir: &Path) -> Result<IngestReport, T
     }
 
     let titles = read_titles(&config_root.join("session_index.jsonl"));
-    // Titles are applied when a rollout is indexed, so the titles file's own
-    // stamp rides along in every rollout fingerprint: a title edit forces the
-    // affected rollouts to re-index even though their files never changed.
-    let titles_stamp = file_stamp(&config_root.join("session_index.jsonl"))
-        .map(|(nanos, len)| format!("{nanos}:{len}"))
-        .unwrap_or_else(|| "0".into());
     let mut files = Vec::new();
     for root in roots.iter().filter(|root| root.is_dir()) {
         collect_rollouts(root, &mut files)?;
@@ -35,6 +29,7 @@ pub fn ingest(config_root: &Path, app_data_dir: &Path) -> Result<IngestReport, T
 
     let mut connection = open_database(app_data_dir)?;
     let mut seen_paths = Vec::with_capacity(files.len());
+    let mut seen_ids = HashSet::new();
     let mut report = IngestReport {
         sessions: 0,
         lines_read: 0,
@@ -43,11 +38,23 @@ pub fn ingest(config_root: &Path, app_data_dir: &Path) -> Result<IngestReport, T
         skipped_files: 0,
         skipped_state_lines: 0,
     };
-    for path in files {
+    for path in files.into_iter().rev() {
         let source_path = path.to_string_lossy().into_owned();
+        let id = match read_session_id(&path) {
+            Ok(Some(id)) => id,
+            Ok(None) | Err(TranscriptError::Io(_)) => {
+                seen_paths.push(source_path);
+                report.skipped_files += 1;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if !seen_ids.insert(id) {
+            continue;
+        }
         seen_paths.push(source_path.clone());
         let fingerprint =
-            file_fingerprint(&path, None).map(|stamp| format!("{stamp}|{titles_stamp}"));
+            file_fingerprint(&path, None).map(|stamp| format!("thread-id-v2|{stamp}"));
         if let Some(fingerprint) = &fingerprint {
             if unchanged_source(&connection, &source_path, fingerprint)? {
                 report.sessions += 1;
@@ -71,7 +78,36 @@ pub fn ingest(config_root: &Path, app_data_dir: &Path) -> Result<IngestReport, T
         }
     }
     prune_vanished_sessions(&mut connection, &seen_paths)?;
+    update_titles(&mut connection, &titles)?;
     Ok(report)
+}
+
+fn update_titles(
+    connection: &mut Connection,
+    titles: &HashMap<String, String>,
+) -> Result<(), TranscriptError> {
+    let sessions = {
+        let mut statement = connection.prepare("SELECT session_id, title FROM sessions")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let transaction = connection.transaction()?;
+    for (id, current) in sessions {
+        let title = match titles.get(&id).filter(|title| !title.trim().is_empty()) {
+            Some(title) => Some(title.clone()),
+            None => transaction.prepare_cached("SELECT text FROM messages WHERE session_id = ?1 AND message_type = 'user' ORDER BY position LIMIT 1")?
+                .query_row([&id], |row| row.get::<_, String>(0)).optional()?,
+        };
+        if title != current {
+            transaction
+                .prepare_cached("UPDATE sessions SET title = ?2 WHERE session_id = ?1")?
+                .execute(params![id, title])?;
+        }
+    }
+    transaction.commit()?;
+    Ok(())
 }
 
 pub fn export_archive(
@@ -91,7 +127,10 @@ pub fn import_archive(
     import_codex_archive(config_root, source, project)
 }
 
-fn collect_rollouts(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), TranscriptError> {
+pub(super) fn collect_rollouts(
+    root: &Path,
+    files: &mut Vec<PathBuf>,
+) -> Result<(), TranscriptError> {
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let metadata = fs::symlink_metadata(entry.path())?;
@@ -124,7 +163,7 @@ fn collect_rollouts(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), Transcr
     Ok(())
 }
 
-fn read_titles(path: &Path) -> HashMap<String, String> {
+pub(super) fn read_titles(path: &Path) -> HashMap<String, String> {
     fs::read_to_string(path)
         .ok()
         .into_iter()
@@ -139,7 +178,7 @@ fn read_titles(path: &Path) -> HashMap<String, String> {
         .collect()
 }
 
-fn ingest_rollout(
+pub(super) fn ingest_rollout(
     connection: &mut Connection,
     path: &Path,
     titles: &HashMap<String, String>,
@@ -255,19 +294,35 @@ fn ingest_rollout(
 }
 
 fn read_rollout(path: &Path) -> Result<String, TranscriptError> {
-    let file = fs::File::open(path)?;
     let mut contents = String::new();
+    rollout_reader(path)?.read_to_string(&mut contents)?;
+    Ok(contents)
+}
+
+fn read_session_id(path: &Path) -> Result<Option<String>, TranscriptError> {
+    for line in BufReader::new(rollout_reader(path)?).lines() {
+        let line = line?;
+        if let Some(metadata) = serde_json::from_str::<Value>(&line)
+            .ok()
+            .and_then(|value| session_metadata(&value))
+        {
+            return Ok(Some(metadata.0));
+        }
+    }
+    Ok(None)
+}
+
+pub(super) fn rollout_reader(path: &Path) -> Result<Box<dyn Read>, TranscriptError> {
+    let file = fs::File::open(path)?;
     if path
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.ends_with(".jsonl.zst"))
     {
-        zstd::stream::read::Decoder::new(file)?.read_to_string(&mut contents)?;
+        Ok(Box::new(zstd::stream::read::Decoder::new(file)?))
     } else {
-        let mut file = file;
-        file.read_to_string(&mut contents)?;
+        Ok(Box::new(file))
     }
-    Ok(contents)
 }
 
 fn session_metadata(value: &Value) -> Option<(String, String, Option<String>)> {
@@ -275,10 +330,7 @@ fn session_metadata(value: &Value) -> Option<(String, String, Option<String>)> {
         return None;
     }
     let payload = value.get("payload")?;
-    let id = payload
-        .get("session_id")
-        .and_then(Value::as_str)
-        .or_else(|| payload.get("id").and_then(Value::as_str))?;
+    let id = metadata_id(payload)?;
     let project = payload
         .get("cwd")
         .and_then(Value::as_str)
@@ -289,6 +341,13 @@ fn session_metadata(value: &Value) -> Option<(String, String, Option<String>)> {
         .and_then(Value::as_str)
         .map(str::to_owned);
     Some((id.to_owned(), project, timestamp))
+}
+
+pub(super) fn metadata_id(payload: &Value) -> Option<&str> {
+    payload
+        .get("id")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("session_id").and_then(Value::as_str))
 }
 
 enum NormalizedRecord {
@@ -601,13 +660,24 @@ mod tests {
                 ),
             )
             .unwrap();
-            ingest(&home, &cache).unwrap();
+            let renamed = ingest(&home, &cache).unwrap();
+            assert_eq!(
+                renamed.lines_read, 0,
+                "title changes do not re-read rollouts"
+            );
+            assert_eq!(renamed.messages_indexed, 0);
             assert_eq!(
                 list_sessions(&cache).unwrap()[0].title.as_deref(),
                 Some(title)
             );
             assert_eq!(ingest(&home, &cache).unwrap().messages_indexed, 0);
         }
+        fs::remove_file(home.join("session_index.jsonl")).unwrap();
+        assert_eq!(ingest(&home, &cache).unwrap().messages_indexed, 0);
+        assert_eq!(
+            list_sessions(&cache).unwrap()[0].title.as_deref(),
+            Some("locate the blue widget")
+        );
     }
 
     #[test]
@@ -667,6 +737,70 @@ mod tests {
     }
 
     #[test]
+    fn forked_rollouts_keep_their_own_identity_and_skip_unchanged_sources() {
+        let temp = crate::test_support::tempdir().unwrap();
+        let home = temp.path().join("codex");
+        let cache = temp.path().join("cache");
+        let sessions = home.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let parent = "00000000-0000-4000-8000-000000000001";
+        let child = "00000000-0000-4000-8000-000000000002";
+        for (id, text) in [
+            (parent, "parent conversation"),
+            (child, "child conversation"),
+        ] {
+            let mut metadata = session_meta(id, "C:/work/demo");
+            metadata["payload"]["session_id"] = json!(parent);
+            fs::write(
+                sessions.join(format!("rollout-2026-10-22-{id}.jsonl")),
+                format!(
+                    "{metadata}\n{}\n",
+                    json!({"type":"event_msg","payload":{"type":"user_message","message":text}})
+                ),
+            )
+            .unwrap();
+        }
+        fs::write(sessions.join(format!("rollout-2026-10-21-{parent}.jsonl")), format!("{}\n{}\n", session_meta(parent, "C:/work/demo"), json!({"type":"event_msg","payload":{"type":"user_message","message":"outdated parent conversation"}}))).unwrap();
+        ingest(&home, &cache).unwrap();
+        let summaries = list_sessions(&cache).unwrap();
+        assert_eq!(
+            summaries
+                .iter()
+                .map(|session| (session.session_id.as_str(), session.title.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                (parent, Some("parent conversation")),
+                (child, Some("child conversation"))
+            ]
+        );
+        assert_eq!(
+            spine::thread_page(&cache, parent, 0, 10).unwrap()[0].text,
+            "parent conversation"
+        );
+        assert_eq!(
+            spine::thread_page(&cache, child, 0, 10).unwrap()[0].text,
+            "child conversation"
+        );
+        assert_eq!(ingest(&home, &cache).unwrap().lines_read, 0);
+        super::super::ingest::remove_sessions(&cache, &[child.to_owned()]).unwrap();
+        let child_path = sessions.join(format!("rollout-2026-10-22-{child}.jsonl"));
+        {
+            let connection = open_database(&cache).unwrap();
+            connection.execute("INSERT INTO sessions(session_id, project, source_path, fingerprint) VALUES ('legacy-owner', 'C:/work/demo', ?1, ?2)",
+                params![child_path.to_string_lossy(), file_fingerprint(&child_path, None)]).unwrap();
+        }
+        ingest(&home, &cache).unwrap();
+        assert_eq!(
+            list_sessions(&cache)
+                .unwrap()
+                .iter()
+                .map(|session| session.session_id.as_str())
+                .collect::<Vec<_>>(),
+            [parent, child]
+        );
+    }
+
+    #[test]
     fn archive_import_creates_a_fresh_codex_rollout_with_selected_cwd() {
         let temp = crate::test_support::tempdir().unwrap();
         let home = temp.path().join("codex");
@@ -677,11 +811,14 @@ mod tests {
         let rollout = home.join("sessions/2026/10/22/rollout-2026-10-22T11-00-00-00000000-0000-4000-8000-000000000001.jsonl");
         fs::create_dir_all(rollout.parent().unwrap()).unwrap();
         let original_id = "00000000-0000-4000-8000-000000000001";
+        let parent_id = "00000000-0000-4000-8000-000000000099";
+        let mut metadata = session_meta(original_id, "C:/work/old");
+        metadata["payload"]["session_id"] = json!(parent_id);
         fs::write(
             &rollout,
             format!(
                 "{}\n{}\n{}\n{}\n",
-                session_meta(original_id, "C:/work/old"),
+                metadata,
                 json!({"timestamp":"2026-10-22T11:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"archive me"}}),
                 json!({"timestamp":"2026-10-22T11:00:01Z","type":"turn_context","payload":{"cwd":"C:/work/old","policy":"preserve me"}}),
                 json!({"timestamp":"2026-10-22T11:00:02Z","type":"future_event","payload":{"opaque":"preserve this"}})
@@ -714,7 +851,7 @@ mod tests {
             .find(|value| value.get("type").and_then(Value::as_str) == Some("session_meta"))
             .unwrap();
         assert_eq!(imported_meta["payload"]["id"], imported.session_id);
-        assert_eq!(imported_meta["payload"]["session_id"], imported.session_id);
+        assert_eq!(imported_meta["payload"]["session_id"], parent_id);
         assert!(imported_meta["payload"]["cwd"]
             .as_str()
             .unwrap()

@@ -1,11 +1,13 @@
 import { useState } from "react";
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { JsonEditor } from "./JsonEditor";
 import { JsonValue } from "./JsonValue";
 
 describe("Markdown editor", () => {
+  beforeAll(async () => { await import("./MarkdownPreview"); });
+
   it("previews the current draft with tables and checklists and keeps it when returning to edit", async () => {
     function Editor() {
       const [value, setValue] = useState("# Original");
