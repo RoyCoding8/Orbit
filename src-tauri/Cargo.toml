@@ -1,6 +1,6 @@
 [package]
 name = "orbit"
-version = "0.3.0"
+version = "0.3.1"
 description = "Desktop manager for AI coding harness configuration"
 edition = "2021"
 rust-version = "1.82"

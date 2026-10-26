@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStdout, Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -555,7 +555,7 @@ mod read {
 }
 
 impl RpcReader {
-    fn spawn(stdout: ChildStdout) -> Self {
+    fn spawn<R: Read + Send + 'static>(stdout: R) -> Self {
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
             let mut reader = BufReader::new(stdout.take((BENCH_BYTE_BUDGET + 1) as u64));
@@ -1078,24 +1078,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg(windows)]
     fn stdout_without_a_newline_is_capped_before_buffering_the_whole_line() {
-        let mut child = Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "[Console]::Out.Write('x' * 524290)",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let reader = RpcReader::spawn(child.stdout.take().unwrap());
-        let result = reader.next_response("initialize", 1);
-        let _ = child.kill();
-        let _ = child.wait();
-        assert!(result.unwrap_err().contains("buffering budget"));
+        let stdout = std::io::Cursor::new(vec![b'x'; BENCH_BYTE_BUDGET + 2]);
+        let reader = RpcReader::spawn(stdout);
+        let error = reader.next_response("initialize", 1).unwrap_err();
+        assert!(error.contains("buffering budget"), "{error}");
     }
 
     #[test]
