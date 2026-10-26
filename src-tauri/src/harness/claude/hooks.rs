@@ -1082,10 +1082,17 @@ mod tests {
 
     #[test]
     fn command_runner_captures_success_and_failure_and_times_out() {
+        // Starting cmd.exe can take longer on heavily loaded Windows CI hosts.
+        // Only the dedicated timeout assertion below uses a short deadline.
+        let normal_timeout = if cfg!(windows) {
+            Duration::from_secs(10)
+        } else {
+            Duration::from_secs(1)
+        };
         let success = test_command(
             if cfg!(windows) { "more" } else { "cat" },
             &json!({"sample":true}),
-            Duration::from_secs(1),
+            normal_timeout,
         )
         .unwrap();
         #[cfg(not(windows))]
@@ -1093,10 +1100,9 @@ mod tests {
         #[cfg(windows)]
         assert_eq!(success.exit_code, Some(0));
         #[cfg(not(windows))]
-        let failure =
-            test_command("cat >/dev/null; exit 7", &json!({}), Duration::from_secs(1)).unwrap();
+        let failure = test_command("cat >/dev/null; exit 7", &json!({}), normal_timeout).unwrap();
         #[cfg(windows)]
-        let failure = test_command("exit /b 7", &json!({}), Duration::from_secs(1)).unwrap();
+        let failure = test_command("exit /b 7", &json!({}), normal_timeout).unwrap();
         assert_eq!(failure.exit_code, Some(7));
         #[cfg(not(windows))]
         let timeout = test_command("sleep 1", &json!({}), Duration::from_millis(30)).unwrap();
@@ -1151,7 +1157,8 @@ mod tests {
         let script_text = script.to_string_lossy().into_owned();
         let command =
             format!("start \"\" /B cmd /D /C call \"{script_text}\" & ping -n 3 127.0.0.1 >NUL");
-        let result = test_command(&command, &json!({}), Duration::from_secs(5)).unwrap();
+        // Leave enough time for the nested cmd.exe and ping on busy CI runners.
+        let result = test_command(&command, &json!({}), Duration::from_secs(15)).unwrap();
         assert_eq!(result.exit_code, Some(0));
         assert!(log.exists(), "the child must have created its output file");
         let after_cleanup = std::fs::read(&log).unwrap();
