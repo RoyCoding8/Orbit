@@ -271,13 +271,14 @@ p { margin: 0; }
 .edit-dialog::backdrop { background: rgb(0 0 0 / 35%); }
 .conversion-dialog[open] { width: min(640px, calc(100% - 32px)); }
 .conversion-body { min-height: 0; overflow: auto; overscroll-behavior: contain; }
-.conversion-body select { display: block; width: 100%; margin: 8px 0; }
+.conversion-body m3e-form-field { display: flex; width: 100%; margin: 16px 0 8px; }
 .conversion-body details { margin-top: 16px; }
 .conversion-path { overflow-wrap: anywhere; }
 .edit-dialog > .pane-heading, .edit-dialog > .supporting-copy, .edit-dialog > .inline-error, .edit-dialog > .dialog-actions { flex: 0 0 auto; }
 .diff-columns { display: grid; grid-template-columns: 1fr 1fr; flex: 1 1 auto; gap: 16px; min-height: 0; max-height: 58vh; overflow: auto; overscroll-behavior: contain; }
 .diff-columns .markdown-source, .diff-columns .markdown-preview { height: 42dvh; min-height: 240px; max-height: 52dvh; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.destructive-action { --m3e-button-container-color: var(--md-sys-color-error); --m3e-button-label-text-color: var(--md-sys-color-on-error); --m3e-button-hover-state-layer-color: var(--md-sys-color-on-error); --m3e-button-focus-state-layer-color: var(--md-sys-color-on-error); }
 .restore-section { min-width: 0; padding: 18px 0 0; border: 0; border-top: 1px solid var(--md-sys-color-outline-variant, #cac4d0); }
 .restore-section[open] { max-height: min(50vh, 520px); overflow: auto; overscroll-behavior: contain; }
 .restore-section summary { width: fit-content; cursor: pointer; font-size: 16px; font-weight: 600; }

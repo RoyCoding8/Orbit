@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { M3eButton } from "@m3e/react/button";
 import { useHarness } from "../HarnessContext";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Channel } from "@tauri-apps/api/core";
@@ -640,8 +641,8 @@ export function Transcripts() {
         <p>Close this chat in {label} before deleting it.</p>
         {deleteError && <p className="inline-error" role="alert">{deleteError}</p>}
         <div className="dialog-actions">
-          <button type="button" disabled={pending} onClick={() => setDeleting(null)}>Cancel</button>
-          <button type="button" disabled={pending} onClick={() => void deleteSession()}>Save archive and delete</button>
+          <M3eButton type="button" variant="text" disabled={pending} onClick={() => setDeleting(null)}>Cancel</M3eButton>
+          <M3eButton type="button" variant="filled" className="destructive-action" disabled={pending} onClick={() => void deleteSession()}>Save archive and delete</M3eButton>
         </div>
       </dialog>
     </section>

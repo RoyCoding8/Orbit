@@ -57,9 +57,23 @@ if (attachInternals) {
     configurable: true,
     value(this: HTMLElement) {
       const internals = attachInternals.call(this);
+      const validation = document.createElement("input");
       Object.defineProperty(internals, "states", {
         configurable: true,
         value: new Set<string>(),
+      });
+      Object.defineProperties(internals, {
+        setFormValue: { configurable: true, value() {} },
+        setValidity: {
+          configurable: true,
+          value(flags: ValidityStateFlags = {}, message = "") {
+            validation.setCustomValidity(Object.values(flags).some(Boolean) ? message || "Invalid value" : "");
+          },
+        },
+        validity: { configurable: true, get: () => validation.validity },
+        validationMessage: { configurable: true, get: () => validation.validationMessage },
+        checkValidity: { configurable: true, value: () => validation.checkValidity() },
+        reportValidity: { configurable: true, value: () => validation.reportValidity() },
       });
       return internals;
     },

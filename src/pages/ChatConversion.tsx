@@ -1,4 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import { M3eButton } from "@m3e/react/button";
+import { M3eFormField } from "@m3e/react/form-field";
+import { M3eOption } from "@m3e/react/option";
+import { M3eSelect, type M3eSelectElement } from "@m3e/react/select";
 import { useHarness } from "../HarnessContext";
 import { displayPath } from "../pathDisplay";
 import { clients, harnesses, isClient, type Client } from "../harnesses";
@@ -31,6 +35,7 @@ export function ChatConversion({ sessionId, onClose, onConverted }: {
   const [error, setError] = useState("");
   const [result, setResult] = useState<ConversionReport | null>(null);
   const dialog = useRef<HTMLDialogElement>(null);
+  const destination = useRef<M3eSelectElement>(null);
 
   useEffect(() => {
     const current = dialog.current;
@@ -77,7 +82,7 @@ export function ChatConversion({ sessionId, onClose, onConverted }: {
     onCancel={event => { event.preventDefault(); if (!busy) onClose(); }}>
     <div className="pane-heading">
       <h3 id="conversion-title">Convert chat</h3>
-      <button type="button" className="text-button" disabled={busy} onClick={onClose}>Close</button>
+      <M3eButton type="button" variant="text" disabled={busy} onClick={onClose}>Close</M3eButton>
     </div>
     <div className="conversion-body">
       {previewState.kind === "loading" && <p role="status">Reading the native conversation…</p>}
@@ -89,17 +94,20 @@ export function ChatConversion({ sessionId, onClose, onConverted }: {
           <p>Working directory: {displayPath(result.workingDirectory)}</p>
           <p>Select {harnesses[target].label} to browse the converted chat.</p>
         </div> : <>
-          <label htmlFor="conversion-target">Destination agent</label>
-          <select id="conversion-target" value={target} disabled={busy} onChange={event => {
-            if (isClient(event.target.value)) setTarget(event.target.value);
-          }}>
-            {destinations.map(candidate => <option key={candidate} value={candidate}>{harnesses[candidate].label}</option>)}
-          </select>
+          <M3eFormField variant="outlined">
+            <label slot="label" htmlFor="conversion-target">Destination agent</label>
+            <M3eSelect ref={destination} id="conversion-target" aria-label="Destination agent" value={target} disabled={busy} onChange={() => {
+              const value = destination.current?.value;
+              if (typeof value === "string" && isClient(value)) setTarget(value);
+            }}>
+              {destinations.map(candidate => <M3eOption key={candidate} value={candidate}>{harnesses[candidate].label}</M3eOption>)}
+            </M3eSelect>
+          </M3eFormField>
           <p className="quiet-copy">Kiro cannot be a destination because its current interface does not support creating a chat from a transcript.</p>
           <p>Working directory: <span className="conversion-path">{displayPath(projectRoot ?? previewState.preview.workingDirectory)}</span></p>
           <div className="dialog-actions">
-            <button type="button" className="secondary-action" disabled={busy} onClick={() => void chooseDirectory()}>Change working directory</button>
-            {projectRoot && <button type="button" className="text-button" disabled={busy} onClick={() => setProjectRoot(null)}>Use original directory</button>}
+            <M3eButton type="button" variant="outlined" disabled={busy} onClick={() => void chooseDirectory()}>Change working directory</M3eButton>
+            {projectRoot && <M3eButton type="button" variant="text" disabled={busy} onClick={() => setProjectRoot(null)}>Use original directory</M3eButton>}
           </div>
           <p className="supporting-copy">Creates a separate chat with the latest active branch, conversation text, and inline images. Tool history becomes text. The destination agent uses its own settings and instructions.</p>
         </>}
@@ -111,8 +119,8 @@ export function ChatConversion({ sessionId, onClose, onConverted }: {
       {error && <p role="alert" className="inline-error">{displayPath(error)}</p>}
     </div>
     <div className="dialog-actions">
-      <button type="button" className="secondary-action" disabled={busy} onClick={onClose}>{result ? "Done" : "Cancel"}</button>
-      {!result && <button type="button" className="primary-action" disabled={busy || previewState.kind !== "ready"} onClick={() => void convert()}>{busy ? "Working…" : "Convert chat"}</button>}
+      <M3eButton type="button" variant="text" disabled={busy} onClick={onClose}>{result ? "Done" : "Cancel"}</M3eButton>
+      {!result && <M3eButton type="button" variant="filled" disabled={busy || previewState.kind !== "ready"} onClick={() => void convert()}>{busy ? "Working…" : "Convert chat"}</M3eButton>}
     </div>
   </dialog>;
 }
