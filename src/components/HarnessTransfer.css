@@ -1,0 +1,29 @@
+.harness-transfer-actions { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.harness-transfer-actions > [role="alert"] { max-width: 220px; font-size: .8rem; }
+.edit-dialog.harness-transfer-dialog { width: min(780px, calc(100vw - 32px)); max-height: min(820px, calc(100dvh - 48px)); }
+.harness-transfer-body { overflow-y: auto; min-height: 0; display: grid; gap: 14px; padding: 2px 2px 16px; }
+.harness-transfer-body > p { margin: 0; }
+.transfer-destination, .transfer-select-all, .transfer-category-heading { display: flex; gap: 12px; align-items: center; }
+.transfer-destination { justify-content: space-between; flex-wrap: wrap; }
+.transfer-select-all > m3e-button { margin-left: auto; }
+.transfer-categories { display: grid; gap: 10px; }
+.transfer-category { border: 1px solid var(--md-sys-color-outline-variant); border-radius: 14px; padding: 12px; }
+.transfer-category-heading > span:nth-child(2) { flex: 1; }
+.transfer-category small, .transfer-item small { display: block; font-size: .78rem; opacity: .72; margin-top: 3px; }
+.transfer-item-meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
+.transfer-item-meta small { margin: 0; }
+.transfer-selection-summary { color: var(--md-sys-color-on-surface-variant); font-size: .82rem; }
+.transfer-privacy { padding: 10px 12px; border-radius: 10px; background: var(--md-sys-color-tertiary-container); color: var(--md-sys-color-on-tertiary-container); font-size: .82rem; }
+.transfer-count { font-variant-numeric: tabular-nums; opacity: .7; }
+.transfer-category details { margin-top: 8px; }
+.transfer-category summary { cursor: pointer; font-size: .82rem; }
+.transfer-items { max-height: 260px; overflow-y: auto; margin-top: 10px; }
+.transfer-item { display: flex; align-items: flex-start; gap: 8px; padding: 10px 0; }
+.transfer-item + .transfer-item { border-top: 1px solid var(--md-sys-color-outline-variant); }
+.transfer-item > div { flex: 1; min-width: 0; }
+.transfer-resource-name, .transfer-path { overflow-wrap: anywhere; }
+.transfer-conflict { width: 210px; max-width: 100%; }
+.transfer-destination-choice h4 { margin: 0; }
+.transfer-destination-choice .dialog-actions { justify-content: flex-start; flex-wrap: wrap; }
+.transfer-notes { font-size: .82rem; }
+@media (max-width: 600px) { .transfer-item { flex-wrap: wrap; } .transfer-conflict { margin-left: 40px; } }

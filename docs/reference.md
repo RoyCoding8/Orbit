@@ -33,6 +33,41 @@ Conversion preserves conversation text and inline images on the latest active br
 
 Pi project trust, package expansion, and resource filters determine what Pi actually loads. Orbit discovers local skill files and literal configured paths; it does not evaluate package or glob rules. Extension code, trust decisions, and authentication state stay with Pi. MCP tests refuse OAuth, dynamic environment/command references, and relative working directories that need Pi's runtime context.
 
+## Setup export and import
+
+To save a setup, choose **Export setup** in the header. Choose a project, check the categories you want, then choose **Save backup**. **Select all** includes every available category.
+
+To use a saved setup:
+
+1. Select the same agent the backup came from, then choose **Import setup** and open the ZIP file. Importing into a different agent is planned for a future version.
+2. Choose **Current project** or **User-wide**. Use **Change project** to choose another folder. You can also keep user-wide and project items separate using **Import destination**. Claude auto-memory stays attached to the chosen project; Codex generated memory stays user-wide.
+3. Review the items, check what you want to import, and choose **Import selected**. Each category expands to show individual items and where they will be saved.
+
+| Item | What happens on import |
+|---|---|
+| Already up to date | Skipped automatically. |
+| Different version exists | Kept unless you choose **Replace** for that item. |
+| Skills and memories | Selected files are added or replaced. Other destination files stay in place. |
+| Hooks and extension lists | Missing entries are added without duplicates. |
+| Settings | Preferences are replaced. Current hooks and MCP servers are preserved unless you select those too. |
+
+Replaced files can be restored from **History**. After importing, refresh the open page when you are ready to load the changes; unsaved edits stay open.
+
+Backups can contain passwords and API keys. Share them only with people you trust. Saved file paths and hook commands stay as written, so paths from another computer may need updating. Import does not install packages or run scripts.
+
+<details>
+<summary>Backup format and limits</summary>
+
+The ZIP contains `metadata.json` identifying the agent and archive version, plus checksummed resource files. Login files, chats, caches, and previous Orbit backups are excluded.
+
+Settings and hooks include user and selected-project sources; inherited parent-project configuration is excluded. Shared skills are copied into the destination agent's native skills folder. Codex skill exports cover native user/project folders, including the older user skill directory, rather than installed plugin packages. Kiro Markdown agent hook profiles are excluded. Memory exports include referenced local Markdown inside the same authorized memory or instruction root. External Markdown links and non-Markdown attachments are not bundled. Project trust and hook approval remain controlled by the agent.
+
+Unrelated JSONC and TOML values and comments remain in place. The preview blocks selected items that would write the same destination file or setting. Import rechecks the backup and destination before writing and records each applied file in History. An interrupted import can leave earlier files applied and recorded there.
+
+Backups are limited to 10,000 items, 16 MiB per file, and 128 MiB overall. Unsafe paths, links, missing files, and checksum mismatches are rejected.
+
+</details>
+
 ## Configuration and memory files
 
 Orbit reads Claude Code's normal configuration directories and honors `CLAUDE_CONFIG_DIR`. For Codex, it honors `CODEX_HOME`, which defaults to `~/.codex`. Select a project folder to inspect that project's instructions, skills, and settings. The launch directory is the initial project.

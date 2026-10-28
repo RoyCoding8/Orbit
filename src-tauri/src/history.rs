@@ -576,6 +576,27 @@ fn target_scope(
     let canonical_target = canonical_location(target)?;
     let target = canonical_target.as_path();
     let kind = row.resource_kind.as_str();
+    if kind == "harnessimport" {
+        let global = crate::transfer::history_scope(harness, project, target)?;
+        return Some(TargetScope {
+            scope: if global {
+                HistoryScope::Global
+            } else {
+                HistoryScope::Project
+            },
+            id: if global {
+                "global".into()
+            } else {
+                project.to_string_lossy().into_owned()
+            },
+            label: if global {
+                "User resources".into()
+            } else {
+                project_label(project)
+            },
+            kind: VersionKind::File,
+        });
+    }
     if harness.id() == crate::harness::CODEX {
         return codex_target_scope(harness, project, kind, target);
     }
@@ -1016,6 +1037,7 @@ fn resource_kind(value: &str) -> Result<ResourceKind, String> {
         "projectinstructions" => Ok(ResourceKind::ProjectInstructions),
         "settings" => Ok(ResourceKind::Settings),
         "mcpserver" => Ok(ResourceKind::McpServer),
+        "harnessimport" => Ok(ResourceKind::HarnessImport),
         _ => Err(format!("unsupported history resource kind: {value}")),
     }
 }

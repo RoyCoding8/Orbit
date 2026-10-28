@@ -2,6 +2,7 @@ pub mod harness;
 pub mod history;
 pub mod ledger;
 pub mod transcript;
+pub mod transfer;
 
 #[cfg(test)]
 mod test_support;
@@ -77,6 +78,80 @@ async fn run_blocking<T: Send + 'static>(
     tauri::async_runtime::spawn_blocking(work)
         .await
         .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn harness_archive_inventory(
+    client: Option<Client>,
+    roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+) -> Result<transfer::Preview, String> {
+    let project = roots.resolve(project_root)?;
+    run_blocking(move || transfer::inventory(&SelectedHarness::from_env(client), &project)).await
+}
+
+#[tauri::command]
+async fn harness_archive_export(
+    client: Option<Client>,
+    roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+    categories: Vec<transfer::Category>,
+    path: String,
+) -> Result<transfer::Report, String> {
+    let project = roots.resolve(project_root)?;
+    run_blocking(move || {
+        transfer::export(
+            &SelectedHarness::from_env(client),
+            &project,
+            &categories,
+            Path::new(&path),
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn harness_archive_preview(
+    client: Option<Client>,
+    roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+    path: String,
+    destination: transfer::Destination,
+) -> Result<transfer::Preview, String> {
+    let project = roots.resolve(project_root)?;
+    run_blocking(move || {
+        transfer::preview(
+            &SelectedHarness::from_env(client),
+            &project,
+            Path::new(&path),
+            destination,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn harness_archive_import(
+    client: Option<Client>,
+    roots: State<'_, ProjectRoots>,
+    project_root: Option<String>,
+    path: String,
+    checksum: String,
+    destination: transfer::Destination,
+    choices: Vec<transfer::Choice>,
+) -> Result<transfer::Report, String> {
+    let project = roots.resolve(project_root)?;
+    run_blocking(move || {
+        transfer::apply(
+            &SelectedHarness::from_env(client),
+            &project,
+            Path::new(&path),
+            &checksum,
+            destination,
+            &choices,
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -786,6 +861,10 @@ pub fn run() {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            harness_archive_inventory,
+            harness_archive_export,
+            harness_archive_preview,
+            harness_archive_import,
             skills_inventory,
             memory_catalog,
             memory_edit,

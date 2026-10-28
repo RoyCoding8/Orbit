@@ -18,6 +18,8 @@ serde_json = "1"
 jsonc-parser = { version = "0.34", features = ["cst", "serde_json"] }
 toml_edit = { version = "0.22", features = ["serde"] }
 zstd = "0.13"
+zip = { version = "2.4.2", default-features = false, features = ["deflate-flate2", "flate2"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 unicode-normalization = "0.1"

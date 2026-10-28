@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { App } from "./App";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 
 afterEach(() => {
   cleanup();
@@ -22,6 +23,39 @@ function useSystemTheme(isDark: boolean) {
 }
 
 describe("App shell", () => {
+  it("imports into the selected agent and preserves the open view until refreshed", async () => {
+    let imported = false;
+    vi.mocked(open).mockResolvedValue("C:/saved/orbit.zip");
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "skills_inventory") return imported ? [{ id: "new", name: "Imported skill", path: "D:/skills/new/SKILL.md", content: "Imported", state: "on", editable: true }] : [];
+      if (command === "harness_archive_preview") return {
+        checksum: "zip-checksum", projectRoot: "D:/project", warnings: [],
+        entries: [{ id: "new", category: "skills", label: "new/SKILL.md", scope: "user", target: "D:/skills/new/SKILL.md", targetKey: "file", status: "add", expected: "before" }],
+      };
+      if (command === "harness_archive_import") {
+        expect(args).toEqual({ client: "pi", path: "C:/saved/orbit.zip", projectRoot: null, destination: "user", checksum: "zip-checksum", choices: [{ id: "new", replace: false, expected: "before" }] });
+        imported = true;
+        return { files: 1, skipped: 0, path: "C:/saved/orbit.zip" };
+      }
+      return [];
+    });
+    render(<App />);
+    fireEvent.change(screen.getByLabelText("Coding agent"), { target: { value: "pi" } });
+    fireEvent.click(screen.getByRole("button", { name: "Skills" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("skills_inventory", { client: "pi", projectRoot: null }));
+    fireEvent.click(screen.getByRole("button", { name: "Import setup" }));
+    fireEvent.click(await screen.findByRole("button", { name: "User-wide" }));
+    await screen.findByText("Found 1 item. Choose what to import.");
+    fireEvent.change(screen.getByRole("checkbox", { name: "Select Skills" }));
+    fireEvent.click(screen.getByRole("button", { name: "Import selected" }));
+    await screen.findByText("Imported 1 file.");
+    expect(screen.queryByText("Imported skill")).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Import Pi setup" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh skills" }));
+    expect(await screen.findByText("Imported skill")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Skills" })).toHaveAttribute("aria-current", "page");
+  });
   it.each([
     { systemDark: false, next: "dark" },
     { systemDark: true, next: "light" },

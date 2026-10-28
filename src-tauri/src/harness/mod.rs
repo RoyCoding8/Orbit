@@ -19,6 +19,7 @@ use std::path::PathBuf;
 /// Resource kinds tracked by the adapter contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResourceKind {
+    HarnessImport,
     /// Named markdown unit with frontmatter, e.g. Claude `skills/<name>/SKILL.md`.
     Skill,
     /// Per-project auto memory, e.g. `projects/<slug>/memory/MEMORY.md`.

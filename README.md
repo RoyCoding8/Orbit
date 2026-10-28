@@ -16,6 +16,7 @@
 | **MCP servers** | Configure local or HTTP servers and test connections. |
 | **Settings & hooks** | Inspect configuration sources, expand nested JSON, and test command hooks. |
 | **Chats** | Browse by project, search, export, import, convert, and delete with a backup. |
+| **Setup backups** | Choose skills, hooks, MCPs, memories, and settings to save; review and import them into the same agent. |
 | **History** | Restore saved versions and browse operation logs separately. |
 
 Support varies by agent. Kiro offers V2 chat source exports, but no import or conversion destination. OpenCode deletion supports chats without children. See the [support matrix and format details](docs/reference.md#agent-support).
@@ -50,6 +51,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 ## Reference
 
 - [Configuration and memory files](docs/reference.md#configuration-and-memory-files)
+- [Setup export and import](docs/reference.md#setup-export-and-import)
 - [Native format versions and prerequisites](docs/reference.md#requirements)
 - [Lint and native acceptance checks](docs/reference.md#checks)
 - [Stored data and command execution](docs/reference.md#stored-data-and-command-execution)
