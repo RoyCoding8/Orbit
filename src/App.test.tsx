@@ -23,6 +23,43 @@ function useSystemTheme(isDark: boolean) {
 }
 
 describe("App shell", () => {
+  it("limits Antigravity settings to user scope and opens native command hooks", async () => {
+    vi.mocked(invoke).mockImplementation(async command => {
+      if (command === "config_load") return {
+        layers: [{ name: "user", path: "C:/home/.gemini/antigravity-cli/settings.json", values: { theme: "light" } }],
+        effective: { theme: { value: "light", source: "user" } },
+      };
+      return [];
+    });
+    render(<App />);
+    fireEvent.change(screen.getByLabelText("Coding agent"), { target: { value: "antigravity" } });
+    fireEvent.click(screen.getByRole("button", { name: /Settings/ }));
+    expect(await screen.findByText('"light"')).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "User" })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Project" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Hooks" }));
+    expect(await screen.findByLabelText("Command")).toBeInTheDocument();
+    expect(invoke).toHaveBeenCalledWith("hooks_list", { client: "antigravity", projectRoot: null });
+  });
+
+  it("offers Antigravity archive import, export, conversion, and deletion", async () => {
+    vi.mocked(invoke).mockImplementation(async command => {
+      if (command === "transcript_list_sessions") return {
+        sessions: [{ sessionId: "antigravity:cli:fixture", project: "D:/project", title: "AG chat", messageCount: 2, indexed: true }],
+        source: "C:/home/.gemini", warnings: [],
+      };
+      return [];
+    });
+    render(<App />);
+    fireEvent.change(screen.getByLabelText("Coding agent"), { target: { value: "antigravity" } });
+    fireEvent.click(screen.getByRole("button", { name: "Chats" }));
+    fireEvent.click(await screen.findByRole("button", { name: /AG chat/ }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Import Antigravity archive" })).toBeEnabled());
+    expect(screen.getByRole("button", { name: "Delete chat" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Export Antigravity archive" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Convert chat" })).toBeEnabled();
+  });
+
   it("imports into the selected agent and preserves the open view until refreshed", async () => {
     let imported = false;
     vi.mocked(open).mockResolvedValue("C:/saved/orbit.zip");

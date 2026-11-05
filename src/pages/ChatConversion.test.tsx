@@ -6,6 +6,29 @@ import { Transcripts } from "./Transcripts";
 const preview = { title: "Source chat", workingDirectory: "\\\\?\\D:\\old-project", messages: 2, notes: ["Tool history becomes text."] };
 
 describe("chat conversion", () => {
+  it("requires a destination folder when the source has no recorded working directory", async () => {
+    const ipc = vi.fn((command, payload) => {
+      if (command === "transcript_list_sessions") return {sessions:[{sessionId:"source/one",title:"Source chat",project:"",messageCount:2}],source:"C:/native",warnings:[]};
+      if (command === "transcript_thread_page") return [];
+      if (command === "transcript_conversion_preview") return {...preview,workingDirectory:""};
+      if (command === "project_choose") return "D:/chosen";
+      if (command === "transcript_convert") return {sessionId:"created",workingDirectory:payload.projectRoot,messages:2,notes:[]};
+      throw new Error(command);
+    });
+    mockIPC(ipc);
+    render(<Transcripts />);
+    fireEvent.click(await screen.findByRole("button",{name:/Source chat/}));
+    await vi.waitFor(() => expect(screen.getByRole("button",{name:"Convert chat"})).toBeEnabled());
+    fireEvent.click(screen.getByRole("button",{name:"Convert chat"}));
+    const dialog = within(screen.getByRole("dialog",{name:"Convert chat"}));
+    await dialog.findByText("Not recorded. Choose a directory.");
+    expect(dialog.getByRole("button",{name:"Convert chat"})).toBeDisabled();
+    fireEvent.click(dialog.getByRole("button",{name:"Change working directory"}));
+    await dialog.findByText("D:/chosen");
+    fireEvent.click(dialog.getByRole("button",{name:"Convert chat"}));
+    await dialog.findByText("created");
+    expect(ipc).toHaveBeenCalledWith("transcript_convert",{sessionId:"source/one",targetClient:"codex",projectRoot:"D:/chosen"});
+  });
   it.each(["original", "override", "reset"])("converts using the %s working directory", async mode => {
     const ipc = vi.fn((command, payload) => {
       if (command === "transcript_list_sessions") return { sessions: [{ sessionId: "source/one", title: "Source chat", project: "encoded-key", messageCount: 2 }], source: "C:/native-chats", warnings: [] };
@@ -23,6 +46,7 @@ describe("chat conversion", () => {
     expect(await dialog.findByText("D:\\old-project")).toBeInTheDocument();
     expect(dialog.queryByRole("option", { name: "Claude Code" })).not.toBeInTheDocument();
     expect(dialog.queryByRole("option", { name: "Kiro" })).not.toBeInTheDocument();
+    expect(dialog.getByRole("option", { name: "Antigravity" })).toBeInTheDocument();
     if (mode !== "original") {
       fireEvent.click(dialog.getByRole("button", { name: "Change working directory" }));
       await dialog.findByText("D:\\new-project");

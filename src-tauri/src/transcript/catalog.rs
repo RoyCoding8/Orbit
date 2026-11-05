@@ -1,4 +1,4 @@
-use super::{codex, ingest, kiro, opencode, pi, SessionSummary, TranscriptError};
+use super::{antigravity, codex, ingest, kiro, opencode, pi, SessionSummary, TranscriptError};
 use crate::harness::{atomic, selected::SelectedHarness, Harness};
 use rusqlite::{params, Connection};
 use serde::Serialize;
@@ -40,8 +40,14 @@ pub fn refresh(
     let mut warnings = Vec::new();
     let mut seen = Vec::new();
     let mut entries = Vec::new();
-    if matches!(harness, SelectedHarness::Opencode(_)) {
-        entries = opencode::metadata()?;
+    if matches!(
+        harness,
+        SelectedHarness::Opencode(_) | SelectedHarness::Antigravity(_)
+    ) {
+        entries = match harness {
+            SelectedHarness::Antigravity(h) => antigravity::metadata(h)?,
+            _ => opencode::metadata()?,
+        };
         seen.extend(
             entries
                 .iter()
@@ -202,7 +208,7 @@ fn source_files(
                 }
             }
         }
-        SelectedHarness::Opencode(_) => unreachable!(),
+        SelectedHarness::Opencode(_) | SelectedHarness::Antigravity(_) => unreachable!(),
     }
     files.sort();
     files.dedup();
@@ -224,6 +230,7 @@ pub(super) fn source_fingerprint(harness: &SelectedHarness, path: &Path) -> Opti
         )),
         SelectedHarness::Pi(_) => ingest::file_fingerprint(path, None),
         SelectedHarness::Opencode(_) => None,
+        SelectedHarness::Antigravity(_) => antigravity::fingerprint(path),
     }
 }
 
@@ -335,7 +342,9 @@ fn read_metadata(
                 header["timestamp"].as_str().map(str::to_owned),
             )
         }
-        SelectedHarness::Kiro(_) | SelectedHarness::Opencode(_) => unreachable!(),
+        SelectedHarness::Kiro(_)
+        | SelectedHarness::Opencode(_)
+        | SelectedHarness::Antigravity(_) => unreachable!(),
     };
     let title = title
         .finish()
@@ -470,6 +479,9 @@ pub fn ensure_loaded(
             .map_err(|e| e.to_string())?;
             report.sessions = 1;
         }
+        SelectedHarness::Antigravity(h) => {
+            report = antigravity::index_session(h, &mut connection, id, path, &project)?;
+        }
         SelectedHarness::Opencode(_) => {
             report = opencode::index_session(&mut connection, id, &project)?;
         }
@@ -543,7 +555,7 @@ mod tests {
             Client::Codex => SelectedHarness::Codex(CodexHarness::new(root.into(), root.into())),
             Client::Pi => SelectedHarness::Pi(PiHarness::new(root.into(), root.into())),
             Client::Kiro => SelectedHarness::Kiro(KiroHarness::new(root.into())),
-            Client::Opencode => unreachable!(),
+            Client::Opencode | Client::Antigravity => unreachable!(),
         }
     }
 
@@ -585,7 +597,7 @@ mod tests {
                     ],
                 )
             }
-            SelectedHarness::Opencode(_) => unreachable!(),
+            SelectedHarness::Opencode(_) | SelectedHarness::Antigravity(_) => unreachable!(),
         };
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let data = records

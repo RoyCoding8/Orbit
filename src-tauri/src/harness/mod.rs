@@ -1,10 +1,12 @@
 //! Shared resource types and configuration adapters for coding harnesses.
 
+pub mod antigravity;
 pub mod atomic;
 pub mod claude;
 pub mod codex;
 pub(crate) mod credentials;
 pub(crate) mod instruction_store;
+pub(crate) mod json_mcp;
 pub(crate) mod json_store;
 pub mod kiro;
 pub(crate) mod memory_links;
@@ -43,6 +45,7 @@ pub const CLAUDE_CODE: HarnessId = HarnessId("claude-code");
 pub const KIRO: HarnessId = HarnessId("kiro");
 pub const OPENCODE: HarnessId = HarnessId("opencode");
 pub const PI: HarnessId = HarnessId("pi");
+pub const ANTIGRAVITY: HarnessId = HarnessId("antigravity");
 
 #[derive(Debug, Default, Clone, Copy, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -53,6 +56,7 @@ pub enum Client {
     Kiro,
     Opencode,
     Pi,
+    Antigravity,
 }
 
 #[derive(serde::Deserialize)]

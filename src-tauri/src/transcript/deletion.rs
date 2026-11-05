@@ -24,6 +24,15 @@ pub fn delete(
     }
     let cache = harness.transcript_cache(app);
     let (source, project) = indexed_source(&cache, session_id)?;
+    if let SelectedHarness::Antigravity(h) = harness {
+        return super::antigravity::delete_chat(
+            h,
+            &cache,
+            session_id,
+            Path::new(&source),
+            backup_directory,
+        );
+    }
     let native_id = session_id.strip_prefix("opencode:").unwrap_or(session_id);
     if matches!(harness, SelectedHarness::Codex(_)) {
         uuid::Uuid::parse_str(session_id).map_err(|_| "Codex session ID is invalid.".to_owned())?;
@@ -72,6 +81,9 @@ pub fn delete(
                 &Default::default(),
             ),
             SelectedHarness::Kiro(_) => unreachable!("Kiro rejected before archival"),
+            SelectedHarness::Antigravity(_) => {
+                unreachable!("Antigravity owns its native backup/deletion lifecycle")
+            }
         }
     })();
     removal.map_err(|error| format!("{error} Native archive saved at {}.", archive.path))?;

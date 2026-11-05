@@ -31,6 +31,9 @@ impl Fixture {
             "kiro" => SelectedHarness::Kiro(KiroHarness::new(config)),
             "opencode" => SelectedHarness::Opencode(OpenCodeHarness::new(config, home)),
             "pi" => SelectedHarness::Pi(PiHarness::new(config, home)),
+            "antigravity" => SelectedHarness::Antigravity(
+                crate::harness::antigravity::AntigravityHarness::new(home),
+            ),
             _ => unreachable!(),
         };
         Self {
@@ -88,7 +91,14 @@ impl Fixture {
 
 #[test]
 fn skills_round_trip_binary_assets_and_history_for_every_harness() {
-    for id in ["claude-code", "codex", "kiro", "opencode", "pi"] {
+    for id in [
+        "claude-code",
+        "codex",
+        "kiro",
+        "opencode",
+        "pi",
+        "antigravity",
+    ] {
         let f = Fixture::new(id);
         let root = if id == "codex" {
             f.harness.user_home().unwrap().join(".agents/skills")
@@ -198,6 +208,120 @@ fn settings_replacement_preserves_unchecked_hooks_and_servers() {
             "{id}"
         );
     }
+}
+
+#[test]
+fn antigravity_setup_import_keeps_shared_native_formats_and_global_cli_preferences() {
+    let f = Fixture::new("antigravity");
+    let shared = f.harness.config_root();
+    f.settings(r#"{"theme":"light"}"#);
+    f.write(
+        &shared.join("hooks.json"),
+        r#"{"team":{"Stop":[{"type":"command","command":"source"}]}}"#,
+    );
+    f.write(
+        &shared.join("mcp_config.json"),
+        r#"{"mcpServers":{"docs":{"serverUrl":"https://example.test/mcp"}}}"#,
+    );
+    f.write(
+        &shared.join("rules/shared.md"),
+        "---\ntrigger: manual\n---\nShared rule",
+    );
+    f.write(&shared.join("GEMINI.md"), "Shared instructions");
+    f.write(
+        &f.harness.user_home().unwrap().join(".gemini/AGENTS.md"),
+        "User instructions",
+    );
+    f.export(&[
+        Category::Settings,
+        Category::Hooks,
+        Category::Mcps,
+        Category::Memories,
+    ]);
+    let (bundle, _) = load(&f.harness, &f.archive).unwrap();
+    assert_eq!(bundle.manifest.entries.len(), 6);
+    assert!(bundle.manifest.entries.iter().any(|entry| matches!(
+        &entry.resource,
+        resources::Resource::File {
+            area: resources::Area::Rules,
+            ..
+        }
+    )));
+    f.settings(r#"{"theme":"dark"}"#);
+    let preview = preview(&f.harness, &f.project, &f.archive, Destination::Project).unwrap();
+    let settings = preview
+        .entries
+        .iter()
+        .find(|e| e.category == Category::Settings)
+        .unwrap();
+    assert_eq!(Path::new(&settings.target), f.harness.settings_path());
+    let choices = preview
+        .entries
+        .iter()
+        .map(|e| Choice {
+            id: e.id.clone(),
+            replace: true,
+            expected: e.expected.clone(),
+        })
+        .collect::<Vec<_>>();
+    apply(
+        &f.harness,
+        &f.project,
+        &f.archive,
+        &preview.checksum,
+        Destination::Project,
+        &choices,
+    )
+    .unwrap();
+    let project_hooks: Value =
+        serde_json::from_slice(&fs::read(f.project.join(".agents/hooks.json")).unwrap()).unwrap();
+    assert_eq!(
+        project_hooks,
+        json!({"team":{"Stop":[{"type":"command","command":"source"}]}})
+    );
+    assert_eq!(
+        fs::read_to_string(f.project.join(".agents/GEMINI.md")).unwrap(),
+        "Shared instructions"
+    );
+    assert_eq!(
+        fs::read_to_string(f.project.join("AGENTS.md")).unwrap(),
+        "User instructions"
+    );
+    assert!(
+        fs::read_to_string(f.project.join(".agents/rules/shared.md"))
+            .unwrap()
+            .contains("Shared rule")
+    );
+    assert_eq!(
+        resources::document(
+            &fs::read(f.harness.settings_path()).unwrap(),
+            "antigravity",
+            &Slot::Settings
+        )
+        .unwrap()["theme"],
+        "light"
+    );
+    let history = crate::history::load(&f.harness, &f.project).unwrap();
+    assert_eq!(history.logs.len(), 6);
+    assert_eq!(history.versions.len(), 1);
+    let version = history.versions.iter().find(|v| v.restorable).unwrap();
+    assert_eq!(version.target, f.harness.settings_path());
+    crate::history::restore(
+        &f.harness,
+        &f.project,
+        &version.id,
+        version.current_checksum.as_deref(),
+    )
+    .unwrap();
+    assert_eq!(
+        resources::document(
+            &fs::read(f.harness.settings_path()).unwrap(),
+            "antigravity",
+            &Slot::Settings
+        )
+        .unwrap()["theme"],
+        "dark"
+    );
 }
 
 #[test]

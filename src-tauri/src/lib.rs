@@ -601,6 +601,9 @@ async fn transcript_list_sessions(
                 .map_err(|e| e.to_string())?,
             source: match &harness {
                 SelectedHarness::Opencode(_) => "OpenCode v2 native session service".into(),
+                SelectedHarness::Antigravity(h) => {
+                    h.home().join(".gemini").to_string_lossy().into_owned()
+                }
                 _ => harness.config_root().to_string_lossy().into_owned(),
             },
         })

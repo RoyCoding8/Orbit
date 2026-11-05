@@ -602,7 +602,10 @@ fn target_scope(
     }
     if matches!(
         harness.id(),
-        crate::harness::KIRO | crate::harness::OPENCODE | crate::harness::PI
+        crate::harness::KIRO
+            | crate::harness::OPENCODE
+            | crate::harness::PI
+            | crate::harness::ANTIGRAVITY
     ) {
         return native_target_scope(harness, project, row, target);
     }
@@ -836,6 +839,13 @@ fn native_target_scope(
     let project = canonical_location(project)?;
     let is_kiro = harness.id() == crate::harness::KIRO;
     let is_pi = harness.id() == crate::harness::PI;
+    let antigravity = if harness.id() == crate::harness::ANTIGRAVITY {
+        Some(crate::harness::antigravity::AntigravityHarness::new(
+            canonical_location(harness.user_home()?)?,
+        ))
+    } else {
+        None
+    };
     let scope = |kind| {
         let is_global = !target.starts_with(&project)
             || (target.starts_with(&config)
@@ -860,7 +870,12 @@ fn native_target_scope(
         }
     };
     if matches!(resource, "settings" | "mcpserver") {
-        let owned = if is_kiro {
+        let owned = if let Some(h) = &antigravity {
+            target == canonical_location(&h.settings_path())?
+                || [&config, &project.join(".agents")].into_iter().any(|root| {
+                    target == root.join("mcp_config.json") || target == root.join("hooks.json")
+                })
+        } else if is_kiro {
             [&config, &project.join(".kiro")].into_iter().any(|root| {
                 target == root.join("settings/cli.json")
                     || target == root.join("settings/mcp.json")
@@ -882,7 +897,9 @@ fn native_target_scope(
         return owned.then(|| scope(VersionKind::File));
     }
     if matches!(resource, "globalinstructions" | "projectinstructions") {
-        let owned = if is_kiro {
+        let owned = if let Some(h) = &antigravity {
+            crate::harness::antigravity::memories::allowed_instruction_path(h, &project, target)
+        } else if is_kiro {
             markdown_below(&config.join("steering"), target)
                 || crate::harness::kiro::memories::allowed_instruction_path(
                     &crate::harness::kiro::KiroHarness::new(config.clone()),
@@ -907,7 +924,10 @@ fn native_target_scope(
         return owned.then(|| scope(VersionKind::File));
     }
     if resource == "skill" {
-        let owned = if is_kiro {
+        let owned = if let Some(h) = &antigravity {
+            crate::harness::antigravity::skills::owned(h, &project, target)
+                || crate::harness::antigravity::skills::owned(h, &project, &target.join("SKILL.md"))
+        } else if is_kiro {
             [&config.join("skills"), &project.join(".kiro/skills")]
                 .into_iter()
                 .any(|root| {
@@ -1264,6 +1284,8 @@ fn ensure_plain_target_parent(
             target.starts_with(home.join(".agents/skills"))
                 || (harness.id() == crate::harness::OPENCODE
                     && target.starts_with(home.join(".claude/skills")))
+                || (harness.id() == crate::harness::ANTIGRAVITY
+                    && target.starts_with(home.join(".gemini")))
         })
     {
         home

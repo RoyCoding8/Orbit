@@ -8,7 +8,7 @@ use super::{
 
 pub mod config;
 pub mod hooks;
-pub mod mcp;
+pub(crate) use super::json_mcp as mcp;
 pub mod memories;
 pub mod skills;
 

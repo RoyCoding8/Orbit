@@ -21,6 +21,9 @@ fn harness(client: Client, root: &Path) -> SelectedHarness {
             SelectedHarness::Opencode(OpenCodeHarness::new(root.into(), root.into()))
         }
         Client::Kiro => SelectedHarness::Kiro(KiroHarness::new(root.into())),
+        Client::Antigravity => SelectedHarness::Antigravity(
+            crate::harness::antigravity::AntigravityHarness::new(root.into()),
+        ),
     }
 }
 
@@ -60,13 +63,14 @@ fn assert_conversation(chat: &Conversation) {
 }
 
 #[test]
-fn all_four_native_codecs_preserve_conversation_roles_images_and_text() {
+fn all_native_codecs_preserve_conversation_roles_images_and_text() {
     let temp = crate::test_support::tempdir().unwrap();
     for source in [
         Client::ClaudeCode,
         Client::Codex,
         Client::Pi,
         Client::Opencode,
+        Client::Antigravity,
     ] {
         let source = harness(source, &temp.path().join(Uuid::new_v4().to_string()));
         let first = temp.path().join(Uuid::new_v4().to_string());
@@ -78,6 +82,7 @@ fn all_four_native_codecs_preserve_conversation_roles_images_and_text() {
             Client::Codex,
             Client::Pi,
             Client::Opencode,
+            Client::Antigravity,
         ] {
             let target = harness(target, &temp.path().join(Uuid::new_v4().to_string()));
             let next = temp.path().join(Uuid::new_v4().to_string());

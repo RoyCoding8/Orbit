@@ -91,7 +91,12 @@ pub fn convert(
     if matches!(target, SelectedHarness::Kiro(_)) {
         return Err("Kiro does not expose a verified transcript import API. Kiro v2 chats can be converted to other agents, but Kiro cannot be a conversion destination.".into());
     }
-    let (stage, chat) = snapshot(source, app, session)?;
+    let (stage, mut chat) = snapshot(source, app, session)?;
+    if project.is_none() && chat.cwd.trim().is_empty() {
+        return Err(
+            "The source chat has no working directory. Choose a destination directory.".into(),
+        );
+    }
     let project = project.unwrap_or_else(|| Path::new(&chat.cwd));
     let project = project.canonicalize().map_err(|error| {
         format!(
@@ -103,6 +108,7 @@ pub fn convert(
     }
     let destination = stage.path().join("converted");
     fs::create_dir(&destination).map_err(|error| error.to_string())?;
+    chat.cwd = native_path(&project);
     encode(target, &chat, &destination)?;
     let report = target.transcript_import(app, &destination, &project)?;
     Ok(ConversionReport {
@@ -125,7 +131,7 @@ fn snapshot(
         .map_err(|error| error.to_string())?;
     let report = source.transcript_export(app, session, stage.path())?;
     let mut chat = decode(source, Path::new(&report.path))?;
-    if chat.cwd.trim().is_empty() {
+    if chat.cwd.trim().is_empty() && !matches!(source, SelectedHarness::Antigravity(_)) {
         return Err(
             "The source chat has no working directory. Index its native session again.".into(),
         );
@@ -185,6 +191,18 @@ fn decode(source: &SelectedHarness, root: &Path) -> Result<Conversation, String>
             embed_codex_attachments(root, &manifest, &mut records)?;
             let mut chat = decode_codex(&records)?;
             chat.title = manifest["title"].as_str().unwrap_or("").into();
+            Ok(chat)
+        }
+        SelectedHarness::Antigravity(_) => {
+            let mut chat = Conversation {
+                cwd: manifest["workingDirectory"].as_str().unwrap_or("").into(),
+                title: manifest["title"].as_str().unwrap_or("").into(),
+                ..Default::default()
+            };
+            for turn in super::antigravity::archive_turns(root, &manifest)? {
+                chat.message(turn["role"].as_str().unwrap_or(""), &turn["content"]);
+            }
+            chat.notes.insert("Antigravity tool steps, reasoning, and external artifacts are omitted. User and assistant text and supported inline images are transferred.".into());
             Ok(chat)
         }
         SelectedHarness::Pi(_) => decode_pi(&read_lines(&root.join("session.jsonl"))?),
@@ -898,6 +916,13 @@ fn encode(target: &SelectedHarness, chat: &Conversation, root: &Path) -> Result<
             )
         }
         SelectedHarness::Kiro(_) => Err("Kiro transcript import is unavailable.".into()),
+        SelectedHarness::Antigravity(_) => {
+            let turns: Vec<_> = chat.turns.iter().map(|turn| json!({"role":turn.role.name(),"content":turn.content.iter().map(|block| match block {
+                Content::Text(text) => json!({"type":"text","text":text}),
+                Content::Image{mime,data} => json!({"type":"image","source":{"type":"base64","media_type":mime,"data":data}}),
+            }).collect::<Vec<_>>()})).collect();
+            super::antigravity::stage_conversion(root, &chat.title, &chat.cwd, &turns)
+        }
     }
 }
 
@@ -967,7 +992,7 @@ fn required<'a>(object: &'a Value, field: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("Source chat is missing {field}."))
 }
 
-fn native_path(path: &Path) -> String {
+pub(super) fn native_path(path: &Path) -> String {
     let value = path.to_string_lossy();
     value
         .strip_prefix(r"\\?\UNC\")

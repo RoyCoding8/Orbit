@@ -1,6 +1,7 @@
 use serde_json::{Map, Value};
 
-use super::KiroHarness;
+#[cfg(test)]
+use super::kiro::KiroHarness;
 use crate::harness::json_store as store;
 use crate::harness::{
     claude::mcp::{self, BenchResult, HttpEntry, ServerView, StdioEntry},
@@ -9,11 +10,11 @@ use crate::harness::{
 
 const SERVERS: &str = "mcpServers";
 
-pub fn list(harness: &KiroHarness) -> Result<Vec<ServerView>, String> {
+pub fn list(harness: &impl Harness) -> Result<Vec<ServerView>, String> {
     list_at(&harness.mcp_path())
 }
 
-pub(crate) fn list_global(harness: &KiroHarness) -> Result<Vec<ServerView>, String> {
+pub(crate) fn list_global(harness: &impl Harness) -> Result<Vec<ServerView>, String> {
     list(harness)
 }
 
@@ -40,7 +41,7 @@ fn list_at(path: &std::path::Path) -> Result<Vec<ServerView>, String> {
     Ok(result)
 }
 
-pub fn save(harness: &KiroHarness, name: &str, entry: Value) -> Result<(), String> {
+pub fn save(harness: &impl Harness, name: &str, entry: Value) -> Result<(), String> {
     validate_name(name)?;
     let mut candidate = entry
         .as_object()
@@ -57,7 +58,7 @@ pub fn save(harness: &KiroHarness, name: &str, entry: Value) -> Result<(), Strin
             }
         });
     if !matches!(kind.as_str(), "stdio" | "http") {
-        return Err("Kiro MCP transport must be `stdio` or `http`".into());
+        return Err("MCP transport must be `stdio` or `http`".into());
     }
     let enabled = candidate
         .remove("enabled")
@@ -70,11 +71,17 @@ pub fn save(harness: &KiroHarness, name: &str, entry: Value) -> Result<(), Strin
         harness,
         ResourceKind::McpServer,
         name,
-        "kiro-mcp-save",
+        &format!("{}-mcp-save", harness.id().0),
         &harness.mcp_path(),
         move |document| {
             let servers = servers_mut(document)?;
-            let previous = servers.get(&id).cloned();
+            let mut previous = servers.get(&id).cloned();
+            if let Some(previous) = previous.as_mut().and_then(Value::as_object_mut) {
+                if candidate.get("url").is_some() && previous.contains_key("serverUrl") {
+                    let url = previous.remove("serverUrl").unwrap();
+                    previous.insert("url".into(), url);
+                }
+            }
             if let Some(previous) = &previous {
                 mcp::preserve_masked_credentials(previous, &mut candidate)
                     .map_err(|error| error.to_string())?;
@@ -107,13 +114,13 @@ pub fn save(harness: &KiroHarness, name: &str, entry: Value) -> Result<(), Strin
     )
 }
 
-pub fn set_enabled(harness: &KiroHarness, name: &str, enabled: bool) -> Result<(), String> {
+pub fn set_enabled(harness: &impl Harness, name: &str, enabled: bool) -> Result<(), String> {
     validate_name(name)?;
     store::mutate_json(
         harness,
         ResourceKind::McpServer,
         name,
-        "kiro-mcp-enabled",
+        &format!("{}-mcp-enabled", harness.id().0),
         &harness.mcp_path(),
         |document| {
             let entry = servers_mut(document)?
@@ -132,13 +139,13 @@ pub fn set_enabled(harness: &KiroHarness, name: &str, enabled: bool) -> Result<(
     )
 }
 
-pub fn delete(harness: &KiroHarness, name: &str) -> Result<(), String> {
+pub fn delete(harness: &impl Harness, name: &str) -> Result<(), String> {
     validate_name(name)?;
     store::mutate_json(
         harness,
         ResourceKind::McpServer,
         name,
-        "kiro-mcp-delete",
+        &format!("{}-mcp-delete", harness.id().0),
         &harness.mcp_path(),
         |document| {
             if servers_mut(document)?.remove(name).is_none() {
@@ -149,7 +156,7 @@ pub fn delete(harness: &KiroHarness, name: &str) -> Result<(), String> {
     )
 }
 
-pub fn test(harness: &KiroHarness, name: &str) -> Result<BenchResult, String> {
+pub fn test(harness: &impl Harness, name: &str) -> Result<BenchResult, String> {
     let entry = server_map(&store::read_value(&harness.mcp_path())?)?
         .get(name)
         .cloned()
@@ -157,8 +164,23 @@ pub fn test(harness: &KiroHarness, name: &str) -> Result<BenchResult, String> {
     if entry.get("disabled").and_then(Value::as_bool) == Some(true) {
         return Err("MCP server is disabled".into());
     }
-    if entry.get("oauth").is_some() {
-        return Err("Kiro OAuth MCP servers must be tested in Kiro because Orbit does not perform the OAuth flow".into());
+    if entry.get("oauth").is_some() || entry.get("authProviderType").is_some() {
+        return Err(
+            "OAuth and account-authenticated MCP servers must be tested in the native agent".into(),
+        );
+    }
+    if entry.get("cwd").is_some_and(|v| {
+        v.as_str()
+            .is_none_or(|s| !std::path::Path::new(s).is_absolute())
+    }) {
+        return Err(
+            "Test this server in its native agent, or set an absolute working directory.".into(),
+        );
+    }
+    if entry.to_string().contains("${") {
+        return Err(
+            "Test this server in its native agent so runtime references can be resolved.".into(),
+        );
     }
     match kind(&entry)? {
         "stdio" => mcp::test_stdio(
@@ -201,7 +223,13 @@ fn kind(entry: &Value) -> Result<&'static str, String> {
     let object = entry
         .as_object()
         .ok_or("MCP server entry must be an object")?;
-    match (object.contains_key("command"), object.contains_key("url")) {
+    if object.contains_key("url") && object.contains_key("serverUrl") {
+        return Err("MCP server must use only one of `url` or `serverUrl`".into());
+    }
+    match (
+        object.contains_key("command"),
+        object.contains_key("url") || object.contains_key("serverUrl"),
+    ) {
         (true, false) => Ok("stdio"),
         (false, true) => Ok("http"),
         (true, true) => Err("MCP server cannot contain both `command` and `url`".into()),

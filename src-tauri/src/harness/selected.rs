@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::{
+    antigravity::{self, AntigravityHarness},
     claude::{self, config::SettingsLayer, ClaudeCodeHarness, SkillOverride},
     codex::{self, CodexHarness},
     kiro::{self, KiroHarness},
@@ -18,6 +19,7 @@ pub enum SelectedHarness {
     Kiro(KiroHarness),
     Opencode(OpenCodeHarness),
     Pi(PiHarness),
+    Antigravity(AntigravityHarness),
 }
 
 impl SelectedHarness {
@@ -27,6 +29,7 @@ impl SelectedHarness {
             Client::Codex => Self::Codex(CodexHarness::from_env()),
             Client::Kiro => Self::Kiro(KiroHarness::from_env()),
             Client::Pi => Self::Pi(PiHarness::from_env()),
+            Client::Antigravity => Self::Antigravity(AntigravityHarness::from_env()),
             Client::Opencode => Self::Opencode(OpenCodeHarness::from_env()),
         }
     }
@@ -37,6 +40,7 @@ impl SelectedHarness {
             Self::Codex(h) => codex::mcp::list(h),
             Self::Kiro(h) => kiro::mcp::list(h),
             Self::Pi(h) => pi::mcp::list(h),
+            Self::Antigravity(h) => antigravity::mcp::list(h),
             Self::Opencode(h) => opencode::mcp::list(h),
         }
     }
@@ -47,6 +51,7 @@ impl SelectedHarness {
             Self::Codex(h) => codex::mcp::save(h, name, entry),
             Self::Kiro(h) => kiro::mcp::save(h, name, entry),
             Self::Pi(h) => pi::mcp::save(h, name, entry),
+            Self::Antigravity(h) => antigravity::mcp::save(h, name, entry),
             Self::Opencode(h) => opencode::mcp::save(h, name, entry),
         }
     }
@@ -62,6 +67,7 @@ impl SelectedHarness {
             Self::Codex(h) => codex::mcp::set_enabled(h, name, enabled),
             Self::Kiro(h) => kiro::mcp::set_enabled(h, name, enabled),
             Self::Pi(h) => pi::mcp::set_enabled(h, name, enabled),
+            Self::Antigravity(h) => antigravity::mcp::set_enabled(h, name, enabled),
             Self::Opencode(h) => opencode::mcp::set_enabled(h, name, enabled),
         }
     }
@@ -72,6 +78,7 @@ impl SelectedHarness {
             Self::Codex(h) => codex::mcp::delete(h, name),
             Self::Kiro(h) => kiro::mcp::delete(h, name),
             Self::Pi(h) => pi::mcp::delete(h, name),
+            Self::Antigravity(h) => antigravity::mcp::delete(h, name),
             Self::Opencode(h) => opencode::mcp::delete(h, name),
         }
     }
@@ -82,6 +89,7 @@ impl SelectedHarness {
             Self::Codex(h) => codex::mcp::test(h, name),
             Self::Kiro(h) => kiro::mcp::test(h, name),
             Self::Pi(h) => pi::mcp::test(h, name),
+            Self::Antigravity(h) => antigravity::mcp::test(h, name),
             Self::Opencode(h) => opencode::mcp::test(h, name),
         }
     }
@@ -92,6 +100,7 @@ impl SelectedHarness {
             Self::Codex(h) => codex::config::load_config(h, project),
             Self::Kiro(h) => kiro::config::load_config(h, project),
             Self::Pi(h) => pi::config::load_config(h, project),
+            Self::Antigravity(h) => antigravity::config::load_config(h, project),
             Self::Opencode(h) => opencode::config::load_config(h, project),
         }
     }
@@ -109,6 +118,7 @@ impl SelectedHarness {
             Self::Codex(h) => codex::config::apply_value(h, project, layer, key, value),
             Self::Kiro(h) => kiro::config::apply_value(h, project, layer, key, value),
             Self::Pi(h) => pi::config::apply_value(h, project, layer, key, value),
+            Self::Antigravity(h) => antigravity::config::apply_value(h, project, layer, key, value),
             Self::Opencode(h) => opencode::config::apply_value(h, project, layer, key, value),
         }
     }
@@ -130,6 +140,7 @@ impl SelectedHarness {
             Self::Codex(h) => codex::config::undo(h, project, layer, key),
             Self::Kiro(h) => kiro::config::undo(h, project, layer, key),
             Self::Pi(h) => pi::config::undo(h, project, layer, key),
+            Self::Antigravity(h) => antigravity::config::undo(h, project, layer, key),
             Self::Opencode(h) => opencode::config::undo(h, project, layer, key),
         }
     }
@@ -143,6 +154,7 @@ impl SelectedHarness {
             Self::Claude(h) => h.hooks_list(project, app).map_err(|e| e.to_string()),
             Self::Codex(h) => codex::hooks::list(h, project),
             Self::Kiro(h) => kiro::hooks::list(h, project),
+            Self::Antigravity(h) => antigravity::hooks::list(h, project),
             Self::Opencode(_) => Err(opencode::hooks::UNSUPPORTED.into()),
             Self::Pi(_) => Err(pi::HOOKS_UNSUPPORTED.into()),
         }
@@ -177,6 +189,7 @@ impl SelectedHarness {
                 draft.edit_id.as_deref(),
             ),
             Self::Kiro(h) => kiro::hooks::save(h, project, draft),
+            Self::Antigravity(h) => antigravity::hooks::save(h, project, draft),
             Self::Opencode(_) => Err(opencode::hooks::UNSUPPORTED.into()),
             Self::Pi(_) => Err(pi::HOOKS_UNSUPPORTED.into()),
         }
@@ -199,6 +212,7 @@ impl SelectedHarness {
             .map_err(|e| e.to_string()),
             Self::Codex(h) => codex::hooks::set_enabled(h, project, layer, id, enabled),
             Self::Kiro(h) => kiro::hooks::set_enabled(h, project, layer, id, enabled),
+            Self::Antigravity(h) => antigravity::hooks::set_enabled(h, project, layer, id, enabled),
             Self::Opencode(_) => Err(opencode::hooks::UNSUPPORTED.into()),
             Self::Pi(_) => Err(pi::HOOKS_UNSUPPORTED.into()),
         }
@@ -217,6 +231,7 @@ impl SelectedHarness {
                 .map_err(|e| e.to_string()),
             Self::Codex(h) => codex::hooks::delete(h, project, layer, id),
             Self::Kiro(h) => kiro::hooks::delete(h, project, layer, id),
+            Self::Antigravity(h) => antigravity::hooks::delete(h, project, layer, id),
             Self::Opencode(_) => Err(opencode::hooks::UNSUPPORTED.into()),
             Self::Pi(_) => Err(pi::HOOKS_UNSUPPORTED.into()),
         }
@@ -231,6 +246,7 @@ impl SelectedHarness {
             Self::Codex(h) => codex::skills::inventory(h, project),
             Self::Kiro(h) => kiro::skills::inventory(h, project),
             Self::Pi(h) => pi::skills::inventory(h, project),
+            Self::Antigravity(h) => antigravity::skills::inventory(h, project),
             Self::Opencode(h) => opencode::skills::inventory(h, project),
         }
     }
@@ -246,6 +262,7 @@ impl SelectedHarness {
             Self::Codex(h) => codex::skills::set_override(h, project, id, state),
             Self::Kiro(h) => kiro::skills::set_override(h, project, id, state),
             Self::Pi(h) => pi::skills::set_override(h, project, id, state),
+            Self::Antigravity(h) => antigravity::skills::set_override(h, project, id, state),
             Self::Opencode(h) => opencode::skills::set_override(h, project, id, state),
         }
     }
@@ -262,6 +279,9 @@ impl SelectedHarness {
             Self::Codex(h) => codex::skills::edit_skill(h, project, id, expected, content),
             Self::Kiro(h) => kiro::skills::edit_skill(h, project, id, expected, content),
             Self::Pi(h) => pi::skills::edit_skill(h, project, id, expected, content),
+            Self::Antigravity(h) => {
+                antigravity::skills::edit_skill(h, project, id, expected, content)
+            }
             Self::Opencode(h) => opencode::skills::edit_skill(h, project, id, expected, content),
         }
     }
@@ -272,6 +292,7 @@ impl SelectedHarness {
             Self::Codex(h) => codex::skills::install(h, source),
             Self::Kiro(h) => kiro::skills::install(h, source),
             Self::Pi(h) => pi::skills::install(h, source),
+            Self::Antigravity(h) => antigravity::skills::install(h, source),
             Self::Opencode(h) => opencode::skills::install(h, source),
         }
     }
@@ -282,6 +303,7 @@ impl SelectedHarness {
             Self::Codex(h) => codex::skills::uninstall(h, project, id),
             Self::Kiro(h) => kiro::skills::uninstall(h, project, id),
             Self::Pi(h) => pi::skills::uninstall(h, project, id),
+            Self::Antigravity(h) => antigravity::skills::uninstall(h, project, id),
             Self::Opencode(h) => opencode::skills::uninstall(h, project, id),
         }
     }
@@ -295,6 +317,7 @@ impl SelectedHarness {
             Self::Codex(h) => codex::skills::restore(h, project, id, backup),
             Self::Kiro(h) => kiro::skills::restore(h, project, id, backup),
             Self::Pi(h) => pi::skills::restore(h, project, id, backup),
+            Self::Antigravity(h) => antigravity::skills::restore(h, project, id, backup),
             Self::Opencode(h) => opencode::skills::restore(h, project, id, backup),
         }
     }
@@ -308,6 +331,7 @@ impl SelectedHarness {
             Self::Codex(h) => codex::memories::catalog(h, project),
             Self::Kiro(h) => kiro::memories::catalog(h, project),
             Self::Pi(h) => pi::memories::catalog(h, project),
+            Self::Antigravity(h) => antigravity::memories::catalog(h, project),
             Self::Opencode(h) => opencode::memories::catalog(h, project),
         }
     }
@@ -324,6 +348,7 @@ impl SelectedHarness {
             Self::Codex(h) => codex::memories::edit(h, project, id, expected, content),
             Self::Kiro(h) => kiro::memories::edit(h, project, id, expected, content),
             Self::Pi(h) => pi::memories::edit(h, project, id, expected, content),
+            Self::Antigravity(h) => antigravity::memories::edit(h, project, id, expected, content),
             Self::Opencode(h) => opencode::memories::edit(h, project, id, expected, content),
         }
     }
@@ -334,6 +359,7 @@ impl SelectedHarness {
             Self::Codex(h) => codex::memories::delete(h, project, id, expected),
             Self::Kiro(h) => kiro::memories::delete(h, project, id, expected),
             Self::Pi(h) => pi::memories::delete(h, project, id, expected),
+            Self::Antigravity(h) => antigravity::memories::delete(h, project, id, expected),
             Self::Opencode(h) => opencode::memories::delete(h, project, id, expected),
         }
     }
@@ -345,6 +371,7 @@ impl SelectedHarness {
             Self::Codex(_) => app.join("codex"),
             Self::Kiro(_) => app.join("kiro"),
             Self::Pi(_) => app.join("pi"),
+            Self::Antigravity(_) => app.join("antigravity"),
             Self::Opencode(_) => app.join("opencode"),
         }
     }
@@ -358,6 +385,7 @@ impl SelectedHarness {
             Self::Claude(h) => {
                 transcript::ingest::ingest_projects(h.config_root(), app).map_err(|e| e.to_string())
             }
+            Self::Antigravity(_) => transcript::catalog::index_all(self, app, project, |_| {}),
             Self::Codex(h) => {
                 transcript::codex::ingest(h.config_root(), &self.transcript_cache(app))
                     .map_err(|e| e.to_string())
@@ -383,6 +411,12 @@ impl SelectedHarness {
             Self::Claude(h) => transcript::archive::export_archive(
                 app,
                 &h.config_root().join("projects"),
+                session,
+                destination,
+            ),
+            Self::Antigravity(h) => transcript::antigravity::export_archive(
+                h,
+                &self.transcript_cache(app),
                 session,
                 destination,
             ),
@@ -427,6 +461,7 @@ impl SelectedHarness {
             ),
             Self::Codex(h) => transcript::codex::import_archive(h.config_root(), source, project),
             Self::Kiro(h) => transcript::kiro::import_archive(h.config_root(), source, project),
+            Self::Antigravity(h) => transcript::antigravity::import_archive(h, source, project),
             Self::Pi(h) => transcript::pi::import_archive(h.config_root(), source, project),
             Self::Opencode(h) => {
                 transcript::opencode::import_archive(h.config_root(), source, project)
@@ -449,6 +484,7 @@ impl Harness for SelectedHarness {
             Self::Codex(h) => h.id(),
             Self::Kiro(h) => h.id(),
             Self::Pi(h) => h.id(),
+            Self::Antigravity(h) => h.id(),
             Self::Opencode(h) => h.id(),
         }
     }
@@ -458,6 +494,7 @@ impl Harness for SelectedHarness {
             Self::Codex(h) => h.config_root(),
             Self::Kiro(h) => h.config_root(),
             Self::Pi(h) => h.config_root(),
+            Self::Antigravity(h) => h.config_root(),
             Self::Opencode(h) => h.config_root(),
         }
     }
@@ -467,6 +504,7 @@ impl Harness for SelectedHarness {
             Self::Codex(h) => h.settings_path(),
             Self::Kiro(h) => h.settings_path(),
             Self::Pi(h) => h.settings_path(),
+            Self::Antigravity(h) => h.settings_path(),
             Self::Opencode(h) => h.settings_path(),
         }
     }
@@ -476,6 +514,7 @@ impl Harness for SelectedHarness {
             Self::Codex(h) => h.mcp_path(),
             Self::Kiro(h) => h.mcp_path(),
             Self::Pi(h) => h.mcp_path(),
+            Self::Antigravity(h) => h.mcp_path(),
             Self::Opencode(h) => h.mcp_path(),
         }
     }
@@ -485,6 +524,7 @@ impl Harness for SelectedHarness {
             Self::Codex(h) => h.user_home(),
             Self::Kiro(h) => h.user_home(),
             Self::Pi(h) => h.user_home(),
+            Self::Antigravity(h) => h.user_home(),
             Self::Opencode(h) => h.user_home(),
         }
     }
@@ -494,6 +534,7 @@ impl Harness for SelectedHarness {
             Self::Codex(h) => h.list(kind),
             Self::Kiro(h) => h.list(kind),
             Self::Pi(h) => h.list(kind),
+            Self::Antigravity(h) => h.list(kind),
             Self::Opencode(h) => h.list(kind),
         }
     }

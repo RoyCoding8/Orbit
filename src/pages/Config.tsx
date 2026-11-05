@@ -15,7 +15,6 @@ type Snapshot = {
   effective: Record<string, EffectiveSetting>;
 };
 
-const layerNames: LayerName[] = ["user", "project", "local"];
 const emptySnapshot: Snapshot = { layers: [], effective: {} };
 
 export function Config() {
@@ -42,6 +41,7 @@ export function Config() {
       const loaded = await invoke<Snapshot>("config_load", { projectRoot });
       if (requestId !== loadSequenceRef.current) return;
       setSnapshot(loaded);
+      setActiveLayer(current => loaded.layers.some(layer => layer.name === current) ? current : "user");
       setError("");
     } catch (cause) {
       if (requestId !== loadSequenceRef.current) return;
@@ -163,7 +163,7 @@ export function Config() {
             role="tablist"
             aria-label="Settings layers"
           >
-            {layerNames.filter(layer => profile.localSettings || layer !== "local").map((layer) => (
+            {profile.settingsLayers.map((layer) => (
               <button
                 key={layer}
                 type="button"

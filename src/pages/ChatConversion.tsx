@@ -103,13 +103,14 @@ export function ChatConversion({ sessionId, onClose, onConverted }: {
               {destinations.map(candidate => <M3eOption key={candidate} value={candidate}>{harnesses[candidate].label}</M3eOption>)}
             </M3eSelect>
           </M3eFormField>
-          <p className="quiet-copy">Kiro cannot be a destination because its current interface does not support creating a chat from a transcript.</p>
-          <p>Working directory: <span className="conversion-path">{displayPath(projectRoot ?? previewState.preview.workingDirectory)}</span></p>
+          {target === "antigravity" && <p className="quiet-copy">Requires agy 1.5.0 with the Antigravity App and CLI closed. The new chat appears in its CLI store.</p>}
+          <p className="quiet-copy">Kiro cannot be a destination because native transcript import is unavailable.</p>
+          <p>Working directory: <span className="conversion-path">{displayPath(projectRoot ?? previewState.preview.workingDirectory) || "Not recorded. Choose a directory."}</span></p>
           <div className="dialog-actions">
             <M3eButton type="button" variant="outlined" disabled={busy} onClick={() => void chooseDirectory()}>Change working directory</M3eButton>
             {projectRoot && <M3eButton type="button" variant="text" disabled={busy} onClick={() => setProjectRoot(null)}>Use original directory</M3eButton>}
           </div>
-          <p className="supporting-copy">Creates a separate chat with the latest active branch, conversation text, and inline images. Tool history becomes text. The destination agent uses its own settings and instructions.</p>
+          <p className="supporting-copy">Creates a separate chat with conversation text and inline images. Available tool history becomes text; conversion details explain any omissions. The destination agent uses its own settings and instructions.</p>
         </>}
         <details>
           <summary>Conversion details</summary>
@@ -120,7 +121,7 @@ export function ChatConversion({ sessionId, onClose, onConverted }: {
     </div>
     <div className="dialog-actions">
       <M3eButton type="button" variant="text" disabled={busy} onClick={onClose}>{result ? "Done" : "Cancel"}</M3eButton>
-      {!result && <M3eButton type="button" variant="filled" disabled={busy || previewState.kind !== "ready"} onClick={() => void convert()}>{busy ? "Working…" : "Convert chat"}</M3eButton>}
+      {!result && <M3eButton type="button" variant="filled" disabled={busy || previewState.kind !== "ready" || (!projectRoot && !previewState.preview.workingDirectory)} onClick={() => void convert()}>{busy ? "Working…" : "Convert chat"}</M3eButton>}
     </div>
   </dialog>;
 }

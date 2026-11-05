@@ -27,6 +27,8 @@ pub(super) enum Area {
     Instructions,
     AutoMemory,
     Steering,
+    Rules,
+    SharedInstructions,
     HookFiles,
 }
 
@@ -83,6 +85,7 @@ fn project_config(harness: &impl Harness, project: &Path) -> PathBuf {
         "kiro" => project.join(".kiro"),
         "opencode" => project.join(".opencode"),
         "pi" => project.join(".pi"),
+        "antigravity" => project.join(".agents"),
         _ => unreachable!(),
     }
 }
@@ -151,7 +154,7 @@ fn config_path(
         project_config(harness, project)
     };
     match slot {
-        Slot::Settings => Ok(if scope == Scope::User {
+        Slot::Settings => Ok(if scope == Scope::User || harness.id().0 == "antigravity" {
             harness.settings_path()
         } else {
             match harness.id().0 {
@@ -177,10 +180,13 @@ fn config_path(
                 }
                 "kiro" => root.join("settings/mcp.json"),
                 "pi" => root.join("mcp.json"),
+                "antigravity" => root.join("mcp_config.json"),
                 _ => unreachable!(),
             }
         }),
-        Slot::Hooks if harness.id().0 == "codex" => Ok(root.join("hooks.json")),
+        Slot::Hooks if matches!(harness.id().0, "codex" | "antigravity") => {
+            Ok(root.join("hooks.json"))
+        }
         Slot::Agent { name } if harness.id().0 == "kiro" => {
             let name = relative(name)?;
             if name.components().count() != 1 || name.extension().is_none_or(|ext| ext != "json") {
@@ -224,6 +230,20 @@ fn file_root(
     Ok(match area {
         Area::Skills => skill_root(harness, project, scope),
         Area::AutoMemory => memory_root(harness, project)?,
+        Area::SharedInstructions => {
+            if scope == Scope::User {
+                harness.config_root().to_owned()
+            } else {
+                project_config(harness, project)
+            }
+        }
+        Area::Rules => {
+            if scope == Scope::User {
+                harness.config_root().join("rules")
+            } else {
+                project_config(harness, project).join("rules")
+            }
+        }
         Area::Steering => {
             if scope == Scope::User {
                 harness.config_root().join("steering")
@@ -232,7 +252,12 @@ fn file_root(
             }
         }
         Area::Instructions => {
-            if scope == Scope::User {
+            if scope == Scope::User && harness.id().0 == "antigravity" {
+                harness
+                    .user_home()
+                    .ok_or("Missing user home")?
+                    .join(".gemini")
+            } else if scope == Scope::User {
                 harness.config_root().to_path_buf()
             } else {
                 project.to_path_buf()
@@ -267,7 +292,11 @@ pub(super) fn document(bytes: &[u8], harness: &str, slot: &Slot) -> Result<Value
     if !value.is_object() {
         return Err("Native configuration must be an object".into());
     }
-    Ok(value)
+    Ok(if harness == "antigravity" && matches!(slot, Slot::Hooks) {
+        serde_json::json!({"hooks":value})
+    } else {
+        value
+    })
 }
 
 fn encode(value: &Value, harness: &str, slot: &Slot) -> Result<Vec<u8>, String> {
@@ -276,6 +305,11 @@ fn encode(value: &Value, harness: &str, slot: &Slot) -> Result<Vec<u8>, String> 
             .map(String::into_bytes)
             .map_err(|e| e.to_string())
     } else {
+        let value = if harness == "antigravity" && matches!(slot, Slot::Hooks) {
+            &value["hooks"]
+        } else {
+            value
+        };
         serde_json::to_vec_pretty(value).map_err(|e| e.to_string())
     }
 }
@@ -468,7 +502,15 @@ pub(super) fn updated(
             } else {
                 let root = jsonc_parser::cst::CstRootNode::parse(text, &Default::default())
                     .map_err(|e| e.to_string())?;
-                patch_json(&root.object_value_or_set(), &original, &value);
+                if harness == "antigravity" && matches!(slot, Slot::Hooks) {
+                    patch_json(
+                        &root.object_value_or_set(),
+                        &original["hooks"],
+                        &value["hooks"],
+                    );
+                } else {
+                    patch_json(&root.object_value_or_set(), &original, &value);
+                }
                 Ok(root.to_string().into_bytes())
             }
         }
@@ -554,6 +596,14 @@ pub(super) fn validate(entry: &Entry, bytes: &[u8], harness: &str) -> Result<(),
     let category = match &entry.resource {
         Resource::File { area, path } => {
             relative(path)?;
+            if harness == "antigravity"
+                && matches!(area, Area::Instructions | Area::SharedInstructions)
+                && !matches!(path.as_str(), "AGENTS.md" | "GEMINI.md")
+            {
+                return Err(
+                    "Antigravity instruction archives must use AGENTS.md or GEMINI.md".into(),
+                );
+            }
             match area {
                 Area::Skills => Category::Skills,
                 Area::HookFiles => {
@@ -566,12 +616,21 @@ pub(super) fn validate(entry: &Entry, bytes: &[u8], harness: &str) -> Result<(),
                     }
                     Category::Hooks
                 }
-                Area::Instructions | Area::AutoMemory | Area::Steering => {
+                Area::Instructions
+                | Area::AutoMemory
+                | Area::Steering
+                | Area::Rules
+                | Area::SharedInstructions => {
                     if !path.ends_with(".md") {
                         return Err("Memory resources must be Markdown files".into());
                     }
                     if *area == Area::AutoMemory && !matches!(harness, "codex" | "claude-code") {
                         return Err("Unsupported generated-memory format".into());
+                    }
+                    if matches!(area, Area::Rules | Area::SharedInstructions)
+                        && harness != "antigravity"
+                    {
+                        return Err("Unsupported modular rule format".into());
                     }
                     if *area == Area::Steering && harness != "kiro" {
                         return Err("Unsupported steering format".into());
@@ -594,7 +653,7 @@ pub(super) fn validate(entry: &Entry, bytes: &[u8], harness: &str) -> Result<(),
                     Category::Mcps
                 }
                 Section::Hooks
-                    if matches!(harness, "claude-code" | "codex" | "kiro")
+                    if matches!(harness, "claude-code" | "codex" | "kiro" | "antigravity")
                         && (value.is_array() || value.is_object()) =>
                 {
                     Category::Hooks
@@ -772,7 +831,10 @@ fn collect_config(
         }
     }
     if selected.contains(&Category::Hooks) {
-        if matches!(harness.id().0, "claude-code" | "codex" | "kiro") && doc.get("hooks").is_some()
+        if matches!(
+            harness.id().0,
+            "claude-code" | "codex" | "kiro" | "antigravity"
+        ) && doc.get("hooks").is_some()
         {
             parts.push((Category::Hooks, Section::Hooks, "Hooks".into()));
         }
@@ -835,21 +897,25 @@ pub(super) fn collect(
                 add_tree(&mut bundle, harness.id().0, &root, scope, Area::Skills, "")?;
             }
         }
-        collect_config(
-            &mut bundle,
-            harness,
-            project,
-            scope,
-            Slot::Settings,
-            selected,
-        )?;
-        if matches!(harness.id().0, "claude-code" | "kiro" | "pi")
-            && selected.contains(&Category::Mcps)
+        if harness.id().0 != "antigravity" || scope == Scope::User {
+            collect_config(
+                &mut bundle,
+                harness,
+                project,
+                scope,
+                Slot::Settings,
+                selected,
+            )?;
+        }
+        if matches!(
+            harness.id().0,
+            "claude-code" | "kiro" | "pi" | "antigravity"
+        ) && selected.contains(&Category::Mcps)
         {
             collect_config(&mut bundle, harness, project, scope, Slot::Mcp, selected)?;
         }
         if selected.contains(&Category::Hooks) {
-            if harness.id().0 == "codex" {
+            if matches!(harness.id().0, "codex" | "antigravity") {
                 collect_config(
                     &mut bundle,
                     harness,
@@ -869,7 +935,7 @@ pub(super) fn collect(
                 "pi" => "extensions",
                 _ => "hooks",
             };
-            if harness.id().0 != "codex" {
+            if !matches!(harness.id().0, "codex" | "antigravity") {
                 add_tree(
                     &mut bundle,
                     harness.id().0,
@@ -933,6 +999,45 @@ pub(super) fn collect(
             if !file.editable {
                 continue;
             }
+            if harness.id().0 == "antigravity" {
+                let scope = if matches!(file.source, MemorySource::UserInstructions) {
+                    Scope::User
+                } else {
+                    Scope::Project
+                };
+                let rules = path
+                    .parent()
+                    .is_some_and(|p| p.file_name().is_some_and(|n| n == "rules"));
+                let parent = path.parent().ok_or("Instruction has no directory")?;
+                let shared = parent == harness.config_root()
+                    || [".agents", ".agent", "_agents", "_agent"]
+                        .iter()
+                        .any(|name| parent == project.join(name));
+                let area = if rules {
+                    Area::Rules
+                } else if shared {
+                    Area::SharedInstructions
+                } else {
+                    Area::Instructions
+                };
+                let relative = path
+                    .file_name()
+                    .ok_or("Instruction has no filename")?
+                    .to_string_lossy()
+                    .into_owned();
+                bundle.add(
+                    harness.id().0,
+                    Category::Memories,
+                    scope,
+                    relative.clone(),
+                    Resource::File {
+                        area,
+                        path: relative,
+                    },
+                    file.content.into_bytes(),
+                )?;
+                continue;
+            }
             let (scope, area, root) = match file.source {
                 MemorySource::ProjectAutoMemory | MemorySource::GlobalAutoMemory => {
                     let Some(root) = auto.as_ref() else {
@@ -991,7 +1096,9 @@ pub(super) fn collect(
                 file.content.into_bytes(),
             )?;
         }
-        collect_memory_links(&mut bundle, harness, project)?;
+        if harness.id().0 != "antigravity" {
+            collect_memory_links(&mut bundle, harness, project)?;
+        }
     }
     if selected.contains(&Category::Skills) && harness.id().0 != "codex" {
         collect_discovered_skills(&mut bundle, harness, project)?;
@@ -1147,6 +1254,9 @@ pub(super) fn notes(harness: &impl Harness) -> Vec<String> {
         "Saved file paths and hook commands stay as written. Import does not download packages or run scripts. Paths from another computer may need updating.".into(),
         "Settings and hooks come from your user setup and selected project. Parent-project settings are left out. Shared skills are copied into this agent's skills folder.".into(),
     ];
+    if harness.id().0 == "antigravity" {
+        notes.push("CLI preferences always import user-wide. Shared skills, rules, hooks and MCP files can import into the selected project or user setup. App preferences and internal knowledge are excluded. External skill references are copied, not linked.".into());
+    }
     if harness.id().0 == "codex" {
         notes.push("Codex generated memory stays user-wide. Codex still controls project trust and hook approval.".into());
     }
