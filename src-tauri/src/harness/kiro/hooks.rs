@@ -25,6 +25,7 @@ const V2_EVENTS: &[&str] = &[
 
 const V3_EVENTS: &[&str] = &[
     "SessionStart",
+    "SessionEnd",
     "UserPromptSubmit",
     "PreToolUse",
     "PostToolUse",
@@ -33,7 +34,10 @@ const V3_EVENTS: &[&str] = &[
     "PostFileDelete",
     "PreTaskExec",
     "PostTaskExec",
+    "PreCompact",
+    "PostCompact",
     "Stop",
+    "Manual",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -184,10 +188,6 @@ pub fn save(
     } = draft;
     let event = event.as_str();
     let engine = selected_engine(harness, project)?;
-    validate_event(engine, event)?;
-    if command.trim().is_empty() {
-        return Err("hook command must not be empty".into());
-    }
     let (source, located) = match edit_id.as_deref() {
         Some(id) => {
             let located = locate(harness, project, layer, engine, id)?;
@@ -210,6 +210,10 @@ pub fn save(
             (source, None)
         }
     };
+    validate_event(source.format, event)?;
+    if command.trim().is_empty() {
+        return Err("hook command must not be empty".into());
+    }
     if !source.editable {
         return Err("selected Kiro hook source is read-only".into());
     }
@@ -306,7 +310,7 @@ pub fn delete(
 }
 
 fn selected_engine(harness: &KiroHarness, project: &Path) -> Result<Engine, String> {
-    let mut engine = Engine::V2;
+    let mut engine = None;
     for path in [
         harness.settings_path(),
         harness.project_settings_path(project),
@@ -316,14 +320,14 @@ fn selected_engine(harness: &KiroHarness, project: &Path) -> Result<Engine, Stri
             .as_object()
             .ok_or("Kiro CLI settings must contain a JSON object")?;
         if let Some(value) = settings.get("chat.agentEngine") {
-            engine = match value.as_str() {
-                Some("v2") => Engine::V2,
+            engine = Some(match value.as_str() {
+                Some("v1") | Some("v2") => Engine::V2,
                 Some("v3") => Engine::V3,
-                _ => return Err("Unsupported Kiro chat.agentEngine; expected v2 or v3".into()),
-            };
+                _ => return Err("Unsupported Kiro chat.agentEngine; expected v1, v2, or v3".into()),
+            });
         }
     }
-    Ok(engine)
+    Ok(engine.unwrap_or(Engine::V3))
 }
 
 fn sources_for(
@@ -353,108 +357,81 @@ fn source_roots(
     engine: Engine,
     root: &Path,
 ) -> Result<Vec<Source>, String> {
-    match engine {
-        Engine::V2 => {
-            let agents = root.join("agents");
-            if !agents.is_dir() {
-                return Ok(Vec::new());
+    let mut sources = Vec::new();
+    let agents_root = root.join("agents");
+    if plain_directory(&agents_root)? {
+        for entry in std::fs::read_dir(&agents_root).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+            if atomic::is_link_or_reparse(&metadata) || !metadata.is_file() {
+                continue;
             }
-            let mut sources = Vec::new();
-            for entry in std::fs::read_dir(&agents).map_err(|error| error.to_string())? {
-                let entry = entry.map_err(|error| error.to_string())?;
-                let path = entry.path();
-                let metadata =
-                    std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
-                if atomic::is_link_or_reparse(&metadata)
-                    || !metadata.is_file()
-                    || path.extension().is_none_or(|extension| extension != "json")
-                {
-                    continue;
-                }
-                let agent = path
-                    .file_stem()
-                    .and_then(|name| name.to_str())
-                    .ok_or("invalid Kiro agent filename")?
-                    .to_owned();
-                sources.push(Source {
-                    id: path.to_string_lossy().into_owned(),
-                    label: format!("{} agent: {agent}", layer.label()),
-                    layer,
-                    path,
-                    format: Format::V2Agent,
-                    editable: true,
-                });
-            }
-            sources.sort_by(|left, right| left.id.cmp(&right.id));
-            let _ = (harness, project);
-            Ok(sources)
-        }
-        Engine::V3 => {
-            let mut sources = Vec::new();
-            let agents_root = root.join("agents");
-            if plain_directory(&agents_root)? {
-                for entry in std::fs::read_dir(&agents_root).map_err(|error| error.to_string())? {
-                    let entry = entry.map_err(|error| error.to_string())?;
-                    let path = entry.path();
-                    let metadata =
-                        std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
-                    if atomic::is_link_or_reparse(&metadata) || !metadata.is_file() {
-                        continue;
-                    }
-                    let format = match path.extension().and_then(|extension| extension.to_str()) {
-                        Some("json") => Format::V3Agent,
-                        Some("md") => Format::V3AgentMarkdown,
-                        _ => continue,
-                    };
-                    let agent = path
-                        .file_stem()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("agent");
-                    sources.push(Source {
-                        id: path.to_string_lossy().into_owned(),
-                        label: format!("{} agent: {agent}", layer.label()),
-                        layer,
-                        path,
-                        format,
-                        editable: format == Format::V3Agent,
-                    });
-                }
-            }
-            let hooks_root = root.join("hooks");
-            if plain_directory(&hooks_root)? {
-                for entry in std::fs::read_dir(&hooks_root).map_err(|error| error.to_string())? {
-                    let entry = entry.map_err(|error| error.to_string())?;
-                    let path = entry.path();
-                    let metadata =
-                        std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
-                    if atomic::is_link_or_reparse(&metadata)
-                        || !metadata.is_file()
-                        || path.extension().is_none_or(|extension| extension != "json")
-                    {
-                        continue;
-                    }
-                    sources.push(Source {
-                        id: path.to_string_lossy().into_owned(),
-                        label: format!(
-                            "{} hooks: {}",
-                            layer.label(),
-                            path.file_stem().unwrap_or_default().to_string_lossy()
-                        ),
-                        layer,
-                        path,
-                        format: Format::V3Standalone,
-                        editable: true,
-                    });
-                }
-            }
-            let default = standalone_source(harness, project, layer)?;
-            if !sources.iter().any(|source| source.id == default.id) {
-                sources.push(default);
-            }
-            sources.sort_by(|left, right| left.id.cmp(&right.id));
-            Ok(sources)
+            let format = match path.extension().and_then(|extension| extension.to_str()) {
+                Some("json") => sniff_agent_format(&path, engine)?,
+                Some("md") => Format::V3AgentMarkdown,
+                _ => continue,
+            };
+            let agent = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or("agent");
+            sources.push(Source {
+                id: path.to_string_lossy().into_owned(),
+                label: format!("{} agent: {agent}", layer.label()),
+                layer,
+                path,
+                format,
+                editable: format != Format::V3AgentMarkdown,
+            });
         }
     }
+    let hooks_root = root.join("hooks");
+    if plain_directory(&hooks_root)? {
+        for entry in std::fs::read_dir(&hooks_root).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+            if atomic::is_link_or_reparse(&metadata)
+                || !metadata.is_file()
+                || path.extension().is_none_or(|extension| extension != "json")
+            {
+                continue;
+            }
+            sources.push(Source {
+                id: path.to_string_lossy().into_owned(),
+                label: format!(
+                    "{} hooks: {}",
+                    layer.label(),
+                    path.file_stem().unwrap_or_default().to_string_lossy()
+                ),
+                layer,
+                path,
+                format: Format::V3Standalone,
+                editable: true,
+            });
+        }
+    }
+    if engine == Engine::V3 {
+        let default = standalone_source(harness, project, layer)?;
+        if !sources.iter().any(|source| source.id == default.id) {
+            sources.push(default);
+        }
+    }
+    sources.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(sources)
+}
+
+fn sniff_agent_format(path: &Path, engine: Engine) -> Result<Format, String> {
+    let document = store::read_value(path)?;
+    Ok(match document.get("hooks") {
+        Some(Value::Object(_)) => Format::V2Agent,
+        Some(Value::Array(_)) => Format::V3Agent,
+        _ => match engine {
+            Engine::V2 => Format::V2Agent,
+            Engine::V3 => Format::V3Agent,
+        },
+    })
 }
 
 fn standalone_source(
@@ -908,17 +885,19 @@ fn set_optional_string(object: &mut Map<String, Value>, key: &str, value: Option
     }
 }
 
-fn validate_event(engine: Engine, event: &str) -> Result<(), String> {
-    let allowed = match engine {
-        Engine::V2 => V2_EVENTS,
-        Engine::V3 => V3_EVENTS,
-    };
-    if allowed.contains(&event) {
+fn is_v3_compat_event(event: &str) -> bool {
+    event == "AgentSpawn" || V2_EVENTS.contains(&event)
+}
+
+fn validate_event(format: Format, event: &str) -> Result<(), String> {
+    let v3 = format != Format::V2Agent;
+    let allowed = if v3 { V3_EVENTS } else { V2_EVENTS };
+    if allowed.contains(&event) || (v3 && is_v3_compat_event(event)) {
         Ok(())
     } else {
         Err(format!(
             "unsupported Kiro {} hook trigger `{event}`",
-            if engine == Engine::V2 { "V2" } else { "V3" }
+            if v3 { "V3" } else { "V2" }
         ))
     }
 }
@@ -943,8 +922,12 @@ mod tests {
         .unwrap();
 
         let source_list = sources(&harness, &project).unwrap();
-        assert_eq!(source_list.len(), 1);
-        assert!(Path::new(&source_list[0].id).ends_with("agents/reviewer.json"));
+        assert_eq!(source_list.len(), 3);
+        let reviewer = source_list
+            .iter()
+            .find(|source| Path::new(&source.id).ends_with("agents/reviewer.json"))
+            .unwrap();
+        assert_eq!(reviewer.events, V2_EVENTS);
         let hooks = list(&harness, &project).unwrap();
         assert_eq!(hooks[0].commands, ["old"]);
         assert!(
@@ -961,13 +944,28 @@ mod tests {
                 matcher: None,
                 command: "new".into(),
                 edit_id: Some(hooks[0].id.clone()),
-                source_id: Some(source_list[0].id.clone()),
+                source_id: Some(reviewer.id.clone()),
             },
         )
         .unwrap();
         let saved = store::read_value(&agent).unwrap();
         assert_eq!(saved["hooks"]["postToolUse"][0]["command"], "new");
         assert!(saved["hooks"].get("preToolUse").is_none());
+        let hooks = list(&harness, &project).unwrap();
+        assert!(save(
+            &harness,
+            &project,
+            crate::harness::HookDraft {
+                layer: SettingsLayer::User,
+                event: "SessionEnd".into(),
+                matcher: None,
+                command: "new".into(),
+                edit_id: Some(hooks[0].id.clone()),
+                source_id: Some(reviewer.id.clone()),
+            },
+        )
+        .unwrap_err()
+        .contains("unsupported Kiro V2 hook trigger"));
     }
 
     #[test]
@@ -1046,8 +1044,13 @@ mod tests {
             json!({"name":"worker","hooks":{"agentSpawn":[{"command":"echo start"}]}}).to_string(),
         )
         .unwrap();
-        assert!(!sources(&harness, root.path()).unwrap()[0].can_toggle);
-        assert_eq!(sources(&harness, root.path()).unwrap()[0].events, V2_EVENTS);
+        let source = sources(&harness, root.path())
+            .unwrap()
+            .into_iter()
+            .find(|source| source.id.ends_with("worker.json"))
+            .unwrap();
+        assert!(!source.can_toggle);
+        assert_eq!(source.events, V2_EVENTS);
     }
 
     #[test]
@@ -1167,5 +1170,157 @@ mod tests {
                 .unwrap_err()
                 .contains("read-only")
         );
+    }
+
+    #[test]
+    fn unset_agent_engine_defaults_to_v3_saving_standalone_hooks() {
+        let root = crate::test_support::tempdir().unwrap();
+        let home = root.path().join("home/.kiro");
+        let harness = KiroHarness::new(home.clone());
+        let project = root.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        save(
+            &harness,
+            &project,
+            crate::harness::HookDraft {
+                layer: SettingsLayer::User,
+                event: "SessionEnd".into(),
+                matcher: None,
+                command: "fixture-command".into(),
+                edit_id: None,
+                source_id: None,
+            },
+        )
+        .unwrap();
+        let saved = store::read_value(&home.join("hooks/orbit-hooks.json")).unwrap();
+        assert_eq!(saved["version"], "v1");
+        assert_eq!(saved["hooks"][0]["trigger"], "SessionEnd");
+        let offered = sources(&harness, &project).unwrap();
+        assert_eq!(offered.len(), 2);
+        assert!(offered.iter().all(|source| source.events == V3_EVENTS));
+    }
+
+    #[test]
+    fn v3_new_triggers_are_accepted() {
+        let root = crate::test_support::tempdir().unwrap();
+        let home = root.path().join("home/.kiro");
+        let harness = KiroHarness::new(home.clone());
+        std::fs::create_dir_all(home.join("settings")).unwrap();
+        std::fs::write(harness.settings_path(), br#"{"chat.agentEngine":"v3"}"#).unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        for event in ["SessionEnd", "PreCompact", "PostCompact", "Manual"] {
+            save(
+                &harness,
+                &project,
+                crate::harness::HookDraft {
+                    layer: SettingsLayer::User,
+                    event: event.into(),
+                    matcher: None,
+                    command: "fixture-command".into(),
+                    edit_id: None,
+                    source_id: None,
+                },
+            )
+            .unwrap();
+        }
+        let listed = list(&harness, &project).unwrap();
+        assert_eq!(listed.len(), 4);
+        for event in ["SessionEnd", "PreCompact", "PostCompact", "Manual"] {
+            assert!(listed.iter().any(|hook| hook.event == event));
+        }
+    }
+
+    #[test]
+    fn v3_compat_spellings_edit_hooks_but_stay_unlisted() {
+        let root = crate::test_support::tempdir().unwrap();
+        let home = root.path().join("home/.kiro");
+        let harness = KiroHarness::new(home.clone());
+        std::fs::create_dir_all(home.join("settings")).unwrap();
+        std::fs::create_dir_all(home.join("hooks")).unwrap();
+        std::fs::write(harness.settings_path(), br#"{"chat.agentEngine":"v3"}"#).unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let path = home.join("hooks/native.json");
+        std::fs::write(
+            &path,
+            br#"{"version":"v1","hooks":[{"name":"spawn","trigger":"SessionStart","action":{"type":"command","command":"echo hi"}}]}"#,
+        )
+        .unwrap();
+
+        for spelling in ["agentSpawn", "AgentSpawn"] {
+            let target = list(&harness, &project).unwrap().pop().unwrap();
+            save(
+                &harness,
+                &project,
+                crate::harness::HookDraft {
+                    layer: SettingsLayer::User,
+                    event: spelling.into(),
+                    matcher: None,
+                    command: "echo hi".into(),
+                    edit_id: Some(target.id.clone()),
+                    source_id: None,
+                },
+            )
+            .unwrap();
+            let saved = store::read_value(&path).unwrap();
+            assert_eq!(saved["hooks"][0]["trigger"], spelling);
+        }
+        let target = list(&harness, &project).unwrap().pop().unwrap();
+        assert!(save(
+            &harness,
+            &project,
+            crate::harness::HookDraft {
+                layer: SettingsLayer::User,
+                event: "Bogus".into(),
+                matcher: None,
+                command: "echo hi".into(),
+                edit_id: Some(target.id),
+                source_id: None,
+            },
+        )
+        .unwrap_err()
+        .contains("unsupported Kiro V3 hook trigger"));
+        for source in sources(&harness, &project).unwrap() {
+            assert_eq!(source.events, V3_EVENTS);
+        }
+    }
+
+    #[test]
+    fn v1_agent_engine_is_legacy_v2() {
+        let root = crate::test_support::tempdir().unwrap();
+        let harness = KiroHarness::new(root.path().join("home/.kiro"));
+        std::fs::create_dir_all(harness.home().join("settings")).unwrap();
+        std::fs::create_dir_all(harness.home().join("agents")).unwrap();
+        std::fs::write(harness.settings_path(), br#"{"chat.agentEngine":"v1"}"#).unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let agent = harness.home().join("agents/worker.json");
+        std::fs::write(
+            &agent,
+            json!({"name":"worker","hooks":{"agentSpawn":[{"command":"echo start"}]}}).to_string(),
+        )
+        .unwrap();
+
+        let choices = sources(&harness, &project).unwrap();
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].events, V2_EVENTS);
+        let hooks = list(&harness, &project).unwrap();
+        assert!(save(
+            &harness,
+            &project,
+            crate::harness::HookDraft {
+                layer: SettingsLayer::User,
+                event: "PreToolUse".into(),
+                matcher: None,
+                command: "new".into(),
+                edit_id: Some(hooks[0].id.clone()),
+                source_id: None,
+            },
+        )
+        .unwrap_err()
+        .contains("unsupported Kiro V2 hook trigger"));
     }
 }

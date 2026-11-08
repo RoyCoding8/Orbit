@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1
+
+### Changed
+
+- Kiro V3 refresh: new hook triggers SessionEnd, PreCompact, PostCompact, and Manual, with V3 trigger spelling compatibility. `chat.agentEngine` now defaults to V3 semantics with legacy V2 profile detection. Documentation refreshed for local Kiro Memory and V3 session boundaries.
+
 ## 0.4.0
 
 ### Added

@@ -11,7 +11,7 @@ Orbit works with each agent's native files and installed CLI. Features vary by a
 | Skills | User skills and visibility controls | User, project, and plugin discovery; enable/disable | User/project skills | Native and shared skills | Folders and standalone Markdown skills | Shared and CLI-only skills; discovery manifests |
 | Memories and instructions | Project auto-memory and Claude instructions | Shared memory Markdown and scoped AGENTS instructions | Steering and AGENTS instructions | AGENTS and configured local instructions | AGENTS/CLAUDE hierarchy and system prompts | AGENTS, GEMINI, and modular rules |
 | MCP | Local and HTTP servers | Local and HTTP servers | Local and HTTP servers | Native v2 `mcp.servers` | Local and streamable HTTP servers | Shared local and streamable HTTP servers |
-| Hooks | Command editing, toggles, tests | Command editing and tests; native approval | V2 agent hooks and V3 hooks | Plugin list in Settings | Extension list in Settings | Named command groups, toggles, tests |
+| Hooks | Command editing, toggles, tests | Command editing and tests; native approval | V2 agent profiles and V3 profiles plus standalone `.kiro/hooks/*.json` files | Plugin list in Settings | Extension list in Settings | Named command groups, toggles, tests |
 | Settings | User/project/local JSON | User/trusted project TOML | User/project CLI JSON | User/project JSON or JSONC | User/project JSON | User-wide CLI preferences |
 | Chat archives | Export/import | Export/import | V2 ACP source backup only | Export/import through native v2 CLI | Export/import of v3 JSONL sessions | App/CLI export/import through agy 1.5.0 |
 | Chat conversion | Source and destination | Source and destination | V2 ACP source only | Source and destination | Source and destination | Source and CLI destination |
@@ -21,7 +21,7 @@ History provides saved versions, restoration, backup deletion, and separate oper
 
 Orbit does not offer individual skill availability controls for Kiro, OpenCode, Pi, or Antigravity; removal saves a restorable version. Inherited resources outside the selected project are read-only. MCP editing covers user configuration; project and runtime overrides can affect the running agent.
 
-Kiro's learned memories remain in its account service. OpenCode and Pi have no built-in generated-memory file catalog. OpenCode plugins and Pi extensions are configured in Settings; their code is managed outside the command-hook editor.
+Kiro's learned memories live in a local memory database under `KIRO_HOME` managed by Kiro, which Orbit does not read or edit; steering and AGENTS instructions remain covered by Orbit. OpenCode and Pi have no built-in generated-memory file catalog. OpenCode plugins and Pi extensions are configured in Settings; their code is managed outside the command-hook editor.
 
 ## Chats
 
@@ -33,7 +33,7 @@ Choose **Index chats** to build message search across the catalog. A progress ba
 
 OpenCode v2 lists projects known to its native CLI, including child sessions. Pi lists its default session folders and the selected project's configured session directory. Select a project and refresh to include its custom directory; previously indexed custom projects remain visible. Unknown custom directories and explicit CLI session-directory overrides are not discovered automatically.
 
-Kiro supports local V2 ACP sessions. V3, terminal, and cloud sessions are not included.
+Orbit reads local V2 ACP sessions from `KIRO_HOME/sessions/cli`. Kiro CLI 3.x defaults to V3, whose sessions live in a separate store with no documented client layout (upstream points clients to session APIs and `/chat save` zip archives), so V3, terminal, and cloud sessions are not included.
 
 ### Export and import
 
