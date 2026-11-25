@@ -5,8 +5,7 @@
 
 use super::archive::{ArchiveAction, ArchiveReport};
 use super::ingest::{
-    file_fingerprint, open_database, prune_vanished_sessions, replace_indexed_session,
-    unchanged_source, IndexedMessage, IndexedSession, IngestReport,
+    open_database, replace_indexed_session, IndexedMessage, IndexedSession, IngestReport,
 };
 use super::jsonl::{read_bounded_line, LineStatus};
 use super::TranscriptError;
@@ -31,119 +30,6 @@ pub(super) struct SessionHeader {
     pub(super) title: Option<String>,
     #[serde(default)]
     pub(super) updated_at: Option<String>,
-}
-
-/// Read the documented CLI v2 ACP session files beneath `KIRO_HOME` and
-/// replace their normalized records in Orbit's transcript cache.
-pub fn ingest(config_root: &Path, app_data_dir: &Path) -> Result<IngestReport, TranscriptError> {
-    let session_root = config_root.join("sessions").join("cli");
-    crate::harness::claude::skills::ensure_plain_components(&session_root)
-        .map_err(|_| TranscriptError::InvalidRoot)?;
-    let mut connection = open_database(app_data_dir)?;
-    let mut report = IngestReport {
-        sessions: 0,
-        lines_read: 0,
-        messages_indexed: 0,
-        malformed_lines: 0,
-        skipped_files: 0,
-        skipped_state_lines: 0,
-    };
-    let root_metadata = match fs::symlink_metadata(&session_root) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            prune_vanished_sessions(&mut connection, &[])?;
-            return Ok(report);
-        }
-        Err(error) => return Err(error.into()),
-    };
-    if atomic::is_link_or_reparse(&root_metadata) || !root_metadata.is_dir() {
-        return Err(TranscriptError::InvalidRoot);
-    }
-
-    let mut headers = Vec::new();
-    for entry in fs::read_dir(&session_root)? {
-        let entry = entry?;
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if !name.ends_with(".json") || name.ends_with(".history.json") {
-            continue;
-        }
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
-        };
-        if atomic::is_link_or_reparse(&metadata) || !metadata.is_file() {
-            continue;
-        }
-        headers.push(path);
-    }
-    headers.sort();
-
-    let mut seen_paths = Vec::with_capacity(headers.len());
-
-    for header_path in headers {
-        let Some(session_id) = header_path.file_stem().and_then(|stem| stem.to_str()) else {
-            report.skipped_files += 1;
-            continue;
-        };
-        let log_path = header_path.with_extension("jsonl");
-        if !plain_file(&log_path)? {
-            report.skipped_files += 1;
-            continue;
-        }
-        seen_paths.push(log_path.to_string_lossy().into_owned());
-
-        let fingerprint = match (
-            file_fingerprint(&log_path, None),
-            file_fingerprint(&header_path, None),
-        ) {
-            (Some(log), Some(header)) => Some(format!("{log}|{header}")),
-            _ => None,
-        };
-        if let Some(fingerprint) = &fingerprint {
-            if unchanged_source(
-                &connection,
-                seen_paths.last().map(String::as_str).unwrap(),
-                fingerprint,
-            )? {
-                report.sessions += 1;
-                continue;
-            }
-        }
-
-        let header = match read_header(&header_path) {
-            Ok(Some(header))
-                if header.session_id == session_id && !header.cwd.trim().is_empty() =>
-            {
-                header
-            }
-            _ => {
-                report.skipped_files += 1;
-                continue;
-            }
-        };
-
-        match ingest_session(
-            &mut connection,
-            &header,
-            &log_path,
-            &mut report,
-            fingerprint.as_deref(),
-        ) {
-            Ok(indexed) => {
-                report.sessions += 1;
-                report.messages_indexed += indexed;
-            }
-            Err(TranscriptError::Io(_)) => report.skipped_files += 1,
-            Err(error) => return Err(error),
-        }
-    }
-
-    prune_vanished_sessions(&mut connection, &seen_paths)?;
-    Ok(report)
 }
 
 /// Copy a Kiro v2 session's native header and event log into a new directory.
@@ -492,8 +378,14 @@ fn visible_text(content: Option<&Value>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transcript::spine;
+    use crate::harness::{kiro::KiroHarness, selected::SelectedHarness};
+    use crate::transcript::{catalog, spine};
     use serde_json::json;
+
+    fn index_kiro(config_root: &Path, app: &Path) -> Result<IngestReport, String> {
+        let harness = SelectedHarness::Kiro(KiroHarness::new(config_root.into()));
+        catalog::index_all(&harness, app, config_root, |_| {})
+    }
 
     fn write_jsonl(path: &Path, records: &[Value]) {
         let mut bytes = Vec::new();
@@ -534,8 +426,9 @@ mod tests {
             ],
         );
 
-        let cache = root.path().join("cache");
-        let report = ingest(&config_root, &cache).unwrap();
+        let app = root.path().join("app");
+        let cache = app.join("kiro");
+        let report = index_kiro(&config_root, &app).unwrap();
         let sessions = crate::transcript::ingest::list_sessions(&cache).unwrap();
         let messages =
             spine::thread_page(&cache, &format!("{SESSION_PREFIX}{session_id}"), 0, 20).unwrap();
@@ -617,8 +510,9 @@ mod tests {
         )
         .unwrap();
 
-        let cache = root.path().join("cache");
-        let report = ingest(&config_root, &cache).unwrap();
+        let app = root.path().join("app");
+        let cache = app.join("kiro");
+        let report = index_kiro(&config_root, &app).unwrap();
         let messages =
             spine::thread_page(&cache, &format!("{SESSION_PREFIX}{session_id}"), 0, 20).unwrap();
 

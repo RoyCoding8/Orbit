@@ -18,9 +18,8 @@ use crate::{
         claude::config::{
             masked_value, ConfigLayer, ConfigSnapshot, EffectiveSetting, SettingsLayer,
         },
-        claude::skills::{ensure_plain_components, ensure_plain_file_if_present},
         credentials::{contains_mask, restore_masked},
-        Harness, ResourceKind,
+        fs_guard, Harness, ResourceKind,
     },
     ledger,
 };
@@ -215,6 +214,7 @@ fn read_layer(name: &str, path: PathBuf) -> Result<ConfigLayer, String> {
 }
 
 fn read_object(path: &Path) -> Result<Map<String, Value>, String> {
+    fs_guard::ensure_plain_path(path)?;
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
@@ -232,6 +232,7 @@ fn read_object(path: &Path) -> Result<Map<String, Value>, String> {
 }
 
 pub(crate) fn read_config_value(path: &Path) -> Result<Value, String> {
+    fs_guard::ensure_plain_path(path)?;
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -270,8 +271,7 @@ pub(crate) fn mutate_jsonc(
     action: &str,
     edit: impl FnOnce(&jsonc_parser::cst::CstObject) -> Result<(), String>,
 ) -> Result<(), String> {
-    ensure_plain_components(path)?;
-    ensure_plain_file_if_present(path)?;
+    fs_guard::prepare_plain_parent(path)?;
     let original = match fs::read(path) {
         Ok(bytes) => Some(bytes),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -297,8 +297,7 @@ pub(crate) fn mutate_jsonc(
         Some(bytes) => RecordedWrite::Restore(Sha256::digest(&bytes).into(), updated.as_bytes()),
         None => RecordedWrite::Create(updated.as_bytes()),
     };
-    ensure_plain_components(path)?;
-    ensure_plain_file_if_present(path)?;
+    fs_guard::ensure_plain_path(path)?;
     let backup = ledger::backup_path(harness.config_root(), id, action);
     ledger::write(
         harness.config_root(),
@@ -402,5 +401,23 @@ mod tests {
             ),
             child.join("opencode.json")
         );
+    }
+
+    #[test]
+    fn apply_value_creates_missing_config_parent_directory() {
+        let temp = tempdir().unwrap();
+        let config_root = temp.path().join("missing/opencode");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let harness = OpenCodeHarness::new(config_root.clone(), temp.path().to_owned());
+        apply_value(
+            &harness,
+            &project,
+            SettingsLayer::User,
+            "model",
+            Value::String("openai/gpt-5".into()),
+        )
+        .unwrap();
+        assert!(config_root.join("opencode.json").is_file());
     }
 }

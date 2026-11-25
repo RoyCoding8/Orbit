@@ -3,9 +3,10 @@ import { M3eButton } from "@m3e/react/button";
 import { M3eFormField } from "@m3e/react/form-field";
 import { M3eOption } from "@m3e/react/option";
 import { M3eSelect, type M3eSelectElement } from "@m3e/react/select";
-import { useHarness } from "../HarnessContext";
-import { displayPath } from "../pathDisplay";
-import { clients, harnesses, isClient, type Client } from "../harnesses";
+import { useHarness } from "../lib/HarnessContext";
+import { displayPath } from "../lib/pathDisplay";
+import { clients, harnesses, isClient, type Client } from "../lib/harnesses";
+import { useModalDialog } from "../lib/useModalDialog";
 
 type Preview = {
   workingDirectory: string;
@@ -34,14 +35,8 @@ export function ChatConversion({ sessionId, onClose, onConverted }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<ConversionReport | null>(null);
-  const dialog = useRef<HTMLDialogElement>(null);
+  const dialog = useModalDialog(true);
   const destination = useRef<M3eSelectElement>(null);
-
-  useEffect(() => {
-    const current = dialog.current;
-    current?.showModal();
-    return () => { if (current?.open) current.close(); };
-  }, []);
 
   useEffect(() => {
     let active = true;

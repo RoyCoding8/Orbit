@@ -4,7 +4,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    harness::{atomic, claude::config::ConfigLayer, Harness, ResourceKind},
+    harness::{atomic, claude::config::ConfigLayer, fs_guard, Harness, ResourceKind},
     ledger,
 };
 
@@ -59,7 +59,7 @@ pub(crate) fn apply_setting(
 }
 
 pub(crate) fn read_value(path: &Path) -> Result<Value, String> {
-    ensure_plain(path)?;
+    fs_guard::ensure_plain_path(path)?;
     match fs::read(path) {
         Ok(bytes) => {
             serde_json::from_slice(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes))
@@ -78,11 +78,7 @@ pub(crate) fn mutate_json(
     path: &Path,
     edit: impl FnOnce(&mut Value) -> Result<(), String>,
 ) -> Result<(), String> {
-    let parent = path.parent().ok_or("path has no parent")?;
-    crate::harness::claude::skills::ensure_plain_parent(path)?;
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("failed creating {}: {error}", parent.display()))?;
-    ensure_plain(path)?;
+    fs_guard::prepare_plain_parent(path)?;
     let original = match fs::read(path) {
         Ok(bytes) => Some(bytes),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -110,7 +106,7 @@ pub(crate) fn mutate_json(
         }
         None => atomic::RecordedWrite::Create(updated.as_slice()),
     };
-    ensure_plain(path)?;
+    fs_guard::ensure_plain_path(path)?;
     let backup = ledger::backup_path(harness.config_root(), id, action);
     ledger::write(
         harness.config_root(),
@@ -132,7 +128,7 @@ pub(crate) fn delete_file(
     action: &str,
     path: &Path,
 ) -> Result<(), String> {
-    ensure_plain(path)?;
+    fs_guard::ensure_plain_path(path)?;
     let bytes =
         fs::read(path).map_err(|error| format!("failed reading {}: {error}", path.display()))?;
     let backup = ledger::backup_path(harness.config_root(), id, action);
@@ -146,9 +142,4 @@ pub(crate) fn delete_file(
         &backup,
     )
     .map_err(|error| error.to_string())
-}
-
-fn ensure_plain(path: &Path) -> Result<(), String> {
-    crate::harness::claude::skills::ensure_plain_components(path)?;
-    crate::harness::claude::skills::ensure_plain_file_if_present(path)
 }

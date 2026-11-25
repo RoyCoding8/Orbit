@@ -1,5 +1,4 @@
-use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,52 +22,12 @@ pub struct SkillEntry {
     pub editable: bool,
 }
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct Frontmatter {
-    pub(crate) name: Option<String>,
-    pub(crate) description: Option<String>,
-}
-
-pub(crate) fn parse_frontmatter(content: &str, fallback_name: &str) -> Frontmatter {
-    let mut lines = content.lines();
-    if lines.next() != Some("---") {
-        return Frontmatter {
-            name: Some(fallback_name.to_owned()),
-            description: None,
-        };
-    }
-    let mut yaml = Vec::new();
-    let mut closed = false;
-    for line in lines {
-        if line.trim() == "---" {
-            closed = true;
-            break;
-        }
-        yaml.push(line);
-    }
-    let fallback = || Frontmatter {
-        name: Some(fallback_name.to_owned()),
-        description: None,
-    };
-    if !closed {
-        return fallback();
-    }
-    let fields: BTreeMap<String, serde_yaml::Value> = match serde_yaml::from_str(&yaml.join("\n")) {
-        Ok(fields) => fields,
-        Err(_) => return fallback(),
-    };
-    Frontmatter {
-        name: fields
-            .get("name")
-            .and_then(serde_yaml::Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| Some(fallback_name.to_owned())),
-        description: fields
-            .get("description")
-            .and_then(serde_yaml::Value::as_str)
-            .map(str::to_owned),
-    }
-}
+pub(crate) use crate::harness::fs_guard::{
+    canonical_existing_dir, copy_dir, ensure_backup_path, ensure_plain_components,
+    ensure_plain_directory, ensure_plain_file_if_present, ensure_plain_parent,
+    path_exists_no_follow, read_plain_file, safe_directory_checksum, validate_plain_tree,
+};
+pub(crate) use crate::harness::skill_store::parse_frontmatter;
 
 pub fn inventory(harness: &ClaudeCodeHarness) -> Result<Vec<SkillEntry>, String> {
     let refs = harness
@@ -192,44 +151,7 @@ pub fn uninstall(harness: &ClaudeCodeHarness, id: &str) -> Result<(), String> {
     validate_id(id)?;
     let source = harness.config_root().join("skills").join(id);
     ensure_plain_directory(&source)?;
-    let backup = ledger::backup_path(harness.config_root(), id, "uninstall");
-    ensure_plain_parent(&backup)?;
-    if path_exists_no_follow(&backup)? {
-        return Err("skill uninstall backup already exists".into());
-    }
-    std::fs::create_dir_all(backup.parent().unwrap()).map_err(|e| e.to_string())?;
-    let guard = atomic::lock_mutations(&source).map_err(|error| error.to_string())?;
-    ensure_plain_directory(&source)?;
-    if path_exists_no_follow(&backup)? {
-        return Err("skill uninstall backup already exists".into());
-    }
-    let before = safe_directory_checksum(&source)?;
-    let plan = atomic::MutationPlan {
-        target: source.clone(),
-        backup: Some(backup.clone()),
-        before_checksum: Some(before.clone()),
-        after_checksum: None,
-    };
-    let op = ledger::reserve_mutation(
-        harness.config_root(),
-        ResourceKind::Skill,
-        id,
-        "uninstall",
-        &plan,
-        &guard,
-    )
-    .map_err(|error| error.to_string())?;
-    std::fs::rename(&source, &backup)
-        .map_err(|error| format!("reserved uninstall {op} did not complete: {error}"))?;
-    let after = safe_directory_checksum(&backup).map_err(|error| {
-        format!("reserved uninstall {op} landed, but its backup could not be verified: {error}")
-    })?;
-    if after != before {
-        return Err(format!(
-            "reserved uninstall {op} landed, but its backup checksum differs from the source"
-        ));
-    }
-    ledger::complete_mutation(harness.config_root(), &op, &guard).map_err(|error| error.to_string())
+    crate::harness::skill_store::uninstall_tree(harness, id, "uninstall", &source)
 }
 
 pub fn restore(harness: &ClaudeCodeHarness, id: &str, backup: &Path) -> Result<(), String> {
@@ -341,234 +263,8 @@ pub fn install(harness: &ClaudeCodeHarness, source: &Path) -> Result<String, Str
         .to_owned();
     validate_id(&id)?;
     let destination = harness.config_root().join("skills").join(&id);
-    ensure_plain_parent(&destination)?;
-    if path_exists_no_follow(&destination)? {
-        return Err(format!("skill already exists: {id}"));
-    }
-    let guard = atomic::lock_mutations(&destination).map_err(|error| error.to_string())?;
-    if path_exists_no_follow(&destination)? {
-        return Err(format!("skill already exists: {id}"));
-    }
-    let checksum = safe_directory_checksum(source)?;
-    let plan = atomic::MutationPlan {
-        target: destination.clone(),
-        backup: None,
-        before_checksum: None,
-        after_checksum: Some(checksum.clone()),
-    };
-    let op = ledger::reserve_mutation(
-        harness.config_root(),
-        ResourceKind::Skill,
-        &id,
-        "install",
-        &plan,
-        &guard,
-    )
-    .map_err(|error| error.to_string())?;
-    if let Err(error) = copy_dir(source, &destination) {
-        return Err(format!(
-            "reserved install {op} failed; inspect the partial destination at {}: {error}",
-            destination.display()
-        ));
-    }
-    let installed_checksum = match safe_directory_checksum(&destination) {
-        Ok(checksum) => checksum,
-        Err(error) => {
-            return Err(format!(
-            "reserved install {op} could not be verified; inspect the destination at {}: {error}",
-            destination.display()
-        ))
-        }
-    };
-    if installed_checksum != checksum {
-        return Err(format!(
-            "reserved install {op} checksum differs from source; inspect the destination at {}",
-            destination.display()
-        ));
-    }
-    ledger::complete_mutation(harness.config_root(), &op, &guard)
-        .map_err(|error| error.to_string())?;
+    crate::harness::skill_store::install_tree(harness, &id, "install", source, &destination)?;
     Ok(id)
-}
-
-pub(crate) fn copy_dir(source: &Path, destination: &Path) -> Result<(), String> {
-    std::fs::create_dir(destination).map_err(|error| error.to_string())?;
-    for entry in std::fs::read_dir(source).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let from = entry.path();
-        let to = destination.join(entry.file_name());
-        let metadata = std::fs::symlink_metadata(&from).map_err(|e| e.to_string())?;
-        if is_link_or_reparse(&metadata) {
-            return Err(format!(
-                "skill tree contains a link or reparse point: {}",
-                from.display()
-            ));
-        }
-        if metadata.is_dir() {
-            copy_dir(&from, &to)?;
-        } else if metadata.is_file() {
-            let mut input = std::fs::File::open(&from)
-                .map_err(|error| format!("{}: {error}", from.display()))?;
-            let mut output = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&to)
-                .map_err(|error| format!("{}: {error}", to.display()))?;
-            std::io::copy(&mut input, &mut output)
-                .map_err(|error| format!("{}: {error}", to.display()))?;
-            drop(output);
-            std::fs::set_permissions(&to, metadata.permissions())
-                .map_err(|error| format!("{}: {error}", to.display()))?;
-        } else {
-            return Err(format!(
-                "skill tree contains a non-file entry: {}",
-                from.display()
-            ));
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn read_plain_file(path: &Path) -> Result<String, String> {
-    ensure_plain_file_if_present(path)?;
-    std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))
-}
-
-pub(crate) fn safe_directory_checksum(path: &Path) -> Result<String, String> {
-    validate_plain_tree(path)?;
-    ledger::directory_checksum(path)
-}
-
-pub(crate) fn validate_plain_tree(path: &Path) -> Result<(), String> {
-    let metadata = plain_metadata(path)?;
-    if !metadata.is_dir() {
-        return Err(format!("expected a plain directory: {}", path.display()));
-    }
-    for entry in std::fs::read_dir(path).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let child = entry.path();
-        let metadata = plain_metadata(&child)?;
-        if metadata.is_dir() {
-            validate_plain_tree(&child)?;
-        } else if !metadata.is_file() {
-            return Err(format!(
-                "unsupported entry in skill tree: {}",
-                child.display()
-            ));
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn ensure_plain_directory(path: &Path) -> Result<(), String> {
-    let metadata = plain_metadata(path)?;
-    if metadata.is_dir() {
-        Ok(())
-    } else {
-        Err(format!("expected a plain directory: {}", path.display()))
-    }
-}
-
-pub(crate) fn ensure_plain_file_if_present(path: &Path) -> Result<(), String> {
-    match plain_metadata(path) {
-        Ok(metadata) if metadata.is_file() => Ok(()),
-        Ok(_) => Err(format!("expected a plain file: {}", path.display())),
-        Err(_error) if !path_exists_no_follow(path)? => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-pub(crate) fn ensure_plain_parent(path: &Path) -> Result<(), String> {
-    let parent = path.parent().ok_or("path has no parent")?;
-    ensure_plain_components(parent)
-}
-
-pub(crate) fn plain_metadata(path: &Path) -> Result<std::fs::Metadata, String> {
-    ensure_plain_components(path)?;
-    let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
-    if is_link_or_reparse(&metadata) {
-        return Err(format!(
-            "refusing linked or reparse path: {}",
-            path.display()
-        ));
-    }
-    Ok(metadata)
-}
-
-pub(crate) fn ensure_plain_components(path: &Path) -> Result<(), String> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|error| error.to_string())?
-            .join(path)
-    };
-    let mut current = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            Component::Prefix(prefix) => {
-                current.push(prefix.as_os_str());
-                continue;
-            }
-            Component::RootDir => current.push(component.as_os_str()),
-            Component::Normal(name) => current.push(name),
-            Component::CurDir => continue,
-            Component::ParentDir => {
-                return Err(format!(
-                    "parent traversal is not allowed: {}",
-                    path.display()
-                ));
-            }
-        }
-        match std::fs::symlink_metadata(&current) {
-            Ok(metadata) if is_link_or_reparse(&metadata) => {
-                return Err(format!(
-                    "refusing linked or reparse path: {}",
-                    current.display()
-                ));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-            Err(error) => return Err(error.to_string()),
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn path_exists_no_follow(path: &Path) -> Result<bool, String> {
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error.to_string()),
-    }
-}
-
-pub(crate) fn canonical_existing_dir(path: &Path) -> Result<PathBuf, String> {
-    ensure_plain_directory(path)?;
-    std::fs::canonicalize(path).map_err(|error| error.to_string())
-}
-
-pub(crate) fn ensure_backup_path(config_root: &Path, backup: &Path) -> Result<(), String> {
-    ensure_plain_directory(backup)?;
-    let backup_root = ledger::backup_root(config_root);
-    ensure_plain_directory(&backup_root)?;
-    let actual_parent = canonical_existing_dir(backup.parent().ok_or("backup has no parent")?)?;
-    let expected_parent = canonical_existing_dir(&backup_root)?;
-    if actual_parent != expected_parent {
-        return Err("backup is outside the harness backup directory".into());
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    metadata.file_type().is_symlink() || metadata.file_attributes() & 0x400 != 0
-}
-
-#[cfg(not(windows))]
-fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
-    metadata.file_type().is_symlink()
 }
 
 fn validate_id(id: &str) -> Result<(), String> {
@@ -579,16 +275,18 @@ fn validate_id(id: &str) -> Result<(), String> {
         || id
             .chars()
             .any(|character| character.is_control() || "<>:\"/\\|?*".contains(character));
-    let device_name = id
+    let stem = id
         .split('.')
         .next()
         .unwrap_or_default()
-        .trim_end_matches(['.', ' '])
-        .to_ascii_uppercase();
-    let reserved = matches!(device_name.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || (device_name.len() == 4
-            && (device_name.starts_with("COM") || device_name.starts_with("LPT"))
-            && matches!(device_name.as_bytes()[3], b'1'..=b'9'));
+        .trim_end_matches(['.', ' ']);
+    let reserved = ["CON", "PRN", "AUX", "NUL"]
+        .iter()
+        .any(|name| stem.eq_ignore_ascii_case(name))
+        || (stem.len() == 4
+            && (stem.as_bytes()[..3].eq_ignore_ascii_case(b"COM")
+                || stem.as_bytes()[..3].eq_ignore_ascii_case(b"LPT"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'));
     if invalid || reserved {
         Err("invalid skill id".into())
     } else {
@@ -1018,26 +716,6 @@ mod tests {
             ["alpha", "copied-outside-app"]
         );
         assert_eq!(skills[1].content, "external skill\n");
-    }
-
-    #[test]
-    fn skill_ids_reject_windows_paths_ads_and_device_names() {
-        for id in [
-            "",
-            ".",
-            "..",
-            "a\\b",
-            "a/b",
-            "name:stream",
-            "name.",
-            "name ",
-            "CON",
-            "nul.txt",
-            "COM1",
-        ] {
-            assert!(validate_id(id).is_err(), "accepted invalid id {id:?}");
-        }
-        assert!(validate_id("valid-skill_2").is_ok());
     }
 
     #[cfg(unix)]

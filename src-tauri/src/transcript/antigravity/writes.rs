@@ -260,15 +260,8 @@ pub fn import_archive(
         .as_str()
         .filter(|s| !s.is_empty())
         .unwrap_or("Imported chat");
-    let mut name = title.to_string();
-    let mut suffix = 1;
-    while existing
-        .iter()
-        .any(|m| m.title.as_deref() == Some(name.as_str()))
-    {
-        name = format!("{title}-{suffix}");
-        suffix += 1;
-    }
+    let existing_titles = existing.iter().filter_map(|m| m.title.clone()).collect();
+    let name = crate::transcript::unique_title(title, &existing_titles);
     let stage = tempfile::Builder::new()
         .prefix(".orbit-chat-")
         .tempdir_in(&root)

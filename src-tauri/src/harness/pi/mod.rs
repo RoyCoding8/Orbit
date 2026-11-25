@@ -93,9 +93,9 @@ impl Harness for PiHarness {
                     .collect()
             }),
         };
-        resources.map_err(|message| HarnessError::Mutation {
+        resources.map_err(|message| HarnessError::Read {
             path: self.config_root.clone(),
-            message,
+            source: std::io::Error::other(message),
         })
     }
 }

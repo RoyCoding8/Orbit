@@ -22,6 +22,102 @@ pub enum SelectedHarness {
     Antigravity(AntigravityHarness),
 }
 
+macro_rules! dispatch_harness {
+    ($self:expr, $h:ident => $body:expr) => {
+        match $self {
+            Self::Claude($h) => $body,
+            Self::Codex($h) => $body,
+            Self::Kiro($h) => $body,
+            Self::Pi($h) => $body,
+            Self::Antigravity($h) => $body,
+            Self::Opencode($h) => $body,
+        }
+    };
+    (
+        $self:expr,
+        claude($ch:ident) => $claude:expr,
+        other($module:ident, $oh:ident) => $other:expr $(,)?
+    ) => {
+        match $self {
+            Self::Claude($ch) => $claude,
+            Self::Codex($oh) => {
+                use codex as $module;
+                $other
+            }
+            Self::Kiro($oh) => {
+                use kiro as $module;
+                $other
+            }
+            Self::Pi($oh) => {
+                use pi as $module;
+                $other
+            }
+            Self::Antigravity($oh) => {
+                use antigravity as $module;
+                $other
+            }
+            Self::Opencode($oh) => {
+                use opencode as $module;
+                $other
+            }
+        }
+    };
+    (
+        $self:expr,
+        module($module:ident, $h:ident) => $body:expr $(,)?
+    ) => {
+        match $self {
+            Self::Claude($h) => {
+                use claude as $module;
+                $body
+            }
+            Self::Codex($h) => {
+                use codex as $module;
+                $body
+            }
+            Self::Kiro($h) => {
+                use kiro as $module;
+                $body
+            }
+            Self::Pi($h) => {
+                use pi as $module;
+                $body
+            }
+            Self::Antigravity($h) => {
+                use antigravity as $module;
+                $body
+            }
+            Self::Opencode($h) => {
+                use opencode as $module;
+                $body
+            }
+        }
+    };
+    (
+        hooks $self:expr,
+        claude($ch:ident) => $claude:expr,
+        supported($module:ident, $oh:ident) => $supported:expr $(,)?
+    ) => {
+        match $self {
+            Self::Claude($ch) => $claude,
+            Self::Codex($oh) => {
+                use codex as $module;
+                $supported
+            }
+            Self::Kiro($oh) => {
+                use kiro as $module;
+                $supported
+            }
+            Self::Antigravity($oh) => {
+                use antigravity as $module;
+                $supported
+            }
+            Self::Opencode(_) => Err(opencode::hooks::UNSUPPORTED.into()),
+            Self::Pi(_) => Err(pi::HOOKS_UNSUPPORTED.into()),
+        }
+    };
+}
+
 impl SelectedHarness {
     pub fn from_env(client: Option<Client>) -> Self {
         match client.unwrap_or_default() {
@@ -35,74 +131,56 @@ impl SelectedHarness {
     }
 
     pub fn mcp_list(&self, app: &Path) -> Result<Vec<claude::mcp::ServerView>, String> {
-        match self {
-            Self::Claude(h) => h.mcp_servers(app).map_err(|e| e.to_string()),
-            Self::Codex(h) => codex::mcp::list(h),
-            Self::Kiro(h) => kiro::mcp::list(h),
-            Self::Pi(h) => pi::mcp::list(h),
-            Self::Antigravity(h) => antigravity::mcp::list(h),
-            Self::Opencode(h) => opencode::mcp::list(h),
-        }
+        dispatch_harness!(
+            self,
+            claude(h) => h.mcp_servers(app).map_err(|e| e.to_string()),
+            other(m, h) => m::mcp::list(h),
+        )
     }
 
     pub fn mcp_save(&self, name: &str, entry: Value, app: &Path) -> Result<(), String> {
-        match self {
-            Self::Claude(h) => h.mcp_save(name, entry, app).map_err(|e| e.to_string()),
-            Self::Codex(h) => codex::mcp::save(h, name, entry),
-            Self::Kiro(h) => kiro::mcp::save(h, name, entry),
-            Self::Pi(h) => pi::mcp::save(h, name, entry),
-            Self::Antigravity(h) => antigravity::mcp::save(h, name, entry),
-            Self::Opencode(h) => opencode::mcp::save(h, name, entry),
-        }
+        dispatch_harness!(
+            self,
+            claude(h) => h.mcp_save(name, entry, app).map_err(|e| e.to_string()),
+            other(m, h) => m::mcp::save(h, name, entry),
+        )
     }
 
     pub fn mcp_set_enabled(&self, name: &str, enabled: bool, app: &Path) -> Result<(), String> {
-        match self {
-            Self::Claude(h) => if enabled {
+        dispatch_harness!(
+            self,
+            claude(h) => if enabled {
                 h.mcp_enable(name, app)
             } else {
                 h.mcp_disable(name, app)
             }
             .map_err(|e| e.to_string()),
-            Self::Codex(h) => codex::mcp::set_enabled(h, name, enabled),
-            Self::Kiro(h) => kiro::mcp::set_enabled(h, name, enabled),
-            Self::Pi(h) => pi::mcp::set_enabled(h, name, enabled),
-            Self::Antigravity(h) => antigravity::mcp::set_enabled(h, name, enabled),
-            Self::Opencode(h) => opencode::mcp::set_enabled(h, name, enabled),
-        }
+            other(m, h) => m::mcp::set_enabled(h, name, enabled),
+        )
     }
 
     pub fn mcp_delete(&self, name: &str, app: &Path) -> Result<(), String> {
-        match self {
-            Self::Claude(h) => h.mcp_delete(name, app).map_err(|e| e.to_string()),
-            Self::Codex(h) => codex::mcp::delete(h, name),
-            Self::Kiro(h) => kiro::mcp::delete(h, name),
-            Self::Pi(h) => pi::mcp::delete(h, name),
-            Self::Antigravity(h) => antigravity::mcp::delete(h, name),
-            Self::Opencode(h) => opencode::mcp::delete(h, name),
-        }
+        dispatch_harness!(
+            self,
+            claude(h) => h.mcp_delete(name, app).map_err(|e| e.to_string()),
+            other(m, h) => m::mcp::delete(h, name),
+        )
     }
 
     pub fn mcp_test(&self, name: &str) -> Result<claude::mcp::BenchResult, String> {
-        match self {
-            Self::Claude(h) => h.mcp_test(name),
-            Self::Codex(h) => codex::mcp::test(h, name),
-            Self::Kiro(h) => kiro::mcp::test(h, name),
-            Self::Pi(h) => pi::mcp::test(h, name),
-            Self::Antigravity(h) => antigravity::mcp::test(h, name),
-            Self::Opencode(h) => opencode::mcp::test(h, name),
-        }
+        dispatch_harness!(
+            self,
+            claude(h) => h.mcp_test(name),
+            other(m, h) => m::mcp::test(h, name),
+        )
     }
 
     pub fn config_load(&self, project: &Path) -> Result<claude::config::ConfigSnapshot, String> {
-        match self {
-            Self::Claude(h) => claude::config::load_config(h, project).map_err(|e| e.to_string()),
-            Self::Codex(h) => codex::config::load_config(h, project),
-            Self::Kiro(h) => kiro::config::load_config(h, project),
-            Self::Pi(h) => pi::config::load_config(h, project),
-            Self::Antigravity(h) => antigravity::config::load_config(h, project),
-            Self::Opencode(h) => opencode::config::load_config(h, project),
-        }
+        dispatch_harness!(
+            self,
+            claude(h) => claude::config::load_config(h, project).map_err(|e| e.to_string()),
+            other(m, h) => m::config::load_config(h, project),
+        )
     }
 
     pub fn config_apply(
@@ -112,15 +190,12 @@ impl SelectedHarness {
         key: &str,
         value: Value,
     ) -> Result<(), String> {
-        match self {
-            Self::Claude(h) => claude::config::apply_value(h, project, layer, key, value)
+        dispatch_harness!(
+            self,
+            claude(h) => claude::config::apply_value(h, project, layer, key, value)
                 .map_err(|e| e.to_string()),
-            Self::Codex(h) => codex::config::apply_value(h, project, layer, key, value),
-            Self::Kiro(h) => kiro::config::apply_value(h, project, layer, key, value),
-            Self::Pi(h) => pi::config::apply_value(h, project, layer, key, value),
-            Self::Antigravity(h) => antigravity::config::apply_value(h, project, layer, key, value),
-            Self::Opencode(h) => opencode::config::apply_value(h, project, layer, key, value),
-        }
+            other(m, h) => m::config::apply_value(h, project, layer, key, value),
+        )
     }
 
     pub fn config_undo(
@@ -129,20 +204,17 @@ impl SelectedHarness {
         layer: SettingsLayer,
         key: &str,
     ) -> Result<(), String> {
-        match self {
-            Self::Claude(h) => ledger::undo(
+        dispatch_harness!(
+            self,
+            claude(h) => ledger::undo(
                 h.config_root(),
                 super::ResourceKind::Settings,
                 key,
                 &format!("config-{}", layer.label()),
                 &layer.settings_path(h.config_root(), project),
             ),
-            Self::Codex(h) => codex::config::undo(h, project, layer, key),
-            Self::Kiro(h) => kiro::config::undo(h, project, layer, key),
-            Self::Pi(h) => pi::config::undo(h, project, layer, key),
-            Self::Antigravity(h) => antigravity::config::undo(h, project, layer, key),
-            Self::Opencode(h) => opencode::config::undo(h, project, layer, key),
-        }
+            other(m, h) => m::config::undo(h, project, layer, key),
+        )
     }
 
     pub fn hooks_list(
@@ -150,14 +222,11 @@ impl SelectedHarness {
         project: &Path,
         app: &Path,
     ) -> Result<Vec<claude::hooks::HookView>, String> {
-        match self {
-            Self::Claude(h) => h.hooks_list(project, app).map_err(|e| e.to_string()),
-            Self::Codex(h) => codex::hooks::list(h, project),
-            Self::Kiro(h) => kiro::hooks::list(h, project),
-            Self::Antigravity(h) => antigravity::hooks::list(h, project),
-            Self::Opencode(_) => Err(opencode::hooks::UNSUPPORTED.into()),
-            Self::Pi(_) => Err(pi::HOOKS_UNSUPPORTED.into()),
-        }
+        dispatch_harness!(
+            hooks self,
+            claude(h) => h.hooks_list(project, app).map_err(|e| e.to_string()),
+            supported(m, h) => m::hooks::list(h, project),
+        )
     }
 
     pub fn hooks_sources(&self, project: &Path) -> Result<Vec<kiro::hooks::HookSource>, String> {
@@ -203,19 +272,16 @@ impl SelectedHarness {
         id: &str,
         enabled: bool,
     ) -> Result<(), String> {
-        match self {
-            Self::Claude(h) => if enabled {
+        dispatch_harness!(
+            hooks self,
+            claude(h) => if enabled {
                 h.hooks_enable(project, app, id)
             } else {
                 h.hooks_disable(project, app, layer, id)
             }
             .map_err(|e| e.to_string()),
-            Self::Codex(h) => codex::hooks::set_enabled(h, project, layer, id, enabled),
-            Self::Kiro(h) => kiro::hooks::set_enabled(h, project, layer, id, enabled),
-            Self::Antigravity(h) => antigravity::hooks::set_enabled(h, project, layer, id, enabled),
-            Self::Opencode(_) => Err(opencode::hooks::UNSUPPORTED.into()),
-            Self::Pi(_) => Err(pi::HOOKS_UNSUPPORTED.into()),
-        }
+            supported(m, h) => m::hooks::set_enabled(h, project, layer, id, enabled),
+        )
     }
 
     pub fn hooks_delete(
@@ -225,30 +291,24 @@ impl SelectedHarness {
         layer: SettingsLayer,
         id: &str,
     ) -> Result<(), String> {
-        match self {
-            Self::Claude(h) => h
+        dispatch_harness!(
+            hooks self,
+            claude(h) => h
                 .hooks_delete(project, app, layer, id)
                 .map_err(|e| e.to_string()),
-            Self::Codex(h) => codex::hooks::delete(h, project, layer, id),
-            Self::Kiro(h) => kiro::hooks::delete(h, project, layer, id),
-            Self::Antigravity(h) => antigravity::hooks::delete(h, project, layer, id),
-            Self::Opencode(_) => Err(opencode::hooks::UNSUPPORTED.into()),
-            Self::Pi(_) => Err(pi::HOOKS_UNSUPPORTED.into()),
-        }
+            supported(m, h) => m::hooks::delete(h, project, layer, id),
+        )
     }
 
     pub fn skills_inventory(
         &self,
         project: &Path,
     ) -> Result<Vec<claude::skills::SkillEntry>, String> {
-        match self {
-            Self::Claude(h) => claude::skills::inventory(h),
-            Self::Codex(h) => codex::skills::inventory(h, project),
-            Self::Kiro(h) => kiro::skills::inventory(h, project),
-            Self::Pi(h) => pi::skills::inventory(h, project),
-            Self::Antigravity(h) => antigravity::skills::inventory(h, project),
-            Self::Opencode(h) => opencode::skills::inventory(h, project),
-        }
+        dispatch_harness!(
+            self,
+            claude(h) => claude::skills::inventory(h),
+            other(m, h) => m::skills::inventory(h, project),
+        )
     }
 
     pub fn skill_set_override(
@@ -257,14 +317,11 @@ impl SelectedHarness {
         id: &str,
         state: SkillOverride,
     ) -> Result<(), String> {
-        match self {
-            Self::Claude(h) => claude::skills::set_override(h, id, state),
-            Self::Codex(h) => codex::skills::set_override(h, project, id, state),
-            Self::Kiro(h) => kiro::skills::set_override(h, project, id, state),
-            Self::Pi(h) => pi::skills::set_override(h, project, id, state),
-            Self::Antigravity(h) => antigravity::skills::set_override(h, project, id, state),
-            Self::Opencode(h) => opencode::skills::set_override(h, project, id, state),
-        }
+        dispatch_harness!(
+            self,
+            claude(h) => claude::skills::set_override(h, id, state),
+            other(m, h) => m::skills::set_override(h, project, id, state),
+        )
     }
 
     pub fn skill_edit(
@@ -274,66 +331,41 @@ impl SelectedHarness {
         expected: &str,
         content: &str,
     ) -> Result<(), String> {
-        match self {
-            Self::Claude(h) => claude::skills::edit_skill(h, id, expected, content),
-            Self::Codex(h) => codex::skills::edit_skill(h, project, id, expected, content),
-            Self::Kiro(h) => kiro::skills::edit_skill(h, project, id, expected, content),
-            Self::Pi(h) => pi::skills::edit_skill(h, project, id, expected, content),
-            Self::Antigravity(h) => {
-                antigravity::skills::edit_skill(h, project, id, expected, content)
-            }
-            Self::Opencode(h) => opencode::skills::edit_skill(h, project, id, expected, content),
-        }
+        dispatch_harness!(
+            self,
+            claude(h) => claude::skills::edit_skill(h, id, expected, content),
+            other(m, h) => m::skills::edit_skill(h, project, id, expected, content),
+        )
     }
 
     pub fn skill_install(&self, source: &Path) -> Result<String, String> {
-        match self {
-            Self::Claude(h) => claude::skills::install(h, source),
-            Self::Codex(h) => codex::skills::install(h, source),
-            Self::Kiro(h) => kiro::skills::install(h, source),
-            Self::Pi(h) => pi::skills::install(h, source),
-            Self::Antigravity(h) => antigravity::skills::install(h, source),
-            Self::Opencode(h) => opencode::skills::install(h, source),
-        }
+        dispatch_harness!(self, module(m, h) => m::skills::install(h, source))
     }
 
     pub fn skill_uninstall(&self, project: &Path, id: &str) -> Result<(), String> {
-        match self {
-            Self::Claude(h) => claude::skills::uninstall(h, id),
-            Self::Codex(h) => codex::skills::uninstall(h, project, id),
-            Self::Kiro(h) => kiro::skills::uninstall(h, project, id),
-            Self::Pi(h) => pi::skills::uninstall(h, project, id),
-            Self::Antigravity(h) => antigravity::skills::uninstall(h, project, id),
-            Self::Opencode(h) => opencode::skills::uninstall(h, project, id),
-        }
+        dispatch_harness!(
+            self,
+            claude(h) => claude::skills::uninstall(h, id),
+            other(m, h) => m::skills::uninstall(h, project, id),
+        )
     }
 
     pub fn skill_restore(&self, project: &Path, id: &str, backup: &Path) -> Result<(), String> {
-        match self {
-            Self::Claude(h) => {
+        dispatch_harness!(
+            self,
+            claude(h) => {
                 claude::skills::ensure_backup_path(h.config_root(), backup)?;
                 claude::skills::restore(h, id, backup)
-            }
-            Self::Codex(h) => codex::skills::restore(h, project, id, backup),
-            Self::Kiro(h) => kiro::skills::restore(h, project, id, backup),
-            Self::Pi(h) => pi::skills::restore(h, project, id, backup),
-            Self::Antigravity(h) => antigravity::skills::restore(h, project, id, backup),
-            Self::Opencode(h) => opencode::skills::restore(h, project, id, backup),
-        }
+            },
+            other(m, h) => m::skills::restore(h, project, id, backup),
+        )
     }
 
     pub fn memory_catalog(
         &self,
         project: &Path,
     ) -> Result<claude::memories::MemoryCatalog, String> {
-        match self {
-            Self::Claude(h) => claude::memories::catalog(h, project),
-            Self::Codex(h) => codex::memories::catalog(h, project),
-            Self::Kiro(h) => kiro::memories::catalog(h, project),
-            Self::Pi(h) => pi::memories::catalog(h, project),
-            Self::Antigravity(h) => antigravity::memories::catalog(h, project),
-            Self::Opencode(h) => opencode::memories::catalog(h, project),
-        }
+        dispatch_harness!(self, module(m, h) => m::memories::catalog(h, project))
     }
 
     pub fn memory_edit(
@@ -343,25 +375,11 @@ impl SelectedHarness {
         expected: &str,
         content: &str,
     ) -> Result<(), String> {
-        match self {
-            Self::Claude(h) => claude::memories::edit(h, project, id, expected, content),
-            Self::Codex(h) => codex::memories::edit(h, project, id, expected, content),
-            Self::Kiro(h) => kiro::memories::edit(h, project, id, expected, content),
-            Self::Pi(h) => pi::memories::edit(h, project, id, expected, content),
-            Self::Antigravity(h) => antigravity::memories::edit(h, project, id, expected, content),
-            Self::Opencode(h) => opencode::memories::edit(h, project, id, expected, content),
-        }
+        dispatch_harness!(self, module(m, h) => m::memories::edit(h, project, id, expected, content))
     }
 
     pub fn memory_delete(&self, project: &Path, id: &str, expected: &str) -> Result<(), String> {
-        match self {
-            Self::Claude(h) => claude::memories::delete(h, project, id, expected),
-            Self::Codex(h) => codex::memories::delete(h, project, id, expected),
-            Self::Kiro(h) => kiro::memories::delete(h, project, id, expected),
-            Self::Pi(h) => pi::memories::delete(h, project, id, expected),
-            Self::Antigravity(h) => antigravity::memories::delete(h, project, id, expected),
-            Self::Opencode(h) => opencode::memories::delete(h, project, id, expected),
-        }
+        dispatch_harness!(self, module(m, h) => m::memories::delete(h, project, id, expected))
     }
 
     /// Each client owns its cache. Native session IDs and shared query code stay unchanged.
@@ -373,31 +391,6 @@ impl SelectedHarness {
             Self::Pi(_) => app.join("pi"),
             Self::Antigravity(_) => app.join("antigravity"),
             Self::Opencode(_) => app.join("opencode"),
-        }
-    }
-
-    pub fn transcript_ingest(
-        &self,
-        app: &Path,
-        project: &Path,
-    ) -> Result<transcript::ingest::IngestReport, String> {
-        match self {
-            Self::Claude(h) => {
-                transcript::ingest::ingest_projects(h.config_root(), app).map_err(|e| e.to_string())
-            }
-            Self::Antigravity(_) => transcript::catalog::index_all(self, app, project, |_| {}),
-            Self::Codex(h) => {
-                transcript::codex::ingest(h.config_root(), &self.transcript_cache(app))
-                    .map_err(|e| e.to_string())
-            }
-            Self::Pi(h) => {
-                transcript::pi::ingest(h.config_root(), &self.transcript_cache(app), project)
-                    .map_err(|e| e.to_string())
-            }
-            Self::Kiro(h) => transcript::kiro::ingest(h.config_root(), &self.transcript_cache(app))
-                .map_err(|e| e.to_string()),
-            Self::Opencode(_) => transcript::opencode::ingest(&self.transcript_cache(app), project)
-                .map_err(|e| e.to_string()),
         }
     }
 
@@ -479,63 +472,21 @@ impl SelectedHarness {
 
 impl Harness for SelectedHarness {
     fn id(&self) -> HarnessId {
-        match self {
-            Self::Claude(h) => h.id(),
-            Self::Codex(h) => h.id(),
-            Self::Kiro(h) => h.id(),
-            Self::Pi(h) => h.id(),
-            Self::Antigravity(h) => h.id(),
-            Self::Opencode(h) => h.id(),
-        }
+        dispatch_harness!(self, h => h.id())
     }
     fn config_root(&self) -> &Path {
-        match self {
-            Self::Claude(h) => h.config_root(),
-            Self::Codex(h) => h.config_root(),
-            Self::Kiro(h) => h.config_root(),
-            Self::Pi(h) => h.config_root(),
-            Self::Antigravity(h) => h.config_root(),
-            Self::Opencode(h) => h.config_root(),
-        }
+        dispatch_harness!(self, h => h.config_root())
     }
     fn settings_path(&self) -> PathBuf {
-        match self {
-            Self::Claude(h) => h.settings_path(),
-            Self::Codex(h) => h.settings_path(),
-            Self::Kiro(h) => h.settings_path(),
-            Self::Pi(h) => h.settings_path(),
-            Self::Antigravity(h) => h.settings_path(),
-            Self::Opencode(h) => h.settings_path(),
-        }
+        dispatch_harness!(self, h => h.settings_path())
     }
     fn mcp_path(&self) -> PathBuf {
-        match self {
-            Self::Claude(h) => h.mcp_path(),
-            Self::Codex(h) => h.mcp_path(),
-            Self::Kiro(h) => h.mcp_path(),
-            Self::Pi(h) => h.mcp_path(),
-            Self::Antigravity(h) => h.mcp_path(),
-            Self::Opencode(h) => h.mcp_path(),
-        }
+        dispatch_harness!(self, h => h.mcp_path())
     }
     fn user_home(&self) -> Option<&Path> {
-        match self {
-            Self::Claude(h) => h.user_home(),
-            Self::Codex(h) => h.user_home(),
-            Self::Kiro(h) => h.user_home(),
-            Self::Pi(h) => h.user_home(),
-            Self::Antigravity(h) => h.user_home(),
-            Self::Opencode(h) => h.user_home(),
-        }
+        dispatch_harness!(self, h => h.user_home())
     }
     fn list(&self, kind: InventoryKind) -> super::Result<Vec<ResourceRef>> {
-        match self {
-            Self::Claude(h) => h.list(kind),
-            Self::Codex(h) => h.list(kind),
-            Self::Kiro(h) => h.list(kind),
-            Self::Pi(h) => h.list(kind),
-            Self::Antigravity(h) => h.list(kind),
-            Self::Opencode(h) => h.list(kind),
-        }
+        dispatch_harness!(self, h => h.list(kind))
     }
 }

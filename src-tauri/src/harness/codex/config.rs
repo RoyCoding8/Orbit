@@ -133,16 +133,14 @@ pub fn apply_value(
         &config_action(layer),
         &path,
         move |document| {
-            let mut value = normalize_http_headers(value)?;
+            let mut value = value;
             if document.contains_key(key) {
                 let stored = store::value(document, &path_for_edit)?;
                 if let Some(previous) = stored.get(key) {
-                    let previous = normalize_http_headers(previous.clone())?;
-                    crate::harness::credentials::restore_masked(&previous, &mut value)
+                    crate::harness::credentials::restore_masked(previous, &mut value)
                         .map_err(|_| format!("/{key}: a masked value inside an array cannot be restored; re-enter the credential"))?;
                 }
             }
-            value = restore_native_http_headers(value);
             validate_top_level(key, &value)?;
             if crate::harness::credentials::contains_mask(&value) {
                 return Err(format!(
@@ -267,54 +265,13 @@ fn object_at(path: &Path) -> Result<Map<String, Value>, String> {
 }
 
 fn mask_map(values: Map<String, Value>) -> Result<Map<String, Value>, String> {
-    values
+    Ok(values
         .into_iter()
         .map(|(key, value)| {
-            let value = normalize_http_headers(value)?;
             let masked = crate::harness::claude::config::masked_value(&key, &value, 0, false);
-            let masked = restore_native_http_headers(masked);
-            Ok((key, masked))
+            (key, masked)
         })
-        .collect()
-}
-
-fn normalize_http_headers(mut value: Value) -> Result<Value, String> {
-    normalize_headers_in_place(&mut value, false)?;
-    Ok(value)
-}
-
-fn normalize_headers_in_place(value: &mut Value, restore: bool) -> Result<(), String> {
-    match value {
-        Value::Object(object) => {
-            let from = if restore { "headers" } else { "http_headers" };
-            let to = if restore { "http_headers" } else { "headers" };
-            if object.contains_key(from) && object.contains_key(to) {
-                return Err(format!(
-                    "configuration object cannot contain both `{from}` and `{to}`"
-                ));
-            }
-            if let Some(headers) = object.remove(from) {
-                object.insert(to.into(), headers);
-            }
-            for child in object.values_mut() {
-                normalize_headers_in_place(child, restore)?;
-            }
-        }
-        Value::Array(items) => {
-            for child in items {
-                normalize_headers_in_place(child, restore)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn restore_native_http_headers(mut value: Value) -> Value {
-    // A conflict is only possible for malformed config. Retain its original
-    // shape rather than replacing the user's value during a read.
-    let _ = normalize_headers_in_place(&mut value, true);
-    value
+        .collect())
 }
 
 fn json_to_item(value: &Value) -> Result<toml_edit::Item, String> {
@@ -574,5 +531,40 @@ mod tests {
         let saved = store::read_value(&harness.settings_path()).unwrap();
         assert_eq!(saved["env"]["API_TOKEN"], "current-token");
         assert_eq!(saved["env"]["MODE"], "new");
+    }
+
+    #[test]
+    fn headers_key_is_preserved_without_corruption_to_http_headers() {
+        let (_root, harness, project) = fixture();
+        fs::write(
+            harness.settings_path(),
+            "[custom]\n[custom.headers]\nX-Mode = 'plain'\nAuthorization = 'Bearer secret'\n[custom.http_headers]\nX-Api-Key = 'top-secret'\n",
+        )
+        .unwrap();
+        let snapshot = load_config(&harness, &project).unwrap();
+        assert!(snapshot.layers[0].values["custom"].get("headers").is_some());
+        assert_eq!(
+            snapshot.layers[0].values["custom"]["headers"]["Authorization"],
+            crate::harness::credentials::MASK
+        );
+        assert_eq!(
+            snapshot.layers[0].values["custom"]["http_headers"]["X-Api-Key"],
+            crate::harness::credentials::MASK
+        );
+        apply_value(
+            &harness,
+            &project,
+            SettingsLayer::User,
+            "custom",
+            serde_json::json!({
+                "headers": {"X-Mode": "updated", "Authorization": crate::harness::credentials::MASK},
+                "http_headers": {"X-Api-Key": crate::harness::credentials::MASK}
+            }),
+        )
+        .unwrap();
+        let saved = store::read_value(&harness.settings_path()).unwrap();
+        assert_eq!(saved["custom"]["headers"]["X-Mode"], "updated");
+        assert_eq!(saved["custom"]["headers"]["Authorization"], "Bearer secret");
+        assert_eq!(saved["custom"]["http_headers"]["X-Api-Key"], "top-secret");
     }
 }

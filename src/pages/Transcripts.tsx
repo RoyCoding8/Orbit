@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { M3eButton } from "@m3e/react/button";
-import { useHarness } from "../HarnessContext";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Channel } from "@tauri-apps/api/core";
-import { displayPath } from "../pathDisplay";
+import { useHarness } from "../lib/HarnessContext";
+import { displayPath, normalizePathIdentity } from "../lib/pathDisplay";
+import { useModalDialog } from "../lib/useModalDialog";
 import { ChatConversion } from "./ChatConversion";
 
 type Session = {
@@ -70,8 +71,7 @@ function groupSessions(sessions: Session[]) {
   const projects = new Map<string, { key: string; project: string; sessions: Session[] }>();
   for (const session of sessions) {
     const project = session.project.trim() || "Unknown project";
-    const path = displayPath(project).replaceAll("\\", "/").replace(/\/+$/, "") || "/";
-    const key = /^[a-z]:\//i.test(path) || path.startsWith("//") ? path.toLowerCase() : path;
+    const key = normalizePathIdentity(project) || "/";
     const group = projects.get(key);
     if (group) group.sessions.push(session);
     else projects.set(key, { key, project, sessions: [session] });
@@ -101,7 +101,7 @@ export function Transcripts() {
   const [converting, setConverting] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState("");
-  const deleteDialog = useRef<HTMLDialogElement>(null);
+  const deleteDialog = useModalDialog(deleting !== null);
   const [notice, setNotice] = useState(`Finding ${label} chats…`);
   const selectedSession = thread?.sessionId ?? null;
   const messages = thread?.messages ?? [];
@@ -109,14 +109,19 @@ export function Transcripts() {
   const busy = pending || sessionState === "loading" || thread?.loading === true;
 
   const normalizedFilter = displayPath(filter.trim()).toLowerCase();
-  const groups = groupSessions(sessions.filter(session =>
-    displayPath(`${session.project} ${session.title ?? ""} ${session.sessionId}`).toLowerCase().includes(normalizedFilter)));
+  const groups = useMemo(
+    () => groupSessions(normalizedFilter
+      ? sessions.filter(session =>
+          displayPath(`${session.project} ${session.title ?? ""} ${session.sessionId}`).toLowerCase().includes(normalizedFilter))
+      : sessions),
+    [sessions, normalizedFilter],
+  );
 
-  const refreshSessions = useCallback(async (refresh = false, projectRoot: string | null = null) => {
+  const refreshSessions = useCallback(async (refresh = false, targetProjectRoot: string | null = projectRoot) => {
     const request = ++sessionRequest.current;
     setSessionState(current => current === "ready" ? current : "loading");
     try {
-      const result = await invoke<SessionCatalog>("transcript_list_sessions", { refresh, projectRoot });
+      const result = await invoke<SessionCatalog>("transcript_list_sessions", { refresh, projectRoot: targetProjectRoot });
       if (request !== sessionRequest.current) return;
       setSessions(result.sessions);
       setSource(result.source);
@@ -128,7 +133,7 @@ export function Transcripts() {
       setSessionState("error");
       throw error;
     }
-  }, [invoke, label]);
+  }, [invoke, label, projectRoot]);
 
   const selectSession = useCallback(async (sessionId: string, uuid?: string) => {
     const request = { sessionId, loading: true };
@@ -171,7 +176,7 @@ export function Transcripts() {
         focusUuid: uuid ?? null,
       });
       const catalogRequest = sessionRequest.current;
-      const catalog = await invoke<SessionCatalog>("transcript_list_sessions", { refresh: false, projectRoot: null });
+      const catalog = await invoke<SessionCatalog>("transcript_list_sessions", { refresh: false, projectRoot });
       if (catalogRequest === sessionRequest.current) setSessions(catalog.sessions);
     } catch (error) {
       if (request === threadRequest.current)
@@ -181,7 +186,7 @@ export function Transcripts() {
       if (request === threadRequest.current)
         setThread((current) => current && { ...current, loading: false });
     }
-  }, [invoke]);
+  }, [invoke, projectRoot]);
 
   const refreshThread = useCallback(async (nextSessions: Session[], selection = threadRequest.current) => {
     if (!selection || selection !== threadRequest.current) return;
@@ -200,10 +205,10 @@ export function Transcripts() {
     setDiscovering(true);
     void (async () => {
       try {
-        const cached = await refreshSessions();
+        const cached = await refreshSessions(false, projectRoot);
         if (!active || !cached) return;
         setNotice(cached.length ? `Updating ${label} chats…` : `Finding ${label} chats…`);
-        const nextSessions = await refreshSessions(true);
+        const nextSessions = await refreshSessions(true, projectRoot);
         if (active && nextSessions && threadRequest.current) await refreshThread(nextSessions);
       } catch (error) {
         if (active) setNotice(`Could not find chats. ${String(error)}`);
@@ -217,12 +222,12 @@ export function Transcripts() {
       threadRequest.current = null;
       indexRequest.current += 1;
     };
-  }, [refreshSessions, refreshThread, label]);
+  }, [refreshSessions, refreshThread, label, projectRoot]);
+
   useEffect(() => {
     setDeleteError("");
-    if (deleting) deleteDialog.current?.showModal();
-    else deleteDialog.current?.close();
   }, [deleting]);
+
   useEffect(() => {
     if (focusUuid)
       document
@@ -252,7 +257,7 @@ export function Transcripts() {
     try {
       const report = await invoke<IngestReport>("transcript_ingest", { projectRoot, onProgress });
       if (request !== indexRequest.current) return;
-      await refreshSessions();
+      await refreshSessions(false, projectRoot);
       setHits([]);
       setSearched(false);
       setNotice(`Indexed ${report.sessions} chats for message search.${report.skippedFiles ? ` Could not index ${report.skippedFiles} sources; retry indexing to try them again.` : ""}${report.malformedLines ? ` Skipped ${report.malformedLines} malformed records.` : ""}`);
@@ -367,14 +372,14 @@ export function Transcripts() {
         title: `Choose a ${label} session archive`,
       });
       if (typeof source !== "string") return;
-      const projectRoot = await invoke<string | null>("project_choose");
-      if (!projectRoot) return;
+      const targetProjectRoot = await invoke<string | null>("project_choose");
+      if (!targetProjectRoot) return;
       const report = await invoke<ArchiveReport>("transcript_import_directory", {
         source,
-        projectRoot,
+        projectRoot: targetProjectRoot,
       });
       try {
-        await refreshSessions();
+        await refreshSessions(false, projectRoot);
         setNotice(`Imported ${report.sourceSessionId} as ${report.sessionId}.`);
       } catch (error) {
         setNotice(
@@ -639,7 +644,7 @@ export function Transcripts() {
         <p>{sessions.find(session => session.sessionId === deleting)?.title ?? deleting}</p>
         <p>Save a native archive first, then remove the chat from {label}. To restore it later, import that archive and choose its project.</p>
         <p>Close this chat in {label} before deleting it.</p>
-        {deleteError && <p className="inline-error" role="alert">{deleteError}</p>}
+        {deleteError && <p className="inline-error" role="alert">{displayPath(deleteError)}</p>}
         <div className="dialog-actions">
           <M3eButton type="button" variant="text" disabled={pending} onClick={() => setDeleting(null)}>Cancel</M3eButton>
           <M3eButton type="button" variant="filled" className="destructive-action" disabled={pending} onClick={() => void deleteSession()}>Save archive and delete</M3eButton>

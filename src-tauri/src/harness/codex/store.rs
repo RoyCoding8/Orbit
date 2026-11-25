@@ -52,7 +52,7 @@ pub(crate) fn mutate(
     path: &Path,
     edit: impl FnOnce(&mut DocumentMut) -> Result<(), String>,
 ) -> Result<(), String> {
-    ensure_plain(path)?;
+    crate::harness::fs_guard::prepare_plain_parent(path)?;
     let original = read_original(path)?;
     let mut document = match &original {
         Some(bytes) => {
@@ -102,7 +102,7 @@ pub(crate) fn mutate_json(
     path: &Path,
     edit: impl FnOnce(&mut Value) -> Result<(), String>,
 ) -> Result<(), String> {
-    ensure_plain(path)?;
+    crate::harness::fs_guard::prepare_plain_parent(path)?;
     let original = read_original(path)?;
     let mut document = match &original {
         Some(bytes) => serde_json::from_slice(bytes)
@@ -148,8 +148,7 @@ fn read_original(path: &Path) -> Result<Option<Vec<u8>>, String> {
 }
 
 fn ensure_plain(path: &Path) -> Result<(), String> {
-    crate::harness::claude::skills::ensure_plain_components(path)?;
-    crate::harness::claude::skills::ensure_plain_file_if_present(path)
+    crate::harness::fs_guard::ensure_plain_path(path)
 }
 
 #[cfg(test)]
@@ -213,5 +212,26 @@ mod tests {
             fs::read_to_string(&config).unwrap(),
             "model = 'concurrent edit'\n"
         );
+    }
+
+    #[test]
+    fn mutate_creates_missing_parent_directory() {
+        let root = crate::test_support::tempdir().unwrap();
+        let config_root = root.path().join("fresh/.codex");
+        let config = config_root.join("config.toml");
+        let harness = CodexHarness::new(config_root, root.path().to_path_buf());
+        mutate(
+            &harness,
+            ResourceKind::Settings,
+            "model",
+            "apply",
+            &config,
+            |doc| {
+                doc["model"] = toml_edit::value("o3");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(config.is_file());
     }
 }

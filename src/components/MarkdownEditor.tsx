@@ -1,5 +1,5 @@
 import { lazy, Suspense, useState, type Ref } from "react";
-import "./content.css";
+import "../styles/content.css";
 
 const MarkdownPreview = lazy(() => import("./MarkdownPreview"));
 

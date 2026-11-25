@@ -1,4 +1,6 @@
-use super::{database_path, SessionSummary, SessionTitle, TranscriptError};
+use super::{
+    collect_text, database_path, modified_epoch_ms, SessionSummary, SessionTitle, TranscriptError,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -96,72 +98,6 @@ pub fn open_database(app_data_dir: &Path) -> Result<Connection, TranscriptError>
     Ok(connection)
 }
 
-pub fn ingest_projects(
-    config_root: &Path,
-    app_data_dir: &Path,
-) -> Result<IngestReport, TranscriptError> {
-    let projects = config_root.join("projects");
-    if !projects.is_dir() {
-        return Err(TranscriptError::InvalidRoot);
-    }
-    let mut connection = open_database(app_data_dir)?;
-    let mut report = IngestReport {
-        sessions: 0,
-        lines_read: 0,
-        messages_indexed: 0,
-        malformed_lines: 0,
-        skipped_files: 0,
-        skipped_state_lines: 0,
-    };
-    let mut seen_paths = Vec::new();
-    for project_entry in fs::read_dir(&projects)? {
-        let project_entry = project_entry?;
-        if !project_entry.file_type()?.is_dir() {
-            continue;
-        }
-        let project_path = project_entry.path();
-        let project = project_entry.file_name().to_string_lossy().into_owned();
-        for session_entry in fs::read_dir(&project_path)? {
-            let session_entry = session_entry?;
-            if !session_entry.file_type()?.is_file()
-                || session_entry
-                    .path()
-                    .extension()
-                    .is_none_or(|extension| !extension.eq_ignore_ascii_case("jsonl"))
-            {
-                continue;
-            }
-            let path = session_entry.path();
-            let source_path = path.to_string_lossy().into_owned();
-            seen_paths.push(source_path.clone());
-            let fingerprint = file_fingerprint(&path, Some(&spill_directory(&path)));
-            if let Some(fingerprint) = &fingerprint {
-                if unchanged_source(&connection, &source_path, fingerprint)? {
-                    report.sessions += 1;
-                    continue;
-                }
-            }
-            let session_id = qualified_session_id(&project, &path);
-            let session_result =
-                match ingest_session(&mut connection, &path, &project, &session_id, fingerprint) {
-                    Ok(result) => result,
-                    Err(TranscriptError::Io(_)) => {
-                        report.skipped_files += 1;
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                };
-            report.sessions += 1;
-            report.lines_read += session_result.0;
-            report.messages_indexed += session_result.1;
-            report.malformed_lines += session_result.2;
-            report.skipped_state_lines += session_result.3;
-        }
-    }
-    prune_vanished_sessions(&mut connection, &seen_paths)?;
-    Ok(report)
-}
-
 /// The database identity includes the complete source name so files differing
 /// only by extension case remain distinct on case-sensitive filesystems.
 pub(super) fn qualified_session_id(project: &str, path: &Path) -> String {
@@ -187,18 +123,18 @@ pub(super) fn prune_vanished_sessions(
         })?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
-    let seen = ingested_paths
-        .iter()
-        .cloned()
-        .collect::<std::collections::HashSet<_>>();
+    let seen: std::collections::HashSet<&str> = ingested_paths.iter().map(String::as_str).collect();
     let transaction = connection.transaction()?;
-    for (session_id, source_path) in vanished {
-        if !seen.contains(&source_path) {
-            transaction.execute(
-                "DELETE FROM messages_fts WHERE session_id = ?1",
-                [&session_id],
-            )?;
-            transaction.execute("DELETE FROM sessions WHERE session_id = ?1", [&session_id])?;
+    {
+        let mut del_fts =
+            transaction.prepare_cached("DELETE FROM messages_fts WHERE session_id = ?1")?;
+        let mut del_session =
+            transaction.prepare_cached("DELETE FROM sessions WHERE session_id = ?1")?;
+        for (session_id, source_path) in vanished {
+            if !seen.contains(source_path.as_str()) {
+                del_fts.execute([&session_id])?;
+                del_session.execute([&session_id])?;
+            }
         }
     }
     transaction.commit()?;
@@ -208,9 +144,15 @@ pub(super) fn prune_vanished_sessions(
 pub fn remove_sessions(cache: &Path, session_ids: &[String]) -> Result<(), TranscriptError> {
     let mut connection = open_database(cache)?;
     let transaction = connection.transaction()?;
-    for id in session_ids {
-        transaction.execute("DELETE FROM messages_fts WHERE session_id = ?1", [id])?;
-        transaction.execute("DELETE FROM sessions WHERE session_id = ?1", [id])?;
+    {
+        let mut del_fts =
+            transaction.prepare_cached("DELETE FROM messages_fts WHERE session_id = ?1")?;
+        let mut del_session =
+            transaction.prepare_cached("DELETE FROM sessions WHERE session_id = ?1")?;
+        for id in session_ids {
+            del_fts.execute([id])?;
+            del_session.execute([id])?;
+        }
     }
     transaction.commit()?;
     Ok(())
@@ -277,8 +219,9 @@ pub(super) fn unchanged_source(
     source_path: &str,
     fingerprint: &str,
 ) -> Result<bool, TranscriptError> {
-    let mut statement = connection
-        .prepare("SELECT 1 FROM sessions WHERE source_path = ?1 AND fingerprint = ?2 LIMIT 1")?;
+    let mut statement = connection.prepare_cached(
+        "SELECT 1 FROM sessions WHERE source_path = ?1 AND fingerprint = ?2 LIMIT 1",
+    )?;
     Ok(statement
         .query_row(params![source_path, fingerprint], |_| Ok(()))
         .optional()?
@@ -297,7 +240,7 @@ pub(super) fn ingest_session(
     let modified = fs::metadata(path)?
         .modified()
         .ok()
-        .map(|time| format!("{time:?}"));
+        .and_then(modified_epoch_ms);
     let parsed = input
         .lines()
         .enumerate()
@@ -497,21 +440,6 @@ fn attachment_text(value: &Value) -> Option<String> {
     })
 }
 
-fn collect_text(value: &Value, parts: &mut Vec<String>) {
-    match value {
-        Value::String(text) => parts.push(text.clone()),
-        Value::Array(items) => items.iter().for_each(|item| collect_text(item, parts)),
-        Value::Object(map) => {
-            if let Some(text) = map.get("text").and_then(Value::as_str) {
-                parts.push(text.to_owned());
-            } else if let Some(content) = map.get("content") {
-                collect_text(content, parts);
-            }
-        }
-        _ => {}
-    }
-}
-
 fn tool_call_owners(values: &[&Value]) -> HashMap<String, String> {
     let mut owners = HashMap::new();
     for value in values {
@@ -577,6 +505,7 @@ fn read_spills(
         }
     };
     let mut complete = true;
+    let mut spill_paths = Vec::new();
     for entry in entries {
         let Ok(entry) = entry else {
             complete = false;
@@ -589,7 +518,10 @@ fn read_spills(
         if !file_type.is_file() || entry.path().extension().is_none_or(|ext| ext != "json") {
             continue;
         }
-        let path = entry.path();
+        spill_paths.push(entry.path());
+    }
+    spill_paths.sort();
+    for path in spill_paths {
         let stem = path
             .file_stem()
             .unwrap_or_default()
@@ -616,15 +548,13 @@ fn read_spills(
                 });
                 match (target, result) {
                     (Some(uuid), Ok(text)) => {
-                        attached.insert(uuid, (Some(text), None));
+                        attach_spill_result(&mut attached, uuid, text);
                     }
                     (Some(uuid), Err(_)) => {
-                        attached.insert(
+                        attach_spill_note(
+                            &mut attached,
                             uuid,
-                            (
-                                None,
-                                Some("Tool result spill could not be parsed.".to_owned()),
-                            ),
+                            "Tool result spill could not be parsed.".to_owned(),
                         );
                     }
                     (None, Err(_)) => {
@@ -659,6 +589,18 @@ fn read_spills(
         }
     }
     SpillRead { attached, complete }
+}
+
+fn attach_spill_result(
+    attached: &mut HashMap<String, (Option<String>, Option<String>)>,
+    uuid: String,
+    result: String,
+) {
+    let entry = attached.entry(uuid).or_insert((None, None));
+    entry.0 = Some(match entry.0.take() {
+        Some(previous) => format!("{previous}\n{result}"),
+        None => result,
+    });
 }
 
 fn attach_spill_note(
@@ -711,6 +653,15 @@ fn read_spills_for_tests(session_path: &Path) -> HashMap<String, (Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::{claude::ClaudeCodeHarness, resolve_paths, selected::SelectedHarness};
+
+    fn index_claude(config_root: &Path, app_data_dir: &Path) -> Result<IngestReport, String> {
+        let harness = SelectedHarness::Claude(ClaudeCodeHarness::new(resolve_paths(
+            Some(config_root.to_str().unwrap()),
+            config_root,
+        )));
+        super::super::catalog::index_all(&harness, app_data_dir, config_root, |_| {})
+    }
     use std::io::Write;
 
     #[test]
@@ -775,11 +726,11 @@ mod tests {
             "{\"uuid\":\"m1\",\"type\":\"user\",\"message\":{\"content\":\"first wording\"}}\n",
         )
         .unwrap();
-        let first = ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        let first = index_claude(temp.path(), &temp.path().join("db")).unwrap();
         assert_eq!(first.sessions, 1);
         assert_eq!(first.messages_indexed, 1);
 
-        let second = ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        let second = index_claude(temp.path(), &temp.path().join("db")).unwrap();
         assert_eq!(second.sessions, 1);
         assert_eq!(second.lines_read, 0, "unchanged source is never re-read");
         assert_eq!(second.messages_indexed, 0);
@@ -789,7 +740,7 @@ mod tests {
             "{\"uuid\":\"m1\",\"type\":\"user\",\"message\":{\"content\":\"first wording\"}}\n{\"uuid\":\"m2\",\"type\":\"user\",\"message\":{\"content\":\"second wording\"}}\n",
         )
         .unwrap();
-        let third = ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        let third = index_claude(temp.path(), &temp.path().join("db")).unwrap();
         assert_eq!(
             third.messages_indexed, 2,
             "changed source re-indexes in full"
@@ -813,13 +764,13 @@ mod tests {
             "{\"uuid\":\"m1\",\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"call-3\",\"name\":\"Read\"}]}}\n",
         )
         .unwrap();
-        ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        index_claude(temp.path(), &temp.path().join("db")).unwrap();
         fs::write(
             spills.join("call-3.json"),
             "{\"tool_use_id\":\"call-3\",\"content\":\"late spill phrase\"}",
         )
         .unwrap();
-        ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        index_claude(temp.path(), &temp.path().join("db")).unwrap();
         let connection = open_database(&temp.path().join("db")).unwrap();
         let result: Option<String> = connection
             .query_row(
@@ -854,10 +805,10 @@ mod tests {
         write_spill("call-1.json", "original", 100);
         write_spill("call-2.json", "newest result", 300);
         let cache = temp.path().join("db");
-        ingest_projects(temp.path(), &cache).unwrap();
-        assert_eq!(ingest_projects(temp.path(), &cache).unwrap().lines_read, 0);
+        index_claude(temp.path(), &cache).unwrap();
+        assert_eq!(index_claude(temp.path(), &cache).unwrap().lines_read, 0);
         write_spill("call-1.json", "updated result", 200);
-        ingest_projects(temp.path(), &cache).unwrap();
+        index_claude(temp.path(), &cache).unwrap();
         let connection = open_database(&cache).unwrap();
         let result: String = connection
             .query_row(
@@ -888,9 +839,9 @@ mod tests {
             .open(&path)
             .unwrap();
         let cache = temp.path().join("db");
-        ingest_projects(temp.path(), &cache).unwrap();
+        index_claude(temp.path(), &cache).unwrap();
         drop(guard);
-        ingest_projects(temp.path(), &cache).unwrap();
+        index_claude(temp.path(), &cache).unwrap();
         let connection = open_database(&cache).unwrap();
         let result: Option<String> = connection
             .query_row(
@@ -916,7 +867,7 @@ mod tests {
         .unwrap();
         writeln!(file, "{{bad json").unwrap();
         writeln!(file, "{{\"uuid\":\"b\",\"parentUuid\":\"a\",\"type\":\"future-kind\",\"newField\":{{\"x\":1}},\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"answer\"}}]}}}}").unwrap();
-        let report = ingest_projects(temp.path(), &temp.path().join("app-data")).unwrap();
+        let report = index_claude(temp.path(), &temp.path().join("app-data")).unwrap();
         assert_eq!(report.lines_read, 3);
         assert_eq!(report.messages_indexed, 2);
         assert_eq!(report.malformed_lines, 1);
@@ -941,7 +892,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(indexed, 1);
-        ingest_projects(temp.path(), &temp.path().join("app-data")).unwrap();
+        index_claude(temp.path(), &temp.path().join("app-data")).unwrap();
         let indexed_after_reingest: i64 = connection
             .query_row(
                 "SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'phrase'",
@@ -965,7 +916,7 @@ mod tests {
             "{\"tool_use_id\":\"call-7\",\"content\":[{\"type\":\"text\",\"text\":\"spill output\"}]}",
         )
         .unwrap();
-        ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        index_claude(temp.path(), &temp.path().join("db")).unwrap();
         let connection = open_database(&temp.path().join("db")).unwrap();
         let result: String = connection
             .query_row(
@@ -990,7 +941,7 @@ mod tests {
         )
         .unwrap();
         fs::write(spills.join("unlinked.json"), "{\"text\":\"orphan result\"}").unwrap();
-        ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        index_claude(temp.path(), &temp.path().join("db")).unwrap();
         let connection = open_database(&temp.path().join("db")).unwrap();
         let note: String = connection
             .query_row(
@@ -1001,7 +952,7 @@ mod tests {
             .unwrap();
         assert!(note.contains("no matching tool call"));
         assert_eq!(
-            ingest_projects(temp.path(), &temp.path().join("db"))
+            index_claude(temp.path(), &temp.path().join("db"))
                 .unwrap()
                 .lines_read,
             0
@@ -1044,7 +995,7 @@ mod tests {
         )
         .unwrap();
         writeln!(file).unwrap();
-        let report = ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        let report = index_claude(temp.path(), &temp.path().join("db")).unwrap();
         assert_eq!(report.lines_read, 7);
         assert_eq!(report.messages_indexed, 1);
         assert_eq!(report.malformed_lines, 0);
@@ -1075,7 +1026,7 @@ mod tests {
         )
         .unwrap();
         fs::write(project.join("bad.jsonl"), [0xFF, 0xFE, 0x00, 0x62]).unwrap();
-        let report = ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        let report = index_claude(temp.path(), &temp.path().join("db")).unwrap();
         assert_eq!(report.sessions, 2);
         assert_eq!(report.skipped_files, 0);
         assert_eq!(report.messages_indexed, 1);
@@ -1098,7 +1049,7 @@ mod tests {
             )
             .unwrap();
         }
-        let report = ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        let report = index_claude(temp.path(), &temp.path().join("db")).unwrap();
         assert_eq!(report.sessions, 2);
         let connection = open_database(&temp.path().join("db")).unwrap();
         let count: i64 = connection
@@ -1149,7 +1100,7 @@ mod tests {
             return; // The filesystem treats extension case as the same name.
         }
 
-        let report = ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        let report = index_claude(temp.path(), &temp.path().join("db")).unwrap();
         assert_eq!(report.sessions, 2);
         let connection = open_database(&temp.path().join("db")).unwrap();
         let mut statement = connection
@@ -1197,9 +1148,9 @@ mod tests {
             "{\"uuid\":\"m2\",\"type\":\"user\",\"message\":{\"content\":\"doomed\"}}\n",
         )
         .unwrap();
-        ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        index_claude(temp.path(), &temp.path().join("db")).unwrap();
         fs::remove_file(project.join("gone.jsonl")).unwrap();
-        let report = ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        let report = index_claude(temp.path(), &temp.path().join("db")).unwrap();
         assert_eq!(report.sessions, 1);
         let connection = open_database(&temp.path().join("db")).unwrap();
         let sessions: i64 = connection
@@ -1239,7 +1190,7 @@ mod tests {
             "{\"uuid\":\"m1\",\"type\":\"user\",\"message\":{\"content\":\"caps text\"}}\n",
         )
         .unwrap();
-        let report = ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        let report = index_claude(temp.path(), &temp.path().join("db")).unwrap();
         assert_eq!(report.sessions, 1);
         assert_eq!(report.messages_indexed, 1);
     }
@@ -1265,7 +1216,7 @@ mod tests {
             "{{\"uuid\":\"solo\",\"type\":\"user\",\"message\":{{\"content\":\"independent wording\"}}}}"
         )
         .unwrap();
-        let report = ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        let report = index_claude(temp.path(), &temp.path().join("db")).unwrap();
         assert_eq!(report.messages_indexed, 2);
         let connection = open_database(&temp.path().join("db")).unwrap();
         let message_count: i64 = connection
@@ -1310,7 +1261,7 @@ mod tests {
             "{\"tool_use_id\":\"call-9\",\"content\":[{\"type\":\"text\",\"text\":\"unfindable spill phrase\"}]}",
         )
         .unwrap();
-        ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        index_claude(temp.path(), &temp.path().join("db")).unwrap();
         let connection = open_database(&temp.path().join("db")).unwrap();
         let hits = super::super::spine::search_connection(&connection, "spill phrase", 10).unwrap();
         assert_eq!(hits.len(), 1);
@@ -1364,7 +1315,7 @@ mod tests {
             "{\"uuid\":\"m2\",\"type\":\"user\",\"message\":{\"content\":\"held\"}}\n",
         )
         .unwrap();
-        let initial = ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        let initial = index_claude(temp.path(), &temp.path().join("db")).unwrap();
         assert_eq!(initial.sessions, 2);
         let guard = std::fs::OpenOptions::new()
             .read(true)
@@ -1374,7 +1325,7 @@ mod tests {
         // The locked file is unchanged, so the scan serves it entirely from
         // the cache without reading it and without reporting an unreadable
         // file. A locked file that HAD changed would still count as skipped.
-        let report = ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        let report = index_claude(temp.path(), &temp.path().join("db")).unwrap();
         assert_eq!(report.sessions, 2);
         assert_eq!(report.skipped_files, 0);
         let cached = list_sessions(&temp.path().join("db")).unwrap();
@@ -1383,7 +1334,7 @@ mod tests {
             |session| session.session_id == "munged/locked.jsonl" && session.message_count == 1
         ));
         drop(guard);
-        let report = ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        let report = index_claude(temp.path(), &temp.path().join("db")).unwrap();
         assert_eq!(report.sessions, 2);
         assert_eq!(report.skipped_files, 0);
     }
@@ -1447,7 +1398,7 @@ mod tests {
             "{\"tool_use_id\":\"call-1\",\"content\":[{\"type\":\"text\",\"text\":\"surviving spill\"}]}",
         )
         .unwrap();
-        ingest_projects(temp.path(), &temp.path().join("db")).unwrap();
+        index_claude(temp.path(), &temp.path().join("db")).unwrap();
         let connection = open_database(&temp.path().join("db")).unwrap();
         let tool_result: Option<String> = connection
             .query_row(
@@ -1458,5 +1409,54 @@ mod tests {
             .unwrap();
         let result = tool_result.expect("final record keeps its spill attachment");
         assert!(result.contains("surviving spill"));
+    }
+
+    #[test]
+    fn updated_at_uses_epoch_ms_and_multiple_spills_append_without_overwriting() {
+        let temp = crate::test_support::tempdir().unwrap();
+        let project = temp.path().join("projects").join("munged");
+        let spills = project.join("session-multi").join("tool-results");
+        fs::create_dir_all(&spills).unwrap();
+        let source = project.join("session-multi.jsonl");
+        fs::write(
+            &source,
+            "{\"uuid\":\"m1\",\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"call-a\",\"name\":\"Read\"},{\"type\":\"tool_use\",\"id\":\"call-b\",\"name\":\"Read\"}]}}\n",
+        )
+        .unwrap();
+        fs::write(
+            spills.join("call-a.json"),
+            "{\"content\":\"first spill output\"}",
+        )
+        .unwrap();
+        fs::write(
+            spills.join("call-b.json"),
+            "{\"content\":\"second spill output\"}",
+        )
+        .unwrap();
+        let cache = temp.path().join("db");
+        index_claude(temp.path(), &cache).unwrap();
+
+        let sessions = list_sessions(&cache).unwrap();
+        let updated_at = sessions[0].updated_at.as_deref().unwrap();
+        assert!(
+            updated_at.parse::<u128>().is_ok(),
+            "updated_at should be epoch-ms digits, got {updated_at:?}"
+        );
+        let connection = open_database(&cache).unwrap();
+        let result: String = connection
+            .query_row(
+                "SELECT tool_result FROM messages WHERE uuid = 'm1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            result.contains("first spill output"),
+            "missing first spill: {result}"
+        );
+        assert!(
+            result.contains("second spill output"),
+            "missing second spill: {result}"
+        );
     }
 }

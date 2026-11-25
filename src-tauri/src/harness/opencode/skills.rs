@@ -276,20 +276,15 @@ pub fn install(harness: &OpenCodeHarness, source: &Path) -> Result<String, Strin
         .ok_or("invalid skill folder name")?;
     validate_name(name)?;
     let destination = harness.config_root().join("skills").join(name);
-    if skills::path_exists_no_follow(&destination)? {
-        return Err(format!("skill already exists: {name}"));
-    }
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
+    let id = format!("global-opencode/{name}");
     crate::harness::skill_store::install_tree(
         harness,
-        name,
+        &id,
         "opencode-skill-install",
         source,
         &destination,
     )?;
-    Ok(name.to_owned())
+    Ok(id)
 }
 
 fn install_markdown(harness: &OpenCodeHarness, source: &Path) -> Result<String, String> {
@@ -303,10 +298,8 @@ fn install_markdown(harness: &OpenCodeHarness, source: &Path) -> Result<String, 
         .config_root()
         .join("skills")
         .join(format!("{name}.md"));
+    let id = format!("global-opencode/{name}.md");
     skills::ensure_plain_parent(&destination)?;
-    if skills::path_exists_no_follow(&destination)? {
-        return Err(format!("skill already exists: {name}"));
-    }
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
@@ -325,7 +318,7 @@ fn install_markdown(harness: &OpenCodeHarness, source: &Path) -> Result<String, 
     let op = ledger::reserve_mutation(
         harness.config_root(),
         ResourceKind::Skill,
-        name,
+        &id,
         "opencode-skill-install",
         &plan,
         &guard,
@@ -353,7 +346,7 @@ fn install_markdown(harness: &OpenCodeHarness, source: &Path) -> Result<String, 
     }
     ledger::complete_mutation(harness.config_root(), &op, &guard)
         .map_err(|error| error.to_string())?;
-    Ok(name.to_owned())
+    Ok(id)
 }
 
 pub fn uninstall(harness: &OpenCodeHarness, project: &Path, id: &str) -> Result<(), String> {
@@ -364,7 +357,7 @@ pub fn uninstall(harness: &OpenCodeHarness, project: &Path, id: &str) -> Result<
     if !entry.editable {
         return Err("inherited project skills are read-only outside the selected project".into());
     }
-    let source = if is_flat_markdown(&entry.path) {
+    let source = if is_flat_markdown(harness, project, &entry.path) {
         entry.path.clone()
     } else {
         entry
@@ -391,12 +384,12 @@ pub fn uninstall(harness: &OpenCodeHarness, project: &Path, id: &str) -> Result<
     }
     let backup = ledger::backup_path(harness.config_root(), id, "opencode-skill-uninstall");
     skills::ensure_plain_parent(&backup)?;
-    if skills::path_exists_no_follow(&backup)? {
-        return Err("skill uninstall backup already exists".into());
-    }
     fs::create_dir_all(backup.parent().ok_or("backup path has no parent")?)
         .map_err(|error| error.to_string())?;
     let guard = atomic::lock_mutations(&source).map_err(|error| error.to_string())?;
+    if skills::path_exists_no_follow(&backup)? {
+        return Err("skill uninstall backup already exists".into());
+    }
     let checksum = checksum_path(&source)?;
     let plan = atomic::MutationPlan {
         target: source.clone(),
@@ -439,7 +432,7 @@ pub fn restore(
         skills::ensure_backup_path(harness.config_root(), backup)?;
         skills::validate_plain_tree(backup)?;
     } else {
-        ensure_backup_file_path(harness.config_root(), backup)?;
+        crate::harness::fs_guard::ensure_backup_file_path(harness.config_root(), backup)?;
         skills::ensure_plain_file_if_present(backup)?;
     }
     if id.trim().is_empty() || id.chars().any(char::is_control) {
@@ -472,15 +465,15 @@ pub fn restore(
     if !allowed_skill_path(harness, project, &destination) {
         return Err("recorded skill target is outside the OpenCode skill roots".into());
     }
-    if skills::path_exists_no_follow(&destination)? {
-        return Err(format!("skill already exists: {id}"));
-    }
     skills::ensure_plain_parent(&destination)?;
     let checksum = checksum_path(backup)?;
     if checksum != expected_checksum {
         return Err("skill backup does not match the completed uninstall checksum".into());
     }
     let guard = atomic::lock_mutations(&destination).map_err(|error| error.to_string())?;
+    if skills::path_exists_no_follow(&destination)? {
+        return Err(format!("skill already exists: {id}"));
+    }
     let plan = atomic::MutationPlan {
         target: destination.clone(),
         backup: None,
@@ -562,14 +555,34 @@ fn resolved_or_deleted_path(path: &Path) -> Option<PathBuf> {
     Some(parent.join(path.file_name()?))
 }
 
-fn is_flat_markdown(path: &Path) -> bool {
-    path.extension().and_then(|extension| extension.to_str()) == Some("md")
-        && (path.file_name().and_then(|name| name.to_str()) != Some("SKILL.md")
-            || path
-                .parent()
-                .and_then(Path::file_name)
-                .and_then(|name| name.to_str())
-                == Some("skills"))
+fn is_flat_markdown(harness: &OpenCodeHarness, project: &Path, path: &Path) -> bool {
+    if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
+        return false;
+    }
+    if path.file_name().and_then(|name| name.to_str()) != Some("SKILL.md") {
+        return true;
+    }
+    let Some(parent) = path
+        .parent()
+        .and_then(crate::harness::fs_guard::canonical_or_missing_tail)
+    else {
+        return false;
+    };
+    let mut roots = vec![
+        harness.config_root().join("skills"),
+        harness.home().join(".claude/skills"),
+        harness.home().join(".agents/skills"),
+    ];
+    if let Ok(scope) = project_scope(project) {
+        if let Some(selected) = scope.last() {
+            roots.push(selected.join(".opencode/skills"));
+            roots.push(selected.join(".claude/skills"));
+            roots.push(selected.join(".agents/skills"));
+        }
+    }
+    roots.iter().any(|root| {
+        crate::harness::fs_guard::canonical_or_missing_tail(root).as_ref() == Some(&parent)
+    })
 }
 
 fn checksum_path(path: &Path) -> Result<String, String> {
@@ -601,28 +614,6 @@ fn copy_plain_file(source: &Path, destination: &Path) -> Result<(), String> {
         .write_all(&contents)
         .map_err(|error| error.to_string())?;
     output.sync_all().map_err(|error| error.to_string())
-}
-
-fn ensure_backup_file_path(config_root: &Path, backup: &Path) -> Result<(), String> {
-    crate::harness::claude::skills::ensure_plain_components(backup)?;
-    let metadata = fs::symlink_metadata(backup).map_err(|error| error.to_string())?;
-    if atomic::is_link_or_reparse(&metadata) || !metadata.is_file() {
-        return Err("skill backup is not a plain file".into());
-    }
-    let backup_root = ledger::backup_root(config_root);
-    crate::harness::claude::skills::ensure_plain_directory(&backup_root)?;
-    let actual_parent = backup
-        .parent()
-        .ok_or("backup has no parent")?
-        .canonicalize()
-        .map_err(|error| error.to_string())?;
-    let expected_parent = backup_root
-        .canonicalize()
-        .map_err(|error| error.to_string())?;
-    if actual_parent != expected_parent {
-        return Err("backup is outside the harness backup directory".into());
-    }
-    Ok(())
 }
 
 fn validate_name(name: &str) -> Result<(), String> {
@@ -752,7 +743,10 @@ mod tests {
 
         let source = temp.path().join("installed-flat.md");
         fs::write(&source, "# Flat skill\n").unwrap();
-        assert_eq!(install(&harness, &source).unwrap(), "installed-flat");
+        assert_eq!(
+            install(&harness, &source).unwrap(),
+            "global-opencode/installed-flat.md"
+        );
         assert_eq!(
             fs::read_to_string(config.join("skills/installed-flat.md")).unwrap(),
             "# Flat skill\n"
@@ -778,5 +772,32 @@ mod tests {
 
         let harness = OpenCodeHarness::new(config, home);
         assert!(inventory(&harness, &project).unwrap().is_empty());
+    }
+
+    #[test]
+    fn install_id_matches_inventory_and_nested_skills_dir_is_not_flat() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let config = home.join(".config/opencode");
+        let project = temp.path().join("project");
+        fs::create_dir_all(project.join(".git")).unwrap();
+
+        let source_dir = temp.path().join("src/my-skill");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(
+            source_dir.join("SKILL.md"),
+            "---\nname: my-skill\n---\nbody\n",
+        )
+        .unwrap();
+        let harness = OpenCodeHarness::new(config.clone(), home);
+        let id = install(&harness, &source_dir).unwrap();
+        assert_eq!(id, "global-opencode/my-skill");
+        let found = inventory(&harness, &project).unwrap();
+        assert!(found.iter().any(|entry| entry.id == id));
+
+        let nested_named_skills = config.join("skills/team/skills/SKILL.md");
+        fs::create_dir_all(nested_named_skills.parent().unwrap()).unwrap();
+        fs::write(&nested_named_skills, "---\nname: nested\n---\n").unwrap();
+        assert!(!is_flat_markdown(&harness, &project, &nested_named_skills));
     }
 }

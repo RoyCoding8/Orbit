@@ -80,6 +80,7 @@ pub(super) fn spawn_capture<R: Read + Send + 'static>(
 pub(crate) struct ChildTree {
     child: Child,
     cleaned: bool,
+    reaped_status: Option<ExitStatus>,
     #[cfg(windows)]
     job: WindowsJob,
 }
@@ -92,6 +93,7 @@ impl ChildTree {
             Ok(Self {
                 child: command.spawn()?,
                 cleaned: false,
+                reaped_status: None,
             })
         }
 
@@ -105,6 +107,7 @@ impl ChildTree {
             Ok(Self {
                 child: command.spawn()?,
                 cleaned: false,
+                reaped_status: None,
             })
         }
     }
@@ -113,17 +116,78 @@ impl ChildTree {
         &mut self.child
     }
 
+    pub(crate) fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        if self.reaped_status.is_some() {
+            return Ok(self.reaped_status);
+        }
+        let status = self.child.try_wait()?;
+        if status.is_some() {
+            self.reaped_status = status;
+        }
+        Ok(status)
+    }
+
+    /// Check whether the direct child has exited without reaping it on Unix,
+    /// keeping its PID/PGID pinned until `cleanup()` terminates descendants.
+    pub(crate) fn has_exited(&mut self) -> io::Result<bool> {
+        if self.reaped_status.is_some() {
+            return Ok(true);
+        }
+        #[cfg(unix)]
+        {
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let rc = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    self.child.id() as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            if rc == -1 {
+                let err = io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::ECHILD) {
+                    return Ok(true);
+                }
+                return Err(err);
+            }
+            let exited_pid = unsafe { info.si_pid() };
+            Ok(exited_pid != 0)
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(self.try_wait()?.is_some())
+        }
+    }
+
     /// Stop descendants as well as the direct child, including after the
     /// direct child has exited and left a process group or inherited pipe open.
+    /// If the direct child was already reaped, never signal its PID/PGID again
+    /// because the OS may have recycled the PID for an unrelated process.
     pub(crate) fn cleanup(&mut self) -> Option<ExitStatus> {
         if self.cleaned {
-            return self.child.try_wait().ok().flatten();
+            return self
+                .reaped_status
+                .or_else(|| self.child.try_wait().ok().flatten());
         }
         self.cleaned = true;
 
+        if let Some(status) = self.reaped_status {
+            #[cfg(windows)]
+            {
+                self.job.terminate();
+            }
+            return Some(status);
+        }
+
         #[cfg(unix)]
-        unsafe {
-            libc::kill(-(self.child.id() as libc::pid_t), libc::SIGKILL);
+        {
+            let pid = self.child.id();
+            if pid > 0 {
+                unsafe {
+                    libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+                }
+            }
         }
 
         #[cfg(windows)]
@@ -132,7 +196,8 @@ impl ChildTree {
         }
 
         let _ = self.child.kill();
-        self.child.wait().ok()
+        self.reaped_status = self.child.wait().ok();
+        self.reaped_status
     }
 }
 
@@ -160,6 +225,7 @@ impl ChildTree {
         Ok(Self {
             child,
             cleaned: false,
+            reaped_status: None,
             job,
         })
     }
@@ -356,5 +422,32 @@ mod windows_job {
         fn Thread32Next(snapshot: *mut c_void, entry: *mut ThreadEntry32) -> i32;
         fn OpenThread(access: u32, inherit: i32, thread_id: u32) -> *mut c_void;
         fn ResumeThread(thread: *mut c_void) -> u32;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_after_try_wait_reap_returns_cached_status() {
+        let mut cmd = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "exit", "0"]);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.args(["-c", "exit 0"]);
+            c
+        };
+        let mut tree = ChildTree::spawn(&mut cmd).unwrap();
+        let status = loop {
+            if let Some(s) = tree.try_wait().unwrap() {
+                break s;
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(status.success());
+        assert_eq!(tree.cleanup(), Some(status));
     }
 }

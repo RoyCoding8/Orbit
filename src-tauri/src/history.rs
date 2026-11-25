@@ -1,6 +1,9 @@
 //! Ledger-backed, user-facing file and directory history.
 
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static SIBLING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -44,6 +47,19 @@ pub enum HistoryOperationStatus {
     Drift,
     Legacy,
     Unavailable,
+}
+
+impl From<orbit_core::state_machines::HistoryOperationStatus> for HistoryOperationStatus {
+    fn from(status: orbit_core::state_machines::HistoryOperationStatus) -> Self {
+        match status {
+            orbit_core::state_machines::HistoryOperationStatus::Applied => Self::Applied,
+            orbit_core::state_machines::HistoryOperationStatus::Pending => Self::Pending,
+            orbit_core::state_machines::HistoryOperationStatus::NotApplied => Self::NotApplied,
+            orbit_core::state_machines::HistoryOperationStatus::Drift => Self::Drift,
+            orbit_core::state_machines::HistoryOperationStatus::Legacy => Self::Legacy,
+            orbit_core::state_machines::HistoryOperationStatus::Unavailable => Self::Unavailable,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -111,6 +127,44 @@ struct TargetScope {
     kind: VersionKind,
 }
 
+impl TargetScope {
+    fn new(
+        scope: HistoryScope,
+        id: impl Into<String>,
+        label: impl Into<String>,
+        kind: VersionKind,
+    ) -> Self {
+        Self {
+            scope,
+            id: id.into(),
+            label: label.into(),
+            kind,
+        }
+    }
+
+    fn project(project: &Path, kind: VersionKind) -> Self {
+        Self::new(
+            HistoryScope::Project,
+            project.to_string_lossy(),
+            project_label(project),
+            kind,
+        )
+    }
+
+    fn global_or_project(
+        global: bool,
+        project: &Path,
+        global_label: &str,
+        kind: VersionKind,
+    ) -> Self {
+        if global {
+            Self::new(HistoryScope::Global, "global", global_label, kind)
+        } else {
+            Self::project(project, kind)
+        }
+    }
+}
+
 /// Load current versions and the append-only operation log. Only well-known
 /// harness targets enter the versions list; every ledger row remains in logs.
 /// Old app-owned payloads are cleaned by the same validated, idempotent rule
@@ -128,23 +182,39 @@ pub fn load(harness: &impl Harness, project: &Path) -> Result<HistorySnapshot, S
     let lock_path = harness.config_root().join(".orbit").join("ledger.json");
     let _guard = atomic::lock_mutations(&lock_path).map_err(|error| error.to_string())?;
     let rows = ledger::read(harness.config_root())?;
+    let mut last_index_by_target: std::collections::HashMap<&Path, usize> =
+        std::collections::HashMap::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        if let Some(target) = row.target.as_deref() {
+            last_index_by_target.insert(Path::new(target), index);
+        }
+    }
+    let mut backup_status_cache: std::collections::HashMap<(&Path, Option<&str>), BackupStatus> =
+        std::collections::HashMap::new();
+    let mut target_checksum_cache: std::collections::HashMap<
+        &Path,
+        Result<Option<String>, String>,
+    > = std::collections::HashMap::new();
     let mut versions = Vec::new();
     let mut logs = Vec::with_capacity(rows.len());
 
     for (index, row) in rows.iter().enumerate() {
-        let scope = row
-            .target
-            .as_deref()
-            .and_then(|target| target_scope(harness, &project, row, Path::new(target)));
+        let target_path = row.target.as_deref().map(Path::new);
+        let scope = target_path.and_then(|target| target_scope(harness, &project, row, target));
         let backup_status = row.backup_path.as_deref().map(|backup| {
-            saved_backup_status(
-                harness.config_root(),
-                Path::new(backup),
-                row.before_checksum.as_deref(),
-            )
-            .unwrap_or(BackupStatus::Unavailable)
+            let key = (Path::new(backup), row.before_checksum.as_deref());
+            *backup_status_cache.entry(key).or_insert_with(|| {
+                saved_backup_status(harness.config_root(), key.0, key.1)
+                    .unwrap_or(BackupStatus::Unavailable)
+            })
         });
-        let status = history_status(row);
+        let superseded = row.status == Some(ledger::LedgerStatus::Pending)
+            && target_path.is_some_and(|target| {
+                last_index_by_target
+                    .get(target)
+                    .is_some_and(|&last| last > index)
+            });
+        let status = history_status(row, superseded);
         let log_scope = scope.as_ref();
         logs.push(HistoryLog {
             id: row
@@ -179,9 +249,12 @@ pub fn load(harness: &impl Harness, project: &Path) -> Result<HistorySnapshot, S
             continue;
         }
         let kind = scope.kind;
-        let current_result = checksum_if_present(&target);
+        let current_result = target_checksum_cache
+            .entry(target_path.expect("target checked above"))
+            .or_insert_with(|| checksum_if_present(&target));
         let current_checksum = current_result.as_ref().ok().cloned().flatten();
-        let restorable = backup_status == BackupStatus::Available
+        let restorable = !superseded
+            && backup_status == BackupStatus::Available
             && current_result.is_ok()
             && matches!(ledger::operation_state(row), Ok(OperationState::Applied));
         versions.push(HistoryVersion {
@@ -233,7 +306,9 @@ pub fn restore(
         ));
     }
     let rows = ledger::read(harness.config_root())?;
-    let row = row_by_operation(&rows, id)?.clone();
+    let (row_index, row_ref) = row_by_operation_with_index(&rows, id)?;
+    let superseded = ledger::pending_was_superseded(&rows, row_index, row_ref);
+    let row = row_ref.clone();
     if !reservation_is_complete(&row) {
         return Err("this history entry has no complete ledger reservation".into());
     }
@@ -260,7 +335,7 @@ pub fn restore(
         }
         BackupStatus::Unavailable => return Err("the saved backup is unavailable".into()),
     }
-    if !matches!(ledger::operation_state(&row)?, OperationState::Applied) {
+    if superseded || !matches!(ledger::operation_state(&row)?, OperationState::Applied) {
         return Err("this history entry did not complete and cannot be restored".into());
     }
 
@@ -311,6 +386,8 @@ pub fn restore(
 /// Delete only the exact payload named by a complete ledger row. The audit
 /// row remains in place and shared payloads cannot be removed independently.
 pub fn delete(harness: &impl Harness, id: &str) -> Result<(), String> {
+    let lock_path = ledger::backup_root(harness.config_root());
+    let _guard = atomic::lock_mutations(&lock_path).map_err(|error| error.to_string())?;
     let rows = ledger::read(harness.config_root())?;
     let row = row_by_operation(&rows, id)?;
     if !reservation_is_complete(row) {
@@ -333,8 +410,6 @@ pub fn delete(harness: &impl Harness, id: &str) -> Result<(), String> {
             "this payload is shared by another ledger entry and cannot be deleted alone".into(),
         );
     }
-    let lock_path = ledger::backup_root(harness.config_root());
-    let _guard = atomic::lock_mutations(&lock_path).map_err(|error| error.to_string())?;
     let Some(kind) = app_backup_kind(harness.config_root(), &backup)? else {
         return Ok(());
     };
@@ -359,16 +434,25 @@ pub fn cleanup_legacy(harness: &impl Harness) -> Result<CleanupReport, String> {
     }
     ensure_plain_directory(&backup_root)?;
 
-    let mut report = CleanupReport::default();
-    let mut visited = std::collections::HashSet::new();
+    let mut rows_by_backup: std::collections::HashMap<&Path, Vec<&LedgerRow>> =
+        std::collections::HashMap::new();
+    let mut backup_order: Vec<&Path> = Vec::new();
     for row in &rows {
-        let Some(path) = row.backup_path.as_deref().map(PathBuf::from) else {
+        let Some(path) = row.backup_path.as_deref().map(Path::new) else {
             continue;
         };
-        if !visited.insert(path.clone()) {
-            continue;
-        }
-        let kind = match app_backup_kind(harness.config_root(), &path) {
+        rows_by_backup
+            .entry(path)
+            .or_insert_with(|| {
+                backup_order.push(path);
+                Vec::new()
+            })
+            .push(row);
+    }
+
+    let mut report = CleanupReport::default();
+    for path in backup_order {
+        let kind = match app_backup_kind(harness.config_root(), path) {
             Ok(Some(kind)) => kind,
             Ok(None) => {
                 report.missing += 1;
@@ -379,12 +463,7 @@ pub fn cleanup_legacy(harness: &impl Harness) -> Result<CleanupReport, String> {
                 continue;
             }
         };
-        let linked_rows: Vec<_> = rows
-            .iter()
-            .filter(|candidate| {
-                candidate.backup_path.as_deref().map(Path::new) == Some(path.as_path())
-            })
-            .collect();
+        let linked_rows = &rows_by_backup[path];
         let legacy_candidate = linked_rows.iter().any(|candidate| {
             !reservation_is_complete(candidate)
                 || (kind == VersionKind::Directory
@@ -396,20 +475,19 @@ pub fn cleanup_legacy(harness: &impl Harness) -> Result<CleanupReport, String> {
         if !legacy_candidate {
             continue;
         }
+        let mut cached_checksum: Option<Result<String, String>> = None;
         let shared_with_modern = linked_rows.iter().any(|candidate| {
             reservation_is_complete(candidate)
                 && candidate
                     .before_checksum
                     .as_deref()
                     .is_some_and(|checksum| {
-                        checksum.starts_with("tree-v2-sha256:") || kind == VersionKind::File
-                    })
-                && candidate
-                    .before_checksum
-                    .as_deref()
-                    .is_some_and(|checksum| {
-                        saved_backup_status(harness.config_root(), &path, Some(checksum))
-                            == Ok(BackupStatus::Available)
+                        (checksum.starts_with("tree-v2-sha256:") || kind == VersionKind::File)
+                            && checksum_matches_kind(kind, checksum)
+                            && cached_checksum
+                                .get_or_insert_with(|| artifact_checksum(path, kind))
+                                .as_deref()
+                                == Ok(checksum)
                     })
         });
         if shared_with_modern {
@@ -425,15 +503,19 @@ pub fn cleanup_legacy(harness: &impl Harness) -> Result<CleanupReport, String> {
                 report.preserved += 1;
                 continue;
             };
-            if artifact_checksum(&path, kind)? != expected {
+            let actual = cached_checksum
+                .get_or_insert_with(|| artifact_checksum(path, kind))
+                .as_ref()
+                .map_err(Clone::clone)?;
+            if actual != expected {
                 report.preserved += 1;
                 continue;
             }
-        } else if !plain_tree_is_valid(&path).unwrap_or(false) {
+        } else if !plain_tree_is_valid(path).unwrap_or(false) {
             report.preserved += 1;
             continue;
         }
-        match remove_plain_artifact(&path, kind) {
+        match remove_plain_artifact(path, kind) {
             Ok(()) => report.removed += 1,
             Err(_) => report.preserved += 1,
         }
@@ -514,51 +596,94 @@ fn restore_directory(
         ledger::verify_directory_checksum(&backup_checksum, current.as_deref().unwrap())?;
     }
 
-    if current.is_some() {
-        if let Err(error) = std::fs::remove_dir_all(target) {
+    let displaced = if current.is_some() {
+        let displaced = unique_sibling(target, "history-displaced");
+        if path_exists_no_follow(&displaced)? {
+            let _ = std::fs::remove_dir_all(&stage);
+            return Err("temporary rollback directory already exists".into());
+        }
+        if let Err(error) = std::fs::rename(target, &displaced) {
             let _ = std::fs::remove_dir_all(&stage);
             return Err(format!(
                 "reserved restore {op} could not replace {}: {error}",
                 target.display()
             ));
         }
-    }
+        Some(displaced)
+    } else {
+        None
+    };
     if let Err(error) = std::fs::rename(&stage, target) {
-        if let (Some(backup), Some(_)) = (backup.as_deref(), current.as_deref()) {
-            let _ = copy_plain_directory(backup, target);
+        if let Some(displaced) = displaced.as_deref() {
+            let _ = std::fs::rename(displaced, target);
         }
         let _ = std::fs::remove_dir_all(&stage);
         return Err(format!(
             "reserved restore {op} could not install the saved directory: {error}"
         ));
     }
-    let restored = ledger::directory_checksum(target)?;
-    ledger::verify_directory_checksum(&restored, source_checksum)?;
+    let verify_result = ledger::directory_checksum(target)
+        .and_then(|restored| ledger::verify_directory_checksum(&restored, source_checksum));
+    if let Err(error) = verify_result {
+        let _ = std::fs::rename(target, &stage);
+        if let Some(displaced) = displaced.as_deref() {
+            let _ = std::fs::rename(displaced, target);
+        }
+        let _ = std::fs::remove_dir_all(&stage);
+        return Err(error);
+    }
+    if let Some(displaced) = displaced.as_deref() {
+        let _ = std::fs::remove_dir_all(displaced);
+    }
     ledger::complete_mutation(harness.config_root(), &op, &guard)
 }
 
 fn row_by_operation<'a>(rows: &'a [LedgerRow], id: &str) -> Result<&'a LedgerRow, String> {
+    row_by_operation_with_index(rows, id).map(|(_, row)| row)
+}
+
+fn row_by_operation_with_index<'a>(
+    rows: &'a [LedgerRow],
+    id: &str,
+) -> Result<(usize, &'a LedgerRow), String> {
     if id.trim().is_empty() {
         return Err("history entry id is empty".into());
     }
-    let mut matches = rows.iter().filter(|row| row.op.as_deref() == Some(id));
+    let mut matches = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.op.as_deref() == Some(id));
     match (matches.next(), matches.next()) {
-        (Some(row), None) => Ok(row),
+        (Some(found), None) => Ok(found),
         (Some(_), Some(_)) => Err("history operation id is ambiguous".into()),
         (None, _) => Err("history entry no longer exists".into()),
     }
 }
 
-fn history_status(row: &LedgerRow) -> HistoryOperationStatus {
-    if !reservation_is_complete(row) {
-        return HistoryOperationStatus::Legacy;
-    }
-    match ledger::operation_state(row) {
-        Ok(OperationState::Applied) => HistoryOperationStatus::Applied,
-        Ok(OperationState::NotApplied) => HistoryOperationStatus::NotApplied,
-        Ok(OperationState::Drift) => HistoryOperationStatus::Drift,
-        Err(_) => HistoryOperationStatus::Unavailable,
-    }
+/// Pure status classifier for a history log row given reservation completeness,
+/// whether a pending row was superseded by a later operation, and the resolved
+/// operation state.
+pub fn classify_history_status(
+    reservation_complete: bool,
+    superseded_pending: bool,
+    state: Option<OperationState>,
+) -> HistoryOperationStatus {
+    orbit_core::state_machines::classify_history_status(
+        reservation_complete,
+        superseded_pending,
+        state,
+    )
+    .into()
+}
+
+fn history_status(row: &LedgerRow, superseded: bool) -> HistoryOperationStatus {
+    let complete = reservation_is_complete(row);
+    let state = if complete && !superseded {
+        ledger::operation_state(row).ok()
+    } else {
+        None
+    };
+    classify_history_status(complete, superseded, state)
 }
 
 fn reservation_is_complete(row: &LedgerRow) -> bool {
@@ -578,27 +703,15 @@ fn target_scope(
     let kind = row.resource_kind.as_str();
     if kind == "harnessimport" {
         let global = crate::transfer::history_scope(harness, project, target)?;
-        return Some(TargetScope {
-            scope: if global {
-                HistoryScope::Global
-            } else {
-                HistoryScope::Project
-            },
-            id: if global {
-                "global".into()
-            } else {
-                project.to_string_lossy().into_owned()
-            },
-            label: if global {
-                "User resources".into()
-            } else {
-                project_label(project)
-            },
-            kind: VersionKind::File,
-        });
+        return Some(TargetScope::global_or_project(
+            global,
+            project,
+            "User resources",
+            VersionKind::File,
+        ));
     }
     if harness.id() == crate::harness::CODEX {
-        return codex_target_scope(harness, project, kind, target);
+        return codex_target_scope(harness, config_root, project, kind, target);
     }
     if matches!(
         harness.id(),
@@ -607,130 +720,113 @@ fn target_scope(
             | crate::harness::PI
             | crate::harness::ANTIGRAVITY
     ) {
-        return native_target_scope(harness, project, row, target);
+        return native_target_scope(harness, config_root, project, row, target);
     }
-    let global_path = |path: PathBuf, version_kind| {
-        (target == path).then(|| TargetScope {
-            scope: HistoryScope::Global,
-            id: "global".into(),
-            label: "Global configuration".into(),
-            kind: version_kind,
+    let global_file = |path: PathBuf| {
+        (target == path).then(|| {
+            TargetScope::new(
+                HistoryScope::Global,
+                "global",
+                "Global configuration",
+                VersionKind::File,
+            )
         })
     };
-    if kind == "settings" {
-        if let Some(scope) = global_path(config_root.join("settings.json"), VersionKind::File) {
-            return Some(scope);
+    match kind {
+        "settings" => {
+            if let Some(scope) = global_file(config_root.join("settings.json")) {
+                return Some(scope);
+            }
+            if target == project.join(".claude/settings.json")
+                || target == project.join(".claude/settings.local.json")
+            {
+                return Some(TargetScope::project(project, VersionKind::File));
+            }
         }
-        if target == project.join(".claude/settings.json")
-            || target == project.join(".claude/settings.local.json")
+        "mcpserver" => return global_file(canonical_location(&harness.mcp_path())?),
+        "globalinstructions" => {
+            if let Some(scope) = global_file(config_root.join("CLAUDE.md")) {
+                return Some(scope);
+            }
+            if markdown_below(&config_root.join("rules"), target) {
+                return Some(TargetScope::new(
+                    HistoryScope::Global,
+                    "global-instructions",
+                    "User instructions",
+                    VersionKind::File,
+                ));
+            }
+        }
+        "projectinstructions"
+            if [
+                "CLAUDE.md",
+                "CLAUDE.local.md",
+                ".claude/CLAUDE.md",
+                ".claude/CLAUDE.local.md",
+            ]
+            .iter()
+            .any(|name| target == project.join(name))
+                || markdown_below(&project.join(".claude/rules"), target) =>
         {
-            return Some(TargetScope {
-                scope: HistoryScope::Project,
-                id: project.to_string_lossy().into_owned(),
-                label: project_label(project),
-                kind: VersionKind::File,
-            });
+            return Some(TargetScope::project(project, VersionKind::File));
         }
-    }
-    if kind == "mcpserver" {
-        if let Some(scope) =
-            global_path(canonical_location(&harness.mcp_path())?, VersionKind::File)
-        {
-            return Some(scope);
+        "skill" => {
+            if !safe_single_component(&row.id) {
+                return None;
+            }
+            let directory = config_root.join("skills").join(&row.id);
+            let version_kind = if target == directory {
+                VersionKind::Directory
+            } else if target == directory.join("SKILL.md") {
+                VersionKind::File
+            } else {
+                return None;
+            };
+            return Some(TargetScope::new(
+                HistoryScope::Global,
+                "global-skills",
+                "Global skills",
+                version_kind,
+            ));
         }
-    }
-    if kind == "globalinstructions" {
-        if let Some(scope) = global_path(config_root.join("CLAUDE.md"), VersionKind::File) {
-            return Some(scope);
+        "memory" => {
+            if let Some(slug) = memory_project_slug(config_root, target) {
+                return Some(TargetScope::new(
+                    HistoryScope::Project,
+                    format!("claude-memory:{slug}"),
+                    format!("Project memory · {slug}"),
+                    VersionKind::File,
+                ));
+            }
+            let custom =
+                crate::harness::claude::memories::configured_memory_directory(harness, project)
+                    .and_then(|path| path.canonicalize().ok());
+            if custom
+                .as_ref()
+                .is_some_and(|root| root.starts_with(project) && markdown_below(root, target))
+            {
+                return Some(TargetScope::new(
+                    HistoryScope::Project,
+                    project.to_string_lossy(),
+                    format!("Project memory · {}", project_label(project)),
+                    VersionKind::File,
+                ));
+            }
         }
-        if markdown_below(&config_root.join("rules"), target) {
-            return Some(TargetScope {
-                scope: HistoryScope::Global,
-                id: "global-instructions".into(),
-                label: "User instructions".into(),
-                kind: VersionKind::File,
-            });
-        }
-    }
-    if kind == "projectinstructions"
-        && ([
-            "CLAUDE.md",
-            "CLAUDE.local.md",
-            ".claude/CLAUDE.md",
-            ".claude/CLAUDE.local.md",
-        ]
-        .iter()
-        .any(|name| target == project.join(name))
-            || markdown_below(&project.join(".claude/rules"), target))
-    {
-        return Some(TargetScope {
-            scope: HistoryScope::Project,
-            id: project.to_string_lossy().into_owned(),
-            label: project_label(project),
-            kind: VersionKind::File,
-        });
-    }
-    if kind == "skill" {
-        let skills_root = config_root.join("skills");
-        let directory = skills_root.join(&row.id);
-        if !safe_single_component(&row.id) {
-            return None;
-        }
-        let version_kind = if target == directory {
-            VersionKind::Directory
-        } else if target == directory.join("SKILL.md") {
-            VersionKind::File
-        } else {
-            return None;
-        };
-        return Some(TargetScope {
-            scope: HistoryScope::Global,
-            id: "global-skills".into(),
-            label: "Global skills".into(),
-            kind: version_kind,
-        });
-    }
-    if kind == "memory" {
-        if let Some(slug) = memory_project_slug(config_root, target) {
-            return Some(TargetScope {
-                scope: HistoryScope::Project,
-                id: format!("claude-memory:{slug}"),
-                label: format!("Project memory · {slug}"),
-                kind: VersionKind::File,
-            });
-        }
-        let custom =
-            crate::harness::claude::memories::configured_memory_directory(harness, project)
-                .and_then(|path| path.canonicalize().ok());
-        if custom
-            .as_ref()
-            .is_some_and(|root| root.starts_with(project) && markdown_below(root, target))
-        {
-            return Some(TargetScope {
-                scope: HistoryScope::Project,
-                id: project.to_string_lossy().into_owned(),
-                label: format!("Project memory · {}", project_label(project)),
-                kind: VersionKind::File,
-            });
-        }
+        _ => {}
     }
     None
 }
 
 fn codex_target_scope(
     harness: &impl Harness,
+    config: &Path,
     project: &Path,
     resource: &str,
     target: &Path,
 ) -> Option<TargetScope> {
-    let config = canonical_location(harness.config_root())?;
     let home = canonical_location(harness.user_home()?)?;
-    let file = |scope, id: &str, label: &str| TargetScope {
-        scope,
-        id: id.into(),
-        label: label.into(),
-        kind: VersionKind::File,
-    };
+    let file = |scope, id: &str, label: &str| TargetScope::new(scope, id, label, VersionKind::File);
     if resource == "memory"
         && crate::harness::codex::memories::is_memory_file(&config.join("memories"), target)
     {
@@ -765,7 +861,7 @@ fn codex_target_scope(
                 "User instructions",
             ));
         }
-        let codex = crate::harness::codex::CodexHarness::new(config.clone(), home.clone());
+        let codex = crate::harness::codex::CodexHarness::new(config.to_path_buf(), home.clone());
         let mut names = vec!["AGENTS.md".to_owned(), "AGENTS.override.md".to_owned()];
         names.extend(crate::harness::codex::memories::fallback_filenames(&codex).ok()?);
         if names.iter().any(|name| target == project.join(name)) {
@@ -830,12 +926,12 @@ fn codex_target_scope(
 
 fn native_target_scope(
     harness: &impl Harness,
+    config: &Path,
     project: &Path,
     row: &LedgerRow,
     target: &Path,
 ) -> Option<TargetScope> {
     let resource = row.resource_kind.as_str();
-    let config = canonical_location(harness.config_root())?;
     let project = canonical_location(project)?;
     let is_kiro = harness.id() == crate::harness::KIRO;
     let is_pi = harness.id() == crate::harness::PI;
@@ -848,35 +944,17 @@ fn native_target_scope(
     };
     let scope = |kind| {
         let is_global = !target.starts_with(&project)
-            || (target.starts_with(&config)
-                && !(project != config && project.starts_with(&config)));
-        TargetScope {
-            scope: if is_global {
-                HistoryScope::Global
-            } else {
-                HistoryScope::Project
-            },
-            id: if is_global {
-                "global".into()
-            } else {
-                project.to_string_lossy().into_owned()
-            },
-            label: if is_global {
-                "User resources".into()
-            } else {
-                project_label(&project)
-            },
-            kind,
-        }
+            || (target.starts_with(config) && !(project != config && project.starts_with(config)));
+        TargetScope::global_or_project(is_global, &project, "User resources", kind)
     };
     if matches!(resource, "settings" | "mcpserver") {
         let owned = if let Some(h) = &antigravity {
             target == canonical_location(&h.settings_path())?
-                || [&config, &project.join(".agents")].into_iter().any(|root| {
+                || [config, &project.join(".agents")].into_iter().any(|root| {
                     target == root.join("mcp_config.json") || target == root.join("hooks.json")
                 })
         } else if is_kiro {
-            [&config, &project.join(".kiro")].into_iter().any(|root| {
+            [config, &project.join(".kiro")].into_iter().any(|root| {
                 target == root.join("settings/cli.json")
                     || target == root.join("settings/mcp.json")
                     || ["agents", "hooks"]
@@ -884,11 +962,11 @@ fn native_target_scope(
                         .any(|folder| single_file_below(&root.join(folder), target, "json"))
             })
         } else if is_pi {
-            [&config, &project.join(".pi")]
+            [config, &project.join(".pi")]
                 .into_iter()
                 .any(|root| target == root.join("settings.json") || target == root.join("mcp.json"))
         } else {
-            [&config, &project, &project.join(".opencode")]
+            [config, &project, &project.join(".opencode")]
                 .into_iter()
                 .any(|root| {
                     target == root.join("opencode.json") || target == root.join("opencode.jsonc")
@@ -902,21 +980,21 @@ fn native_target_scope(
         } else if is_kiro {
             markdown_below(&config.join("steering"), target)
                 || crate::harness::kiro::memories::allowed_instruction_path(
-                    &crate::harness::kiro::KiroHarness::new(config.clone()),
+                    &crate::harness::kiro::KiroHarness::new(config.to_path_buf()),
                     &project,
                     target,
                 )
         } else if is_pi {
             let home = canonical_location(harness.user_home()?)?;
             crate::harness::pi::memories::allowed_instruction_path(
-                &crate::harness::pi::PiHarness::new(config.clone(), home),
+                &crate::harness::pi::PiHarness::new(config.to_path_buf(), home),
                 &project,
                 target,
             )
         } else {
             let home = canonical_location(harness.user_home()?)?;
             crate::harness::opencode::memories::allowed_instruction_path(
-                &crate::harness::opencode::OpenCodeHarness::new(config.clone(), home),
+                &crate::harness::opencode::OpenCodeHarness::new(config.to_path_buf(), home),
                 &project,
                 target,
             )
@@ -944,14 +1022,14 @@ fn native_target_scope(
         } else if is_pi {
             let home = canonical_location(harness.user_home()?)?;
             crate::harness::pi::skills::allowed_skill_path(
-                &crate::harness::pi::PiHarness::new(config.clone(), home),
+                &crate::harness::pi::PiHarness::new(config.to_path_buf(), home),
                 &project,
                 target,
             )
         } else {
             let home = canonical_location(harness.user_home()?)?;
             crate::harness::opencode::skills::allowed_skill_path(
-                &crate::harness::opencode::OpenCodeHarness::new(config.clone(), home),
+                &crate::harness::opencode::OpenCodeHarness::new(config.to_path_buf(), home),
                 &project,
                 target,
             )
@@ -1070,16 +1148,10 @@ fn stale_error(expected: Option<&str>, actual: Option<&str>) -> String {
     )
 }
 
-fn parse_checksum(value: &str) -> Result<[u8; 32], String> {
-    if value.len() != 64 {
-        return Err("file checksum is malformed".into());
-    }
-    let mut bytes = [0_u8; 32];
-    for (index, slot) in bytes.iter_mut().enumerate() {
-        *slot = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
-            .map_err(|_| "file checksum is malformed")?;
-    }
-    Ok(bytes)
+/// Decode a 64-character ASCII hex SHA-256 checksum into 32 raw bytes.
+/// Completely panic-free on arbitrary UTF-8 input.
+pub fn parse_checksum(value: &str) -> Result<[u8; 32], String> {
+    orbit_core::transcript_and_parsing::parse_checksum(value).map_err(str::to_owned)
 }
 
 fn checksum_if_present(path: &Path) -> Result<Option<String>, String> {
@@ -1370,11 +1442,12 @@ fn unique_sibling(target: &Path, label: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
+    let seq = SIBLING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let digest = atomic::hex(&Sha256::digest(target.to_string_lossy().as_bytes()));
     target
         .parent()
         .unwrap_or_else(|| Path::new("."))
-        .join(format!(".{label}-{}-{stamp}", &digest[..12]))
+        .join(format!(".{label}-{}-{stamp}-{seq}", &digest[..12]))
 }
 
 fn remove_plain_artifact(path: &Path, kind: VersionKind) -> Result<(), String> {
@@ -1624,8 +1697,10 @@ mod tests {
             std::fs::read_to_string(&index).unwrap(),
             "See [topic](notes/topic.md).\n"
         );
+        let canonical_config = canonical_location(harness.config_root()).unwrap();
         assert!(codex_target_scope(
             &harness,
+            &canonical_config,
             &project,
             "memory",
             &memory_root.join(".git/internal.md")
@@ -1633,6 +1708,7 @@ mod tests {
         .is_none());
         assert!(codex_target_scope(
             &harness,
+            &canonical_config,
             &project,
             "memory",
             &memory_root.join("state.sqlite")
@@ -1978,5 +2054,73 @@ mod tests {
             .unwrap();
             assert_eq!(std::fs::read_to_string(&target).unwrap(), "before");
         }
+    }
+
+    #[test]
+    fn superseded_pending_row_is_not_marked_applied_or_restorable() {
+        let (_dir, harness, project) = fixture();
+        let target = harness.config_root().join("settings.json");
+        std::fs::write(&target, b"{\"v\":2}").unwrap();
+        let backup_a = ledger::backup_path(harness.config_root(), "settings", "edit");
+        let backup_b = ledger::backup_path(harness.config_root(), "settings", "edit");
+        std::fs::create_dir_all(backup_a.parent().unwrap()).unwrap();
+        std::fs::write(&backup_a, b"{\"v\":1}").unwrap();
+        std::fs::write(&backup_b, b"{\"v\":1}").unwrap();
+        let before_hex = atomic::hex(&Sha256::digest(b"{\"v\":1}"));
+        let after_hex = atomic::hex(&Sha256::digest(b"{\"v\":2}"));
+        let ledger_path = harness.config_root().join(".orbit/ledger.json");
+        std::fs::create_dir_all(ledger_path.parent().unwrap()).unwrap();
+        let rows = vec![
+            ledger::LedgerRow {
+                timestamp: 100,
+                resource_kind: "settings".into(),
+                id: "settings".into(),
+                action: "edit".into(),
+                backup_path: Some(backup_a.to_string_lossy().into_owned()),
+                before_checksum: Some(before_hex.clone()),
+                after_checksum: Some(after_hex.clone()),
+                target: Some(target.to_string_lossy().into_owned()),
+                op: Some("op-pending-superseded".into()),
+                status: Some(ledger::LedgerStatus::Pending),
+            },
+            ledger::LedgerRow {
+                timestamp: 200,
+                resource_kind: "settings".into(),
+                id: "settings".into(),
+                action: "edit".into(),
+                backup_path: Some(backup_b.to_string_lossy().into_owned()),
+                before_checksum: Some(before_hex),
+                after_checksum: Some(after_hex.clone()),
+                target: Some(target.to_string_lossy().into_owned()),
+                op: Some("op-applied-later".into()),
+                status: Some(ledger::LedgerStatus::Applied),
+            },
+        ];
+        std::fs::write(
+            &ledger_path,
+            serde_json::to_vec(&serde_json::json!({"rows": rows})).unwrap(),
+        )
+        .unwrap();
+
+        let snapshot = load(&harness, &project).unwrap();
+        let superseded_log = snapshot
+            .logs
+            .iter()
+            .find(|l| l.id == "op-pending-superseded")
+            .unwrap();
+        assert_eq!(superseded_log.status, HistoryOperationStatus::NotApplied);
+        let superseded_version = snapshot
+            .versions
+            .iter()
+            .find(|v| v.id == "op-pending-superseded")
+            .unwrap();
+        assert!(!superseded_version.restorable);
+        assert!(restore(
+            &harness,
+            &project,
+            "op-pending-superseded",
+            Some(&after_hex)
+        )
+        .is_err());
     }
 }

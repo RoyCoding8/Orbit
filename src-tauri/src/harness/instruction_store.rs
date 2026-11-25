@@ -3,10 +3,8 @@ use std::path::Path;
 use sha2::{Digest, Sha256};
 
 use super::{
-    claude::{
-        memories::{MemoryCatalog, MemoryFile, MemorySource},
-        skills,
-    },
+    claude::memories::{MemoryCatalog, MemoryFile, MemorySource},
+    fs_guard,
     memory_links::without_references,
     Harness, ResourceKind,
 };
@@ -26,8 +24,7 @@ pub(crate) fn edit(
         return Err("instruction file is read-only".into());
     }
     let path = Path::new(&file.path);
-    skills::ensure_plain_components(path)?;
-    skills::ensure_plain_file_if_present(path)?;
+    fs_guard::ensure_plain_path(path)?;
     ledger::write_text(
         harness.config_root(),
         resource_kind(file.source),
@@ -55,6 +52,26 @@ pub(crate) fn delete(
     edit_action: &str,
     delete_action: &str,
 ) -> Result<(), String> {
+    delete_with_imports(
+        harness,
+        catalog,
+        id,
+        expected,
+        edit_action,
+        delete_action,
+        false,
+    )
+}
+
+pub(crate) fn delete_with_imports(
+    harness: &impl Harness,
+    catalog: &MemoryCatalog,
+    id: &str,
+    expected: &str,
+    edit_action: &str,
+    delete_action: &str,
+    imports: bool,
+) -> Result<(), String> {
     let file = catalog
         .files
         .iter()
@@ -64,14 +81,13 @@ pub(crate) fn delete(
         return Err(STALE.into());
     }
     let target = Path::new(&file.path);
-    skills::ensure_plain_components(target)?;
-    skills::ensure_plain_file_if_present(target)?;
+    fs_guard::ensure_plain_path(target)?;
     for source in catalog
         .files
         .iter()
         .filter(|source| source.id != id && source.editable)
     {
-        let updated = without_references(source, target, false);
+        let updated = without_references(source, target, imports);
         if updated != source.content {
             edit(harness, source, &source.content, &updated, edit_action).map_err(|error| {
                 format!(
@@ -95,7 +111,8 @@ pub(crate) fn delete(
 
 fn resource_kind(source: MemorySource) -> ResourceKind {
     match source {
+        MemorySource::ProjectAutoMemory | MemorySource::GlobalAutoMemory => ResourceKind::Memory,
         MemorySource::UserInstructions => ResourceKind::GlobalInstructions,
-        _ => ResourceKind::ProjectInstructions,
+        MemorySource::ProjectInstructions => ResourceKind::ProjectInstructions,
     }
 }

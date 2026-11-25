@@ -96,9 +96,9 @@ impl Harness for CodexHarness {
                     .collect()
             }),
         };
-        resources.map_err(|message| super::HarnessError::Mutation {
+        resources.map_err(|message| super::HarnessError::Read {
             path: self.config_root.clone(),
-            message,
+            source: std::io::Error::other(message),
         })
     }
 }

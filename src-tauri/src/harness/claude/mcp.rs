@@ -457,18 +457,7 @@ fn embeds_url_credential(text: &str) -> bool {
         .any(|(name, _)| credentials::secret_name(name.as_ref()))
 }
 
-/// An argument naming its successor as a credential value, such as
-/// `--api-key` or `--token`. The flag itself is not secret; the element
-/// after it is.
-fn credential_flag(text: &str) -> bool {
-    let flag = text
-        .strip_prefix("--")
-        .or_else(|| text.strip_prefix('-'))
-        .unwrap_or(text);
-    flag.chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        && credentials::secret_name(flag)
-}
+use orbit_core::credentials::credential_flag;
 
 pub(crate) fn mask_entry(entry: &Value) -> Value {
     mask_visit("", entry, false)
@@ -686,7 +675,7 @@ fn write_rpc(input: &mut impl Write, value: Value) -> std::result::Result<(), St
 }
 
 pub(crate) fn test_http(config: &HttpEntry) -> std::result::Result<BenchResult, String> {
-    if !config.url.starts_with("https://") && !is_loopback_http(&config.url) {
+    if !is_https(&config.url) && !is_loopback_http(&config.url) {
         return Err("Remote MCP servers require HTTPS; use https:// or a loopback address".into());
     }
     let started = Instant::now();
@@ -777,11 +766,18 @@ pub(crate) fn test_http(config: &HttpEntry) -> std::result::Result<BenchResult, 
     })
 }
 
+fn is_https(url: &str) -> bool {
+    url.parse::<reqwest::Url>().is_ok() && orbit_core::credentials::is_https_scheme(url)
+}
+
 /// A plain-HTTP URL is legitimate only for this machine's own addresses.
 fn is_loopback_http(url: &str) -> bool {
     let Ok(parsed) = url.parse::<reqwest::Url>() else {
         return false;
     };
+    if orbit_core::credentials::is_loopback_http_url(url) {
+        return true;
+    }
     if parsed.scheme() != "http" {
         return false;
     }
@@ -804,7 +800,7 @@ fn decode_http_response(
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.starts_with("text/event-stream"));
+        .is_some_and(orbit_core::credentials::is_event_stream_content_type);
     let mut body = BufReader::new(response.take((BENCH_BYTE_BUDGET + 1) as u64));
     if !is_event_stream {
         let mut bytes = Vec::new();
@@ -1393,14 +1389,5 @@ mod tests {
             "MCP server returned no response matching request id"
         );
         server.join().unwrap();
-    }
-
-    #[test]
-    fn loopback_http_and_https_are_accepted_for_the_bench() {
-        assert!(is_loopback_http("http://localhost:3000/mcp"));
-        assert!(is_loopback_http("http://127.0.0.1:9/mcp"));
-        assert!(is_loopback_http("http://[::1]:9/mcp"));
-        assert!(!is_loopback_http("https://example.test/mcp"));
-        assert!(!is_loopback_http("http://192.168.1.10/mcp"));
     }
 }

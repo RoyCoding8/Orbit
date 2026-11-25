@@ -3,12 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use sha2::{Digest, Sha256};
-
 use super::KiroHarness;
 use crate::{
     harness::{
-        atomic,
         claude::{
             skills::{self, SkillEntry},
             SkillOverride,
@@ -264,10 +261,7 @@ fn validate_component(value: &str) -> Result<(), String> {
 }
 
 fn skill_id(path: &Path) -> String {
-    format!(
-        "skill-{}",
-        atomic::hex(&Sha256::digest(path.to_string_lossy().as_bytes()))
-    )
+    crate::harness::skill_store::hashed_skill_id(path)
 }
 
 fn owned_target(harness: &KiroHarness, project: &Path, target: &Path) -> bool {

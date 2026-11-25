@@ -5,6 +5,7 @@ pub mod atomic;
 pub mod claude;
 pub mod codex;
 pub(crate) mod credentials;
+pub(crate) mod fs_guard;
 pub(crate) mod instruction_store;
 pub(crate) mod json_mcp;
 pub(crate) mod json_store;

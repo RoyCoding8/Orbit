@@ -1,5 +1,5 @@
 import { useState } from "react";
-import "./content.css";
+import "../styles/content.css";
 
 const PAGE_SIZE = 50;
 

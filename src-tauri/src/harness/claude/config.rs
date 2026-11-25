@@ -11,11 +11,11 @@ use super::credentials::{
 use super::ClaudeCodeHarness;
 use crate::harness::{atomic, Harness};
 
-const SETTINGS_SCHEMA: &str = include_str!("../../../../schemas/settings.json");
+const SETTINGS_SCHEMA: &str = include_str!("../../../schemas/claude-settings.json");
 
 /// Objects whose string children get secret checks (name and value shape),
 /// mirroring the environment and header handling on the Servers path.
-const SECRET_CONTAINERS: &[&str] = &["env", "headers"];
+const SECRET_CONTAINERS: &[&str] = &["env", "headers", "http_headers"];
 
 /// Top-level settings whose value produces credentials. Exact names, because
 /// the generic substrings ("auth", "key") also occur inside native settings

@@ -1,12 +1,12 @@
 //! Pi v3 JSONL sessions. Native records and inline images stay in the archive.
 use super::{
     archive::{ArchiveAction, ArchiveReport},
+    extract_text,
     ingest::{
-        file_fingerprint, open_database, prune_vanished_sessions, replace_indexed_session,
-        unchanged_source, IndexedMessage, IndexedSession, IngestReport,
+        open_database, replace_indexed_session, IndexedMessage, IndexedSession, IngestReport,
     },
     jsonl::{read_bounded_line, LineStatus},
-    TranscriptError,
+    native_path, unique_title, TranscriptError,
 };
 use crate::harness::{
     atomic,
@@ -43,68 +43,6 @@ pub(super) fn stage_conversion(root: &Path, id: &str, bytes: &[u8]) -> Result<()
     super::conversion::stage_archive(root, "session.jsonl", bytes, &manifest)
 }
 
-pub fn ingest(
-    config: &Path,
-    cache: &Path,
-    project: &Path,
-) -> Result<IngestReport, TranscriptError> {
-    let project = checked_directory(project).map_err(invalid)?;
-    let mut roots = session_roots(config, &project).map_err(invalid)?;
-    let default_root = crate::history::canonical_location(&config.join("sessions"))
-        .ok_or_else(|| invalid("Invalid Pi sessions directory".into()))?;
-    roots.retain(|root| !root.starts_with(&default_root));
-    roots.push(default_root);
-    let mut connection = open_database(cache)?;
-    let mut seen = Vec::new();
-    // Retain other custom session directories that were indexed previously.
-    let mut statement = connection.prepare("SELECT source_path FROM sessions")?;
-    for path in statement.query_map([], |row| row.get::<_, String>(0))? {
-        let path = path?;
-        if !roots.iter().any(|root| Path::new(&path).starts_with(root))
-            && Path::new(&path).is_file()
-        {
-            seen.push(path);
-        }
-    }
-    drop(statement);
-    let mut report = IngestReport {
-        sessions: 0,
-        lines_read: 0,
-        messages_indexed: 0,
-        malformed_lines: 0,
-        skipped_files: 0,
-        skipped_state_lines: 0,
-    };
-    let mut files = HashSet::new();
-    for root in roots {
-        files.extend(session_files(&root).map_err(invalid)?);
-    }
-    for path in files {
-        let source_path = path.to_string_lossy().into_owned();
-        seen.push(source_path.clone());
-        let fingerprint = file_fingerprint(&path, None);
-        if let Some(fingerprint) = &fingerprint {
-            if unchanged_source(&connection, &source_path, fingerprint)? {
-                report.sessions += 1;
-                continue;
-            }
-        }
-        match index_file(&mut connection, &path, fingerprint.as_deref()) {
-            Ok(indexed) => {
-                report.sessions += indexed.sessions;
-                report.lines_read += indexed.lines_read;
-                report.messages_indexed += indexed.messages_indexed;
-                report.malformed_lines += indexed.malformed_lines;
-                report.skipped_state_lines += indexed.skipped_state_lines;
-            }
-            Err(TranscriptError::Io(_)) => report.skipped_files += 1,
-            Err(error) => return Err(error),
-        }
-    }
-    prune_vanished_sessions(&mut connection, &seen)?;
-    Ok(report)
-}
-
 pub(super) fn index_file(
     connection: &mut rusqlite::Connection,
     path: &Path,
@@ -128,9 +66,9 @@ pub(super) fn index_file(
         let (role, text) = match kind {
             "message" => (
                 entry["message"]["role"].as_str().unwrap_or(""),
-                text_content(&entry["message"]["content"]),
+                extract_text(&entry["message"]["content"]),
             ),
-            "custom_message" => ("custom", text_content(&entry["content"])),
+            "custom_message" => ("custom", extract_text(&entry["content"])),
             "compaction" | "branch_summary" => {
                 (kind, entry["summary"].as_str().unwrap_or("").to_owned())
             }
@@ -162,7 +100,7 @@ pub(super) fn index_file(
             attachment: (images > 0)
                 .then(|| format!("{images} inline image(s), preserved in the native archive")),
             tool_result: (role == "tool_result")
-                .then(|| text_content(&entry["message"]["content"])),
+                .then(|| extract_text(&entry["message"]["content"])),
             tool_result_note: None,
         });
         parents.insert(id.to_owned(), Some(id.to_owned()));
@@ -220,12 +158,17 @@ pub fn export_archive(
     let destination = checked_directory(destination)?;
     let archive = destination.join(format!("pi-{}", Uuid::new_v4()));
     fs::create_dir(&archive).map_err(|e| e.to_string())?;
-    create_file(&archive.join("session.jsonl"), &bytes)?;
+    let session_file = archive.join("session.jsonl");
+    let manifest_file = archive.join("manifest.json");
     let manifest = json!({"format": FORMAT, "version": 1, "sessionId": doc.header["id"], "sha256": atomic::hex(&Sha256::digest(&bytes))});
-    create_file(
-        &archive.join("manifest.json"),
-        manifest.to_string().as_bytes(),
-    )?;
+    let write_result = create_file(&session_file, &bytes)
+        .and_then(|()| create_file(&manifest_file, manifest.to_string().as_bytes()));
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&manifest_file);
+        let _ = fs::remove_file(&session_file);
+        let _ = fs::remove_dir(&archive);
+        return Err(error);
+    }
     Ok(ArchiveReport {
         action: ArchiveAction::Exported,
         source_session_id: session.into(),
@@ -282,12 +225,7 @@ pub fn import_archive(
         .filter_map(|d| session_title(&d))
         .collect();
     if let Some(title) = session_title(&doc) {
-        let mut name = title.clone();
-        let mut suffix = 1;
-        while titles.contains(&name) {
-            name = format!("{title}-{suffix}");
-            suffix += 1;
-        }
+        let name = unique_title(&title, &titles);
         if name != title {
             if let Some((_, entry)) = doc
                 .entries
@@ -480,25 +418,11 @@ fn session_title(doc: &Document) -> Option<String> {
         .or_else(|| {
             doc.entries.iter().find_map(|(_, entry)| {
                 (entry["message"]["role"] == "user")
-                    .then(|| text_content(&entry["message"]["content"]))
+                    .then(|| extract_text(&entry["message"]["content"]))
                     .filter(|text| !text.trim().is_empty())
                     .map(|text| text.chars().take(80).collect())
             })
         })
-}
-
-fn text_content(value: &Value) -> String {
-    if let Some(text) = value.as_str() {
-        return text.into();
-    }
-    value
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|block| block["type"] == "text")
-        .filter_map(|block| block["text"].as_str())
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 pub(super) fn session_files(root: &Path) -> Result<Vec<PathBuf>, String> {
@@ -594,14 +518,6 @@ fn checked_directory(path: &Path) -> Result<PathBuf, String> {
     path.canonicalize().map_err(|e| e.to_string())
 }
 
-fn native_path(path: &Path) -> String {
-    let text = path.to_string_lossy();
-    if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
-        return format!(r"\\{unc}");
-    }
-    text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned()
-}
-
 fn create_file(path: &Path, data: &[u8]) -> Result<(), String> {
     ensure_plain_components(path)?;
     let mut file = OpenOptions::new()
@@ -609,9 +525,12 @@ fn create_file(path: &Path, data: &[u8]) -> Result<(), String> {
         .create_new(true)
         .open(path)
         .map_err(|e| e.to_string())?;
-    file.write_all(data)
-        .and_then(|_| file.sync_all())
-        .map_err(|e| format!("Pi archive write failed; inspect {}: {e}", path.display()))
+    let result = file.write_all(data).and_then(|_| file.sync_all());
+    drop(file);
+    result.map_err(|e| {
+        let _ = fs::remove_file(path);
+        format!("Pi archive write failed; inspect {}: {e}", path.display())
+    })
 }
 
 fn invalid(message: String) -> TranscriptError {
@@ -621,7 +540,13 @@ fn invalid(message: String) -> TranscriptError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transcript::{ingest::list_sessions, spine};
+    use crate::harness::{pi::PiHarness, selected::SelectedHarness};
+    use crate::transcript::{catalog, ingest::list_sessions, spine};
+
+    fn index_pi(config: &Path, app: &Path, project: &Path) -> Result<IngestReport, String> {
+        let harness = SelectedHarness::Pi(PiHarness::new(config.into(), config.into()));
+        catalog::index_all(&harness, app, project, |_| {})
+    }
 
     fn fixture(project: &Path) -> Vec<Value> {
         vec![
@@ -653,7 +578,8 @@ mod tests {
         for shared in [false, true] {
             let temp = crate::test_support::tempdir().unwrap();
             let config = temp.path().join("agent");
-            let cache = temp.path().join("cache");
+            let app = temp.path().join("app");
+            let cache = app.join("pi");
             let a = temp.path().join("a");
             let b = temp.path().join("b");
             for path in [&config, &a, &b] {
@@ -675,7 +601,7 @@ mod tests {
                 let root = write_session_root(&config, project).unwrap();
                 write_fixture(&root.join(format!("{id}.jsonl")), &records);
             }
-            assert_eq!(ingest(&config, &cache, &a).unwrap().sessions, 2);
+            assert_eq!(index_pi(&config, &app, &a).unwrap().sessions, 2);
             let sessions = list_sessions(&cache).unwrap();
             assert_eq!(sessions.len(), 2);
             assert!(sessions
@@ -684,7 +610,7 @@ mod tests {
             assert!(sessions
                 .iter()
                 .any(|session| session.project == native_path(&b)));
-            assert_eq!(ingest(&config, &cache, &b).unwrap().sessions, 2);
+            assert_eq!(index_pi(&config, &app, &b).unwrap().sessions, 2);
         }
     }
 
@@ -692,7 +618,8 @@ mod tests {
     fn native_archive_preserves_branches_images_unknown_records_and_imports_without_overwrite() {
         let temp = crate::test_support::tempdir().unwrap();
         let config = temp.path().join("agent");
-        let cache = temp.path().join("cache");
+        let app = temp.path().join("app");
+        let cache = app.join("pi");
         let a = temp.path().join("a");
         let b = temp.path().join("b");
         let exports = temp.path().join("exports");
@@ -715,7 +642,7 @@ mod tests {
         write_fixture(&file, &records);
         let original = fs::read(&file).unwrap();
         let id = "pi:10000000-0000-4000-8000-000000000001";
-        let report = ingest(&config, &cache, &a).unwrap();
+        let report = index_pi(&config, &app, &a).unwrap();
         assert_eq!(report.messages_indexed, 5);
         let messages = spine::thread_page(&cache, id, 0, 20).unwrap();
         let follow_up = messages.iter().find(|m| m.uuid == "u2").unwrap();
@@ -750,7 +677,7 @@ mod tests {
         for index in [0, 1, 2, 3, 4, 5, 7] {
             assert_eq!(imported.entries[index].1, records[index + 1]);
         }
-        ingest(&config, &cache, &b).unwrap();
+        index_pi(&config, &app, &b).unwrap();
         assert_eq!(list_sessions(&cache).unwrap().len(), 3);
         assert_eq!(fs::read(&file).unwrap(), original);
         assert_eq!(fs::read(archive.join("session.jsonl")).unwrap(), original);

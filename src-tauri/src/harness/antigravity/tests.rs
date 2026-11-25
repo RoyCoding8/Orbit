@@ -191,3 +191,57 @@ fn discovery_resolves_manifests_and_filters_and_keeps_inherited_files_readonly()
         .iter()
         .any(|v| v.restorable));
 }
+
+#[test]
+fn manifest_containment_owned_traversal_unclosed_frontmatter_and_read_error() {
+    let temp = crate::test_support::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let project = temp.path().join("project");
+    let outside = temp.path().join("outside");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    write(
+        outside.join("secret/SKILL.md"),
+        "---\nname: secret\ndescription: nope\n---\n",
+    );
+
+    let h = AntigravityHarness::new(home);
+    // Manifest entry escaping root is rejected
+    write(
+        project.join(".agents/skills.json"),
+        &json!({"entries": [{"path": outside.to_string_lossy()}]}).to_string(),
+    );
+    let err = skills::inventory(&h, &project).unwrap_err();
+    assert!(err.contains("escapes"), "unexpected error: {err}");
+
+    // Harness::list returns HarnessError::Read, not Mutation
+    let list_err = h.list(crate::harness::InventoryKind::McpServer);
+    assert!(list_err.is_ok());
+    write(h.mcp_path(), "not-json");
+    let read_err = h
+        .list(crate::harness::InventoryKind::McpServer)
+        .unwrap_err();
+    assert!(matches!(
+        read_err,
+        crate::harness::HarnessError::Read { .. }
+    ));
+
+    // owned() rejects parent traversal
+    let traversal = project.join(".agents/skills/../SKILL.md");
+    assert!(!skills::owned(&h, &project, &traversal));
+
+    // Unclosed frontmatter is treated as missing rule frontmatter
+    fs::remove_file(project.join(".agents/skills.json")).unwrap();
+    write(
+        project.join(".agents/rules/unclosed.md"),
+        "---\ntrigger: always_on\nnever closed",
+    );
+    let catalog = memories::catalog(&h, &project).unwrap();
+    let rule = catalog
+        .files
+        .iter()
+        .find(|f| f.name == "unclosed.md")
+        .unwrap();
+    assert!(rule.load_behavior.contains("Missing rule frontmatter"));
+}

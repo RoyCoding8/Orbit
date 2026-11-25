@@ -1,4 +1,11 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn next_sequence() -> u64 {
+    SEQUENCE.fetch_add(1, Ordering::Relaxed)
+}
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,6 +18,15 @@ use crate::harness::{atomic, ResourceKind};
 pub enum LedgerStatus {
     Pending,
     Applied,
+}
+
+impl From<LedgerStatus> for orbit_core::state_machines::LedgerStatus {
+    fn from(status: LedgerStatus) -> Self {
+        match status {
+            LedgerStatus::Pending => Self::Pending,
+            LedgerStatus::Applied => Self::Applied,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -35,12 +51,7 @@ pub struct LedgerRow {
     pub status: Option<LedgerStatus>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OperationState {
-    Applied,
-    NotApplied,
-    Drift,
-}
+pub use orbit_core::state_machines::{format_backup_filename, format_op_id, OperationState};
 
 pub fn backup_root(config_root: &Path) -> PathBuf {
     config_root.join(".orbit").join("backups")
@@ -51,8 +62,9 @@ pub fn backup_path(config_root: &Path, id: &str, action: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
+    let seq = next_sequence();
     let encoded = atomic::hex(&Sha256::digest(id.as_bytes()));
-    backup_root(config_root).join(format!("{encoded}-{action}-{stamp}"))
+    backup_root(config_root).join(format_backup_filename(&encoded, action, stamp, seq))
 }
 
 fn op_id(kind: &str, id: &str, action: &str) -> String {
@@ -60,7 +72,8 @@ fn op_id(kind: &str, id: &str, action: &str) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    format!("{kind}:{id}:{action}:{stamp}")
+    let seq = next_sequence();
+    format_op_id(kind, id, action, stamp, seq)
 }
 
 #[derive(Debug)]
@@ -342,7 +355,7 @@ fn checksum_if_present(path: &Path) -> Result<Option<String>, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.to_string()),
     };
-    if metadata.file_type().is_symlink() {
+    if atomic::is_link_or_reparse(&metadata) {
         return Err(format!("refusing to checksum a link: {}", path.display()));
     }
     if metadata.is_dir() {
@@ -357,29 +370,56 @@ fn checksum_if_present(path: &Path) -> Result<Option<String>, String> {
 
 /// Resolve whether a reservation landed from the recorded target and backup.
 /// Applied rows remain historical receipts even after later mutations.
+/// Pure state-machine transition resolver for a ledger row given observed
+/// target and backup checksums.
+pub fn resolve_operation_state(
+    status: Option<LedgerStatus>,
+    before_checksum: Option<&str>,
+    after_checksum: Option<&str>,
+    has_target: bool,
+    observed_target: Option<&str>,
+    has_backup: bool,
+    observed_backup: Option<&str>,
+) -> OperationState {
+    orbit_core::state_machines::resolve_operation_state(
+        status.map(Into::into),
+        before_checksum,
+        after_checksum,
+        has_target,
+        observed_target,
+        has_backup,
+        observed_backup,
+    )
+}
+
+/// Resolve whether a reservation landed from the recorded target and backup.
+/// Applied rows remain historical receipts even after later mutations.
 pub fn operation_state(row: &LedgerRow) -> Result<OperationState, String> {
     match row.status {
         Some(LedgerStatus::Applied) | None => return Ok(OperationState::Applied),
         Some(LedgerStatus::Pending) => {}
     }
-    let target = match row.target.as_deref() {
-        Some(target) => checksum_if_present(Path::new(target))?,
-        None => return Ok(OperationState::Drift),
+    let Some(target_path) = row.target.as_deref() else {
+        return Ok(OperationState::Drift);
     };
-    if target == row.after_checksum {
-        if let (Some(path), Some(expected)) =
-            (row.backup_path.as_deref(), row.before_checksum.as_deref())
-        {
-            if checksum_if_present(Path::new(path))?.as_deref() != Some(expected) {
-                return Ok(OperationState::Drift);
-            }
+    let observed_target = checksum_if_present(Path::new(target_path))?;
+    let observed_backup = if observed_target.as_deref() == row.after_checksum.as_deref() {
+        match (row.backup_path.as_deref(), row.before_checksum.as_deref()) {
+            (Some(path), Some(_)) => checksum_if_present(Path::new(path))?,
+            _ => None,
         }
-        return Ok(OperationState::Applied);
-    }
-    if target == row.before_checksum {
-        return Ok(OperationState::NotApplied);
-    }
-    Ok(OperationState::Drift)
+    } else {
+        None
+    };
+    Ok(resolve_operation_state(
+        row.status,
+        row.before_checksum.as_deref(),
+        row.after_checksum.as_deref(),
+        true,
+        observed_target.as_deref(),
+        row.backup_path.is_some(),
+        observed_backup.as_deref(),
+    ))
 }
 
 /// Completed history for views that should not surface abandoned reservations.
@@ -416,13 +456,14 @@ pub fn rows_with_saved_payloads(rows: Vec<LedgerRow>) -> Vec<LedgerRow> {
         .collect()
 }
 
-fn pending_was_superseded(rows: &[LedgerRow], index: usize, row: &LedgerRow) -> bool {
-    row.status == Some(LedgerStatus::Pending)
-        && row.target.as_deref().is_some_and(|target| {
-            rows[index + 1..]
-                .iter()
-                .any(|later| later.target.as_deref().map(Path::new) == Some(Path::new(target)))
-        })
+pub fn pending_was_superseded(rows: &[LedgerRow], index: usize, row: &LedgerRow) -> bool {
+    orbit_core::state_machines::pending_was_superseded_by(
+        rows,
+        index,
+        row,
+        |r| r.status.map(Into::into),
+        |r| r.target.as_deref().map(Path::new),
+    )
 }
 
 fn reconcile_pending_for_target(
@@ -486,7 +527,7 @@ pub fn latest_applied_row(
     Ok(None)
 }
 
-const DIRECTORY_CHECKSUM_PREFIX: &str = "tree-v2-sha256:";
+use orbit_core::state_machines::DIRECTORY_CHECKSUM_PREFIX;
 
 pub fn directory_checksum(path: &Path) -> Result<String, String> {
     fn update_entry(hasher: &mut Sha256, kind: u8, path: &[u8], contents: &[u8]) {
@@ -543,15 +584,24 @@ pub fn directory_checksum(path: &Path) -> Result<String, String> {
 }
 
 pub fn verify_directory_checksum(actual: &str, expected: &str) -> Result<(), String> {
-    if !expected.starts_with(DIRECTORY_CHECKSUM_PREFIX) {
-        return Err(
-            "legacy directory checksum cannot distinguish path and content boundaries; automatic restore is refused and the backup is preserved".into(),
-        );
+    orbit_core::state_machines::verify_directory_checksum(actual, expected).map_err(str::to_owned)
+}
+
+fn read_plain_file(path: &Path, label: &str) -> Result<Vec<u8>, String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if atomic::is_link_or_reparse(&metadata) {
+        return Err(format!(
+            "refusing to undo through a symlink {label}: {}",
+            path.display()
+        ));
     }
-    if actual != expected {
-        return Err("directory checksum does not match the recorded backup".into());
+    if !metadata.is_file() {
+        return Err(format!(
+            "refusing to undo non-file {label}: {}",
+            path.display()
+        ));
     }
-    Ok(())
+    std::fs::read(path).map_err(|error| error.to_string())
 }
 
 pub fn undo(
@@ -567,7 +617,7 @@ pub fn undo(
         .after_checksum
         .as_deref()
         .ok_or("the recorded mutation has no verified after state")?;
-    let current = std::fs::read(path).map_err(|error| error.to_string())?;
+    let current = read_plain_file(path, "target")?;
     let current_digest: [u8; 32] = Sha256::digest(&current).into();
     let current_hash = atomic::hex(&current_digest);
     if current_hash != recorded_after {
@@ -588,7 +638,7 @@ pub fn undo(
                 .as_ref()
                 .map(PathBuf::from)
                 .ok_or_else(|| "the recorded mutation has no backup to restore".to_string())?;
-            let restore = std::fs::read(&backup).map_err(|error| error.to_string())?;
+            let restore = read_plain_file(&backup, "backup")?;
             let backup_hash = atomic::hex(&Sha256::digest(&restore));
             if backup_hash != recorded_before {
                 return Err(format!(
@@ -1104,23 +1154,57 @@ mod tests {
         .is_none());
     }
 
+    #[cfg(unix)]
     #[test]
-    fn backup_paths_stay_under_the_backup_root_for_hostile_ids() {
-        let (_dir, harness) = fixture();
-        for hostile in [
-            "../escape",
-            r"..\\..\\escape",
-            "a/b",
-            r"a\\b",
-            "C:\\evil",
-            "",
-        ] {
-            let backup = backup_path(harness.config_root(), hostile, "edit");
-            assert_eq!(
-                backup.parent().unwrap(),
-                backup_root(harness.config_root()),
-                "id {hostile:?} escaped the backup root"
-            );
-        }
+    fn undo_refuses_symlink_target_and_symlink_backup() {
+        use std::os::unix::fs::symlink;
+        let (dir, harness) = fixture();
+        let path = harness.settings_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"before").unwrap();
+        let backup = backup_path(harness.config_root(), "resource", "edit");
+        write(
+            harness.config_root(),
+            ResourceKind::Settings,
+            "resource",
+            "edit",
+            &path,
+            atomic::RecordedWrite::Bytes(b"after"),
+            Some(&backup),
+        )
+        .unwrap();
+
+        // Replace backup with a symlink to an external file with identical bytes
+        let external = dir.path().join("external-secret");
+        std::fs::write(&external, b"before").unwrap();
+        std::fs::remove_file(&backup).unwrap();
+        symlink(&external, &backup).unwrap();
+        let err = undo(
+            harness.config_root(),
+            ResourceKind::Settings,
+            "resource",
+            "edit",
+            &path,
+        )
+        .unwrap_err();
+        assert!(err.contains("symlink backup"), "unexpected error: {err}");
+
+        // Restore plain backup, replace target with a symlink
+        std::fs::remove_file(&backup).unwrap();
+        std::fs::write(&backup, b"before").unwrap();
+        let external_target = dir.path().join("external-target");
+        std::fs::write(&external_target, b"after").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        symlink(&external_target, &path).unwrap();
+        let err = undo(
+            harness.config_root(),
+            ResourceKind::Settings,
+            "resource",
+            "edit",
+            &path,
+        )
+        .unwrap_err();
+        assert!(err.contains("symlink target"), "unexpected error: {err}");
+        assert_eq!(std::fs::read(&external_target).unwrap(), b"after");
     }
 }

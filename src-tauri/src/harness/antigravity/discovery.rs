@@ -1,5 +1,5 @@
 use super::AntigravityHarness;
-use crate::harness::{claude::skills, json_store, Harness};
+use crate::harness::{fs_guard, json_store, Harness};
 use std::{
     collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
@@ -68,12 +68,12 @@ fn scan(
     if !root.exists() {
         return Ok(());
     }
-    skills::ensure_plain_components(root)?;
+    fs_guard::ensure_plain_components(root)?;
     if root.is_file() {
         if (kind == "rules" && root.extension().is_some_and(|x| x == "md"))
             || (kind == "skills" && root.file_name().is_some_and(|n| n == "SKILL.md"))
         {
-            skills::ensure_plain_file_if_present(root)?;
+            fs_guard::ensure_plain_file_if_present(root)?;
             out.insert(root.canonicalize().map_err(|e| e.to_string())?, ());
         }
         return Ok(());
@@ -142,7 +142,7 @@ fn manifest(
         return Err("Antigravity discovery manifests exceed the supported nesting limit.".into());
     }
     *remaining -= 1;
-    skills::ensure_plain_components(path)?;
+    fs_guard::ensure_plain_components(path)?;
     let identity = path.canonicalize().map_err(|e| e.to_string())?;
     if !seen.insert(identity.clone()) {
         return Ok(());
@@ -178,15 +178,28 @@ fn manifest(
             let mut found = BTreeMap::new();
             if key == "inherits" {
                 manifest(&target, kind, seen, &mut found, depth + 1, remaining)?;
-            } else if entry.get("include_only").is_some()
-                && target.is_dir()
-                && !(kind == "skills" && target.join("SKILL.md").is_file())
-            {
-                for name in &only {
-                    scan(&target.join(name), kind, &[], &mut found)?;
-                }
             } else {
-                scan(&target, kind, &[], &mut found)?;
+                if !fs_guard::path_is_within(&target, base) {
+                    return Err(format!(
+                        "Discovery entry path `{value}` escapes its manifest root"
+                    ));
+                }
+                if entry.get("include_only").is_some()
+                    && target.is_dir()
+                    && !(kind == "skills" && target.join("SKILL.md").is_file())
+                {
+                    for name in &only {
+                        let candidate = target.join(name);
+                        if !fs_guard::path_is_within(&candidate, &target) {
+                            return Err(format!(
+                                "Discovery include_only entry `{name}` escapes its target directory"
+                            ));
+                        }
+                        scan(&candidate, kind, &[], &mut found)?;
+                    }
+                } else {
+                    scan(&target, kind, &[], &mut found)?;
+                }
             }
             found.retain(|path, _| {
                 (entry.get("include_only").is_none() || matches_name(path, kind, &only))

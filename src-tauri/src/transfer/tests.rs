@@ -708,3 +708,58 @@ fn malformed_zip_entries_are_rejected_without_extracting_them() {
             .is_empty());
     }
 }
+
+#[test]
+fn unallowed_instruction_path_is_rejected_on_load() {
+    let f = Fixture::new("claude-code");
+    f.write(&f.project.join("CLAUDE.md"), "Valid instructions\n");
+    f.export(&[Category::Memories]);
+    rewrite_archive(&f, |metadata, _| {
+        metadata["entries"][0]["resource"]["path"] = json!("README.md");
+    });
+    let err = preview(&f.harness, &f.project, &f.archive, Destination::Original)
+        .err()
+        .unwrap();
+    assert!(err.contains("allowlist"), "unexpected error: {err}");
+}
+
+#[test]
+fn antigravity_history_scope_covers_rules_and_user_gemini_instructions() {
+    let f = Fixture::new("antigravity");
+    let home = f.harness.user_home().unwrap();
+    let user_gemini = home.join(".gemini/GEMINI.md");
+    let user_rule = f.harness.config_root().join("rules/global.md");
+    let project_rule = f.project.join(".agents/rules/local.md");
+    f.write(&user_gemini, "user");
+    f.write(&user_rule, "rule");
+    f.write(&project_rule, "local");
+    assert_eq!(
+        history_scope(&f.harness, &f.project, &user_gemini.canonicalize().unwrap()),
+        Some(true)
+    );
+    assert_eq!(
+        history_scope(&f.harness, &f.project, &user_rule.canonicalize().unwrap()),
+        Some(true)
+    );
+    assert_eq!(
+        history_scope(
+            &f.harness,
+            &f.project,
+            &project_rule.canonicalize().unwrap()
+        ),
+        Some(false)
+    );
+}
+
+#[test]
+fn export_succeeds_when_config_root_does_not_exist_yet() {
+    let f = Fixture::new("claude-code");
+    fs::remove_dir_all(f.harness.config_root()).unwrap();
+    assert!(!f.harness.config_root().exists());
+    f.write(
+        &f.project.join(".claude/skills/demo/SKILL.md"),
+        "---\nname: demo\ndescription: Demo\n---\nBody\n",
+    );
+    let preview = inventory(&f.harness, &f.project).unwrap();
+    assert!(!preview.entries.is_empty());
+}

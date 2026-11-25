@@ -1,4 +1,4 @@
-use crate::harness::memory_links::{parse_references, resolve_reference, without_references};
+use crate::harness::memory_links::{parse_references, resolve_reference};
 use std::collections::BTreeMap;
 #[cfg(test)]
 use std::collections::BTreeSet;
@@ -8,10 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::ClaudeCodeHarness;
-use crate::{
-    harness::{atomic, Harness, ResourceKind},
-    ledger,
-};
+use crate::harness::{atomic, Harness};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -320,28 +317,7 @@ pub fn edit(
         .iter()
         .find(|file| file.id == id && file.editable)
         .ok_or("memory file is no longer available for editing")?;
-    edit_file(harness, file, expected_content, content)
-}
-
-fn edit_file(
-    harness: &ClaudeCodeHarness,
-    file: &MemoryFile,
-    expected_content: &str,
-    content: &str,
-) -> Result<(), String> {
-    let path = Path::new(&file.path);
-    ensure_plain_file(path)?;
-    let backup = ledger::backup_path(harness.config_root(), &file.id, "edit");
-    let expected = Sha256::digest(expected_content.as_bytes()).into();
-    ledger::write(harness.config_root(), resource_kind(file.source), &file.id, "edit", path,
-        atomic::RecordedWrite::Restore(expected, content.as_bytes()), Some(&backup))
-        .map(|_| ())
-        .map_err(|error| {
-            let message = error.to_string();
-            if message.contains("did not hold the expected state") {
-                "Memory file changed since this editor opened. Refresh the memory catalog and try again.".to_owned()
-            } else { message }
-        })
+    crate::harness::instruction_store::edit(harness, file, expected_content, content, "edit")
 }
 
 pub fn delete(
@@ -351,49 +327,15 @@ pub fn delete(
     expected_content: &str,
 ) -> Result<(), String> {
     let catalog = catalog(harness, project)?;
-    let file = catalog
-        .files
-        .iter()
-        .find(|file| file.id == id && file.editable)
-        .ok_or("memory file is no longer available for deletion")?;
-    if file.content != expected_content {
-        return Err("Memory file changed since this editor opened. Refresh the memory catalog and try again.".into());
-    }
-    let target = Path::new(&file.path);
-    for source in catalog
-        .files
-        .iter()
-        .filter(|source| source.id != id && source.editable)
-    {
-        let content = without_references(source, target, true);
-        if content != source.content {
-            edit_file(harness, source, &source.content, &content).map_err(|error| {
-                format!(
-                    "Could not remove references from {}. The memory was not deleted. {error}",
-                    source.name
-                )
-            })?;
-        }
-    }
-    ensure_plain_file(target)?;
-    ledger::remove_file(
-        harness.config_root(),
-        resource_kind(file.source),
+    crate::harness::instruction_store::delete_with_imports(
+        harness,
+        &catalog,
         id,
+        expected_content,
+        "edit",
         "delete",
-        target,
-        Sha256::digest(expected_content.as_bytes()).into(),
-        &ledger::backup_path(harness.config_root(), id, "delete"),
+        true,
     )
-    .map_err(|error| error.to_string())
-}
-
-fn resource_kind(source: MemorySource) -> ResourceKind {
-    match source {
-        MemorySource::ProjectAutoMemory | MemorySource::GlobalAutoMemory => ResourceKind::Memory,
-        MemorySource::ProjectInstructions => ResourceKind::ProjectInstructions,
-        MemorySource::UserInstructions => ResourceKind::GlobalInstructions,
-    }
 }
 
 fn add_group(
@@ -665,6 +607,7 @@ fn is_external_reference(target: &str, resolved: Option<&Path>, roots: &[&Path])
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ledger;
 
     #[test]
     fn references_distinguish_imports_from_links_and_ignore_code_and_quoted_paths() {

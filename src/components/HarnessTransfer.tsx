@@ -5,9 +5,10 @@ import { M3eCheckbox } from "@m3e/react/checkbox";
 import { M3eFormField } from "@m3e/react/form-field";
 import { M3eOption } from "@m3e/react/option";
 import { M3eSelect, type M3eSelectElement } from "@m3e/react/select";
-import { useHarness } from "../HarnessContext";
-import { displayPath } from "../pathDisplay";
-import "./HarnessTransfer.css";
+import { useHarness } from "../lib/HarnessContext";
+import { displayPath, normalizePathIdentity } from "../lib/pathDisplay";
+import { useModalDialog } from "../lib/useModalDialog";
+import "../styles/HarnessTransfer.css";
 
 const categories = [
   { id: "skills", label: "Skills", detail: "Skills and their supporting files" },
@@ -82,14 +83,9 @@ function TransferDialog({ mode, onClose }: { mode: Mode; onClose: () => void }) 
   const [error, setError] = useState("");
   const [result, setResult] = useState<Report | null>(null);
   const [revision, setRevision] = useState(0);
-  const dialog = useRef<HTMLDialogElement>(null);
+  const dialog = useModalDialog(true);
   const isExport = mode.kind === "export";
 
-  useEffect(() => {
-    const element = dialog.current;
-    element?.showModal();
-    return () => { if (element?.open) element.close(); };
-  }, []);
   useEffect(() => {
     if (mode.kind === "import" && destination === null) return;
     let active = true;
@@ -147,8 +143,7 @@ function TransferDialog({ mode, onClose }: { mode: Mode; onClose: () => void }) 
   const destinations = new Set<string>();
   const collisions = selectable.filter(entry => selected.has(entry.id) && (entry.status !== "conflict" || replacements.has(entry.id)))
     .some(entry => {
-      const path = displayPath(entry.target);
-      const identity = /^[A-Za-z]:[\\/]|^\\\\/.test(path) ? path.replaceAll("\\", "/").toLowerCase() : path;
+      const identity = normalizePathIdentity(entry.target);
       const key = `${identity}\0${entry.targetKey}`;
       if (destinations.has(key)) return true;
       destinations.add(key);

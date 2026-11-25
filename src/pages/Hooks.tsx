@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useHarness } from "../HarnessContext";
-import { displayPath } from "../pathDisplay";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useHarness } from "../lib/HarnessContext";
+import { displayPath } from "../lib/pathDisplay";
+import { useSequencedLoad } from "../lib/useSequencedLoad";
 import { JsonEditor } from "../components/JsonEditor";
-import "./ListControls.css";
+import { SearchField } from "../components/SearchField";
+import "../styles/ListControls.css";
 
 type Layer = "user" | "project";
 type Hook = {
@@ -58,8 +60,10 @@ function CommandHooks({ policy }: { policy: HookPolicy }) {
   const [result, setResult] = useState<TestResult | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const loadSequence = useRef(0);
-  const source = sources.find(item => item.id === sourceId);
+  const { start: startLoad } = useSequencedLoad();
+  const sourceById = useMemo(() => new Map(sources.map((item) => [item.id, item])), [sources]);
+  const source = sourceById.get(sourceId);
+  const effectiveLayer = source?.layer ?? layer;
   const events = source?.events ?? policy.events;
   const normalizedHookSearch = hookSearch.trim().toLocaleLowerCase();
   const visibleHooks = useMemo(
@@ -74,28 +78,28 @@ function CommandHooks({ policy }: { policy: HookPolicy }) {
   }, [event, events]);
 
   const load = useCallback(async () => {
-    const sequence = ++loadSequence.current;
+    const request = startLoad();
     setLoadState("loading");
     try {
       const [loaded, nativeSources] = await Promise.all([
         invoke<Hook[]>("hooks_list", { projectRoot }),
         client === "kiro" ? invoke<HookSource[]>("hooks_sources", { projectRoot }) : Promise.resolve([]),
       ]);
-      if (sequence !== loadSequence.current) return;
+      if (!request.isCurrent()) return;
       setHooks(loaded);
       setSources(nativeSources);
       setSourceId(current => nativeSources.some(item => item.id === current) ? current : nativeSources[0]?.id ?? "");
       setError("");
       setLoadState("ready");
     } catch (cause) {
-      if (sequence !== loadSequence.current) return;
+      if (!request.isCurrent()) return;
       setError(String(cause));
       setLoadState("error");
     }
-  }, [projectRoot, invoke, client]);
+  }, [projectRoot, invoke, client, startLoad]);
+
   useEffect(() => {
     void load();
-    return () => { loadSequence.current++; };
   }, [load]);
 
   const chooseProject = async () => {
@@ -120,12 +124,10 @@ function CommandHooks({ policy }: { policy: HookPolicy }) {
       )
     )
       return;
-    setBusy(true);
-    setError("");
-    try {
+    await runBusy(async () => {
       await invoke("hooks_save", {
         draft: {
-          layer: source?.layer ?? layer,
+          layer: effectiveLayer,
           event,
           matcher: matcher.trim() || null,
           command,
@@ -138,36 +140,33 @@ function CommandHooks({ policy }: { policy: HookPolicy }) {
       setMatcher("");
       setEditing(null);
       await load();
-    } catch (cause) {
-      setError(String(cause));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
-  const toggle = async (hook: Hook) => {
+  const runBusy = async (task: () => Promise<void>) => {
     setBusy(true);
     setError("");
     try {
-      if (hook.enabled) {
-        await invoke("hooks_disable", {
-          layer: hook.layer,
-          event: hook.event,
-          id: hook.id,
-          projectRoot,
-        });
-      } else await invoke("hooks_enable", { id: hook.id, layer: hook.layer, projectRoot });
-      await load();
+      await task();
     } catch (cause) {
       setError(String(cause));
     } finally {
       setBusy(false);
     }
   };
+  const toggle = (hook: Hook) =>
+    runBusy(async () => {
+      if (hook.enabled) {
+        await invoke("hooks_disable", { layer: hook.layer, event: hook.event, id: hook.id, projectRoot });
+      } else {
+        await invoke("hooks_enable", { id: hook.id, layer: hook.layer, projectRoot });
+      }
+      await load();
+    });
   const edit = (hook: Hook) => {
     if (!hook.enabled) return;
     setEditing(hook);
     setLayer(hook.layer);
-    const owner = sources.find(item => item.id === hook.source_path);
+    const owner = sourceById.get(hook.source_path);
     if (owner) setSourceId(owner.id);
     setEvent(hook.event);
     setMatcher(hook.matcher ?? "");
@@ -175,23 +174,12 @@ function CommandHooks({ policy }: { policy: HookPolicy }) {
     setResult(null);
     setError("");
   };
-  const remove = async (hook: Hook) => {
+  const remove = (hook: Hook) => {
     if (!window.confirm(`Delete the ${hook.event} hook?`)) return;
-    setBusy(true);
-    setError("");
-    try {
-      await invoke("hooks_delete", {
-        layer: hook.layer,
-        event: hook.event,
-        id: hook.id,
-        projectRoot,
-      });
+    return runBusy(async () => {
+      await invoke("hooks_delete", { layer: hook.layer, event: hook.event, id: hook.id, projectRoot });
       await load();
-    } catch (cause) {
-      setError(String(cause));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
   const test = async () => {
     let input: unknown;
@@ -201,16 +189,10 @@ function CommandHooks({ policy }: { policy: HookPolicy }) {
       setError("Sample input must be valid JSON.");
       return;
     }
-    setBusy(true);
-    setError("");
     setResult(null);
-    try {
+    await runBusy(async () => {
       setResult(await invoke<TestResult>("hooks_test", { command, input }));
-    } catch (cause) {
-      setError(String(cause));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   return (
@@ -251,7 +233,7 @@ function CommandHooks({ policy }: { policy: HookPolicy }) {
             <label className="field-label" htmlFor="hook-source">Hook source</label>
             <select id="hook-source" value={sourceId} disabled={busy || editing !== null} onChange={e => {
               setSourceId(e.target.value);
-              const owner = sources.find(item => item.id === e.target.value);
+              const owner = sourceById.get(e.target.value);
               if (owner) setLayer(owner.layer);
             }}>
               {!sources.length && <option value="">No native hook sources available</option>}
@@ -263,7 +245,7 @@ function CommandHooks({ policy }: { policy: HookPolicy }) {
           </label>
           <select
             id="hook-layer"
-            value={source?.layer ?? layer}
+            value={effectiveLayer}
             disabled={busy || client === "kiro"}
             onChange={(e) =>
               setLayer(e.target.value === "project" ? "project" : "user")
@@ -273,7 +255,7 @@ function CommandHooks({ policy }: { policy: HookPolicy }) {
             <option value="project">Project</option>
           </select>
           <p className="layer-path">
-            {displayPath(source?.label ?? (layer === "user" ? policy.userPath : projectRoot ? `${projectRoot}/${policy.projectPath}` : `Choose a project to edit ${policy.projectPath}`))}
+            {displayPath(source?.label ?? (effectiveLayer === "user" ? policy.userPath : projectRoot ? `${projectRoot}/${policy.projectPath}` : `Choose a project to edit ${policy.projectPath}`))}
           </p>
           <label className="field-label" htmlFor="hook-event">
             Event
@@ -335,7 +317,7 @@ function CommandHooks({ policy }: { policy: HookPolicy }) {
                 !command.trim() ||
                 !event ||
                 (client === "kiro" && !source) ||
-                (layer === "project" && !projectRoot)
+                (effectiveLayer === "project" && !projectRoot)
               }
             >
               {editing ? "Update hook" : "Save hook"}
@@ -396,14 +378,13 @@ function CommandHooks({ policy }: { policy: HookPolicy }) {
             </p>
           ) : (
             <>
-            <div className="collection-search">
-              <label htmlFor="hooks-search">Search hooks</label>
-              <div>
-                <input id="hooks-search" type="search" value={hookSearch} onChange={(event) => setHookSearch(event.target.value)} />
-                {hookSearch && <button type="button" className="text-button" onClick={() => setHookSearch("")}>Clear search</button>}
-              </div>
-              <p role="status">Showing {visibleHooks.length} of {hooks.length} hooks</p>
-            </div>
+            <SearchField
+              id="hooks-search"
+              label="Search hooks"
+              value={hookSearch}
+              onChange={setHookSearch}
+              status={`Showing ${visibleHooks.length} of ${hooks.length} hooks`}
+            />
             {visibleHooks.length === 0 ? (
               <p className="config-empty">No hooks match "{hookSearch.trim()}".</p>
             ) : (
@@ -448,7 +429,7 @@ function CommandHooks({ policy }: { policy: HookPolicy }) {
                         Edit
                       </button>
                     )}
-                    {(sources.find(item => item.id === hook.source_path)?.canToggle ?? policy.canToggle) && <button
+                    {(sourceById.get(hook.source_path)?.canToggle ?? policy.canToggle) && <button
                       className="action-button"
                       type="button"
                       disabled={busy}

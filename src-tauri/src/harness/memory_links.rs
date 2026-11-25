@@ -1,24 +1,45 @@
-use super::claude::memories::{MemoryFile, MemoryRole, ReferenceKind};
-use std::collections::BTreeSet;
-use std::path::{Component, Path, PathBuf};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::{Path, PathBuf};
+
+use super::claude::memories::{
+    MemoryFile, MemoryReference, MemoryRole, ReferenceKind, ReferenceStatus,
+};
+use super::fs_guard;
+
+fn env_home() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
 
 pub(crate) fn without_references(source: &MemoryFile, target: &Path, imports: bool) -> String {
     let content = &source.content;
-    let references = reference_spans(content, imports);
+    let source_path = Path::new(&source.path);
+    let home = env_home();
     let points_to_target = |destination: &str| {
-        resolve_reference(Path::new(&source.path), destination).as_deref() == Some(target)
+        resolve_reference_with_home(source_path, destination, home.as_deref()).as_deref()
+            == Some(target)
     };
-    let mut removed = Vec::new();
-    for (destination, _, range) in &references {
-        if !points_to_target(destination) {
-            continue;
+    let line_start_of = |offset: usize| content[..offset].rfind('\n').map_or(0, |pos| pos + 1);
+
+    let references = reference_spans(content, imports);
+    let mut non_target_lines = HashSet::new();
+    let mut target_ranges = Vec::new();
+    for (destination, _, range) in references {
+        if points_to_target(&destination) {
+            target_ranges.push(range);
+        } else {
+            non_target_lines.insert(line_start_of(range.start));
         }
-        let line_start = content[..range.start]
-            .rfind('\n')
-            .map_or(0, |position| position + 1);
+    }
+
+    let mut removed = Vec::with_capacity(target_ranges.len());
+    for range in target_ranges {
+        let line_start = line_start_of(range.start);
         let line_end = content[range.start..]
             .find('\n')
-            .map_or(content.len(), |position| range.start + position + 1);
+            .map_or(content.len(), |pos| range.start + pos + 1);
         let prefix = content[line_start..range.start].trim();
         let index_entry = source.role == MemoryRole::Index
             && (prefix.is_empty()
@@ -27,13 +48,11 @@ pub(crate) fn without_references(source: &MemoryFile, target: &Path, imports: bo
                     !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
                 }))
             && range.end <= line_end
-            && !references.iter().any(|(other, _, span)| {
-                span.start >= line_start && span.start < line_end && !points_to_target(other)
-            });
+            && !non_target_lines.contains(&line_start);
         removed.push(if index_entry {
             line_start..line_end
         } else {
-            range.clone()
+            range
         });
     }
     for (_, definition) in pulldown_cmark::Parser::new(content)
@@ -45,7 +64,7 @@ pub(crate) fn without_references(source: &MemoryFile, target: &Path, imports: bo
         }
     }
     removed.sort_by_key(|range| range.start);
-    let mut result = String::new();
+    let mut result = String::with_capacity(content.len());
     let mut cursor = 0;
     for range in removed {
         if range.start > cursor {
@@ -58,6 +77,15 @@ pub(crate) fn without_references(source: &MemoryFile, target: &Path, imports: bo
 }
 
 pub(crate) fn resolve_reference(source: &Path, target: &str) -> Option<PathBuf> {
+    let home = env_home();
+    resolve_reference_with_home(source, target, home.as_deref())
+}
+
+pub(crate) fn resolve_reference_with_home(
+    source: &Path,
+    target: &str,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
     let raw = target
         .trim()
         .trim_matches('<')
@@ -66,33 +94,50 @@ pub(crate) fn resolve_reference(source: &Path, target: &str) -> Option<PathBuf> 
         .next()?
         .split('?')
         .next()?;
-    if raw.is_empty()
-        || raw.starts_with("http:")
-        || raw.starts_with("https:")
-        || raw.starts_with("mailto:")
-    {
-        return None;
-    }
-    let candidate = if raw.starts_with("~/") {
-        return Some(PathBuf::from(raw));
-    } else if Path::new(raw).is_absolute() {
-        PathBuf::from(raw)
-    } else {
-        source.parent()?.join(raw)
-    };
-    let mut normalized = PathBuf::new();
-    for component in candidate.components() {
-        match component {
-            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            Component::RootDir => normalized.push(component.as_os_str()),
-            Component::Normal(value) => normalized.push(value),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
+    let candidate = match orbit_core::path_safety::classify_memory_target(raw) {
+        orbit_core::path_safety::MemoryTargetKind::Empty
+        | orbit_core::path_safety::MemoryTargetKind::ExternalScheme => return None,
+        orbit_core::path_safety::MemoryTargetKind::TildeOnly => home?.to_path_buf(),
+        orbit_core::path_safety::MemoryTargetKind::TildeSlash => {
+            let tail = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\"))?;
+            home?.join(tail)
         }
+        orbit_core::path_safety::MemoryTargetKind::Absolute => PathBuf::from(raw),
+        orbit_core::path_safety::MemoryTargetKind::Relative => source.parent()?.join(raw),
+    };
+    Some(fs_guard::normalize_lexical(&candidate))
+}
+
+pub(crate) fn populate_references<'a>(
+    files: impl IntoIterator<Item = &'a mut MemoryFile>,
+    known: &BTreeMap<PathBuf, String>,
+    imports: bool,
+    home: Option<&Path>,
+    mut is_internal: impl FnMut(&str, Option<&Path>) -> bool,
+) {
+    for file in files {
+        let source_path = Path::new(&file.path);
+        file.references = parse_references(&file.content, imports)
+            .into_iter()
+            .map(|(target, kind)| {
+                let resolved = resolve_reference_with_home(source_path, &target, home);
+                let file_id = resolved.as_ref().and_then(|path| known.get(path)).cloned();
+                let status = if file_id.is_some() {
+                    ReferenceStatus::Known
+                } else if is_internal(&target, resolved.as_deref()) {
+                    ReferenceStatus::Unresolved
+                } else {
+                    ReferenceStatus::External
+                };
+                MemoryReference {
+                    target,
+                    kind,
+                    status,
+                    file_id,
+                }
+            })
+            .collect();
     }
-    Some(normalized)
 }
 
 pub(crate) fn parse_references(content: &str, imports: bool) -> Vec<(String, ReferenceKind)> {

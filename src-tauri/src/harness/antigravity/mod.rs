@@ -93,9 +93,9 @@ impl Harness for AntigravityHarness {
                     .collect()
             }),
         };
-        resources.map_err(|message| HarnessError::Mutation {
+        resources.map_err(|message| HarnessError::Read {
             path: self.config.clone(),
-            message,
+            source: std::io::Error::other(message),
         })
     }
 }

@@ -214,15 +214,6 @@ impl ClaudeCodeHarness {
                 .map(|candidate| candidate == id)
                 .unwrap_or(false)
         });
-        if !already_live
-            && current
-                .iter()
-                .any(|entry| entry.matcher == item.entry.matcher)
-        {
-            return Err(invalid(
-                "disabled hook is stale because its matcher has changed",
-            ));
-        }
         if !already_live {
             events
                 .entry(item.event.clone())
@@ -297,18 +288,24 @@ pub fn test_command(
     if command.trim().is_empty() {
         return Err("Hook command must not be empty".into());
     }
-    let sandbox = std::env::temp_dir().join(format!(
+    struct SandboxGuard(PathBuf);
+    impl Drop for SandboxGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let sandbox = SandboxGuard(std::env::temp_dir().join(format!(
         "orbit-hook-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos()
-    ));
-    std::fs::create_dir_all(&sandbox)
+    )));
+    std::fs::create_dir_all(&sandbox.0)
         .map_err(|error| format!("Could not create hook test workspace: {error}"))?;
     let mut process = shell_command(command)?;
-    process.current_dir(&sandbox).env_clear();
+    process.current_dir(&sandbox.0).env_clear();
     if let Some(path) = std::env::var_os("PATH") {
         process.env("PATH", path);
     }
@@ -322,10 +319,8 @@ pub fn test_command(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = ChildTree::spawn(&mut process).map_err(|error| {
-        let _ = std::fs::remove_dir_all(&sandbox);
-        format!("Could not start hook command: {error}")
-    })?;
+    let mut child = ChildTree::spawn(&mut process)
+        .map_err(|error| format!("Could not start hook command: {error}"))?;
     let mut stdin = child
         .child_mut()
         .stdin
@@ -348,27 +343,28 @@ pub fn test_command(
     let stdout = process_lifetime::spawn_capture(stdout, OUTPUT_BYTE_LIMIT, CaptureEnd::Beginning);
     let stderr = process_lifetime::spawn_capture(stderr, OUTPUT_BYTE_LIMIT, CaptureEnd::End);
     let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child
-            .child_mut()
-            .try_wait()
-            .map_err(|error| error.to_string())?
-        {
-            break Some(status);
+    let timed_out = loop {
+        if child.has_exited().map_err(|error| error.to_string())? {
+            break false;
         }
         if started.elapsed() >= timeout {
-            break None;
+            break true;
         }
         thread::sleep(Duration::from_millis(10));
     };
-    child.cleanup();
+    let status = if timed_out {
+        child.cleanup();
+        None
+    } else {
+        child.cleanup()
+    };
     let out = stdout
         .recv_timeout(Duration::from_millis(250))
         .unwrap_or_default();
     let err = stderr
         .recv_timeout(Duration::from_millis(250))
         .unwrap_or_default();
-    let _ = std::fs::remove_dir_all(&sandbox);
+    drop(sandbox);
     Ok(HookTestResult {
         stdout: out,
         stderr: err,
@@ -1253,5 +1249,51 @@ mod tests {
                 ["command"],
             "echo checked"
         );
+    }
+
+    #[test]
+    fn sibling_hook_with_same_matcher_can_be_disabled_and_reenabled() {
+        let directory = crate::test_support::tempdir().unwrap();
+        let config_root = directory.path().join("user/.claude");
+        let project = directory.path().join("project");
+        let app_data = directory.path().join("app");
+        std::fs::create_dir_all(&config_root).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        let harness = ClaudeCodeHarness::new(HarnessPaths {
+            config_root,
+            claude_json: directory.path().join(".claude.json"),
+        });
+        harness
+            .hooks_save(
+                &project,
+                SettingsLayer::User,
+                "PreToolUse",
+                Some("Bash".into()),
+                "echo one".into(),
+                None,
+            )
+            .unwrap();
+        harness
+            .hooks_save(
+                &project,
+                SettingsLayer::User,
+                "PreToolUse",
+                Some("Bash".into()),
+                "echo two".into(),
+                None,
+            )
+            .unwrap();
+        let hooks = harness.hooks_list(&project, &app_data).unwrap();
+        assert_eq!(hooks.len(), 2);
+        let first_id = hooks[0].id.clone();
+        harness
+            .hooks_disable(&project, &app_data, SettingsLayer::User, &first_id)
+            .unwrap();
+        harness
+            .hooks_enable(&project, &app_data, &first_id)
+            .unwrap();
+        let after = harness.hooks_list(&project, &app_data).unwrap();
+        assert_eq!(after.len(), 2);
+        assert!(after.iter().all(|h| h.enabled));
     }
 }

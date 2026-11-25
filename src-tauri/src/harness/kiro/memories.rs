@@ -8,11 +8,7 @@ use sha2::{Digest, Sha256};
 use super::KiroHarness;
 use crate::harness::{
     atomic,
-    claude::memories::{
-        MemoryCatalog, MemoryFile, MemoryGroup, MemoryReference, MemoryRole, MemorySource,
-        ReferenceStatus,
-    },
-    memory_links::{parse_references, resolve_reference},
+    claude::memories::{MemoryCatalog, MemoryFile, MemoryGroup, MemoryRole, MemorySource},
 };
 
 #[derive(Clone)]
@@ -100,33 +96,13 @@ pub fn catalog(harness: &KiroHarness, project: &Path) -> Result<MemoryCatalog, S
         .iter()
         .map(|(path, file)| (path.clone(), file.id.clone()))
         .collect();
-    for file in files_by_path.values_mut() {
-        file.references = parse_references(&file.content, false)
-            .into_iter()
-            .map(|(target, kind)| {
-                let resolved = resolve_reference(Path::new(&file.path), &target);
-                let known_target = resolved
-                    .as_ref()
-                    .is_some_and(|path| known.contains_key(path));
-                MemoryReference {
-                    target,
-                    kind,
-                    status: if resolved.as_deref().is_some_and(|path| {
-                        path.starts_with(harness.home()) || path.starts_with(&project)
-                    }) {
-                        if known_target {
-                            ReferenceStatus::Known
-                        } else {
-                            ReferenceStatus::Unresolved
-                        }
-                    } else {
-                        ReferenceStatus::External
-                    },
-                    file_id: resolved.and_then(|path| known.get(&path).cloned()),
-                }
-            })
-            .collect();
-    }
+    crate::harness::memory_links::populate_references(
+        files_by_path.values_mut(),
+        &known,
+        false,
+        harness.home().parent(),
+        |_, path| path.is_some_and(|p| p.starts_with(harness.home()) || p.starts_with(&project)),
+    );
     Ok(MemoryCatalog {
         project_root: project.to_string_lossy().into_owned(),
         groups: groups.into_values().collect(),
@@ -432,10 +408,7 @@ fn memory_id(path: &Path) -> String {
 }
 
 fn steering_behavior(content: &str) -> String {
-    let Some(rest) = content.strip_prefix("---\n") else {
-        return "always".into();
-    };
-    let Some((frontmatter, _)) = rest.split_once("\n---") else {
+    let Some(frontmatter) = crate::harness::skill_store::extract_frontmatter_body(content) else {
         return "always".into();
     };
     frontmatter
@@ -449,6 +422,7 @@ fn steering_behavior(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::claude::memories::ReferenceStatus;
 
     #[test]
     fn steering_and_agents_files_have_link_graph_and_checked_delete() {

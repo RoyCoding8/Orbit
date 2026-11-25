@@ -1,5 +1,6 @@
 mod resources;
 pub(crate) use resources::history_scope;
+pub use resources::{is_primary_instruction_path, validate_relative_path};
 #[cfg(test)]
 mod tests;
 
@@ -10,7 +11,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -144,11 +145,11 @@ pub fn inventory(harness: &SelectedHarness, project: &Path) -> Result<Preview, S
         entries: bundle
             .manifest
             .entries
-            .iter()
+            .into_iter()
             .map(|entry| Item {
-                id: entry.id.clone(),
+                id: entry.id,
                 category: entry.category,
-                label: entry.label.clone(),
+                label: entry.label,
                 scope: entry.scope,
                 target: String::new(),
                 target_key: String::new(),
@@ -231,19 +232,13 @@ pub fn export(
 fn read_file(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
     skills::ensure_plain_components(path)?;
     skills::ensure_plain_file_if_present(path)?;
-    let mut data = Vec::new();
-    fs::File::open(path)
-        .map_err(|e| e.to_string())?
-        .take(limit + 1)
-        .read_to_end(&mut data)
-        .map_err(|e| e.to_string())?;
-    if data.len() as u64 > limit {
-        return Err(format!(
-            "File exceeds the archive size limit: {}",
-            path.display()
-        ));
-    }
-    Ok(data)
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    orbit_core::transcript_and_parsing::read_bounded_bytes(file, limit).map_err(|err| match err {
+        orbit_core::transcript_and_parsing::ReadBoundedError::Io(e) => e.to_string(),
+        orbit_core::transcript_and_parsing::ReadBoundedError::TooLarge => {
+            format!("File exceeds the archive size limit: {}", path.display())
+        }
+    })
 }
 
 fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, String> {
@@ -321,6 +316,7 @@ fn load(harness: &impl Harness, path: &Path) -> Result<(Bundle, String), String>
     if blobs.len() != data.len() {
         return Err("Archive contains files not listed in metadata.json".into());
     }
+    resources::validate_instruction_allowlist(harness.id().0, &manifest.entries, &data)?;
     Ok((
         Bundle {
             manifest,
@@ -338,16 +334,24 @@ pub fn preview(
     destination: Destination,
 ) -> Result<Preview, String> {
     let (bundle, checksum) = load(harness, archive)?;
+    let mut file_cache: HashMap<PathBuf, Option<Vec<u8>>> = HashMap::new();
     let entries = bundle
         .manifest
         .entries
         .iter()
         .map(|entry| {
-            describe(
-                harness,
-                project,
-                destination,
+            let target = resources::target(harness, project, destination, entry)?;
+            let before = match file_cache.entry(target.clone()) {
+                std::collections::hash_map::Entry::Occupied(slot) => slot.into_mut(),
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(read_optional(&target)?)
+                }
+            };
+            describe_content(
+                harness.id().0,
+                &target,
                 entry,
+                before.as_deref(),
                 &bundle.data[&entry.blob],
             )
         })
@@ -358,23 +362,6 @@ pub fn preview(
         entries,
         warnings: resources::notes(harness),
     })
-}
-
-fn describe(
-    harness: &SelectedHarness,
-    project: &Path,
-    destination: Destination,
-    entry: &Entry,
-    bytes: &[u8],
-) -> Result<Item, String> {
-    let target = resources::target(harness, project, destination, entry)?;
-    describe_content(
-        harness.id().0,
-        &target,
-        entry,
-        read_optional(&target)?.as_deref(),
-        bytes,
-    )
 }
 
 fn describe_content(
@@ -407,6 +394,8 @@ fn describe_content(
     })
 }
 
+pub use orbit_core::path_safety::normalize_collision_path;
+
 pub fn apply(
     harness: &SelectedHarness,
     project: &Path,
@@ -422,19 +411,23 @@ pub fn apply(
     if choices.is_empty() {
         return Err("Select at least one resource to import".into());
     }
+    let entries_by_id: HashMap<&str, &Entry> = bundle
+        .manifest
+        .entries
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect();
     let mut writes = BTreeMap::<PathBuf, (Option<Vec<u8>>, Vec<u8>)>::new();
-    let mut seen = HashSet::new();
-    let mut targets = HashSet::new();
+    let mut path_by_identity = BTreeMap::<String, PathBuf>::new();
+    let mut seen = HashSet::with_capacity(choices.len());
+    let mut targets = HashSet::with_capacity(choices.len());
     let mut skipped = 0;
     for choice in choices {
         if !seen.insert(&choice.id) {
             return Err("Duplicate import selection".into());
         }
-        let entry = bundle
-            .manifest
-            .entries
-            .iter()
-            .find(|entry| entry.id == choice.id)
+        let entry = *entries_by_id
+            .get(choice.id.as_str())
             .ok_or("Unknown archive resource")?;
         let bytes = &bundle.data[&entry.blob];
         let path = resources::target(harness, project, destination, entry)?;
@@ -458,12 +451,16 @@ pub fn apply(
             continue;
         }
         let key = resources::target_key(entry);
-        let identity = path.to_string_lossy().into_owned();
-        let identity = if cfg!(windows) {
-            identity.to_lowercase()
+        let raw_identity = path.to_string_lossy();
+        let identity =
+            normalize_collision_path(&raw_identity, cfg!(any(windows, target_os = "macos")));
+        if let Some(existing_path) = path_by_identity.get(&identity) {
+            if existing_path != &path {
+                return Err("Multiple selected resources collide on a case-insensitive filesystem. Choose one source for each destination.".into());
+            }
         } else {
-            identity
-        };
+            path_by_identity.insert(identity.clone(), path.clone());
+        }
         if !targets.insert((identity, key)) {
             return Err("Multiple selected resources have the same destination. Choose one source for each destination, or preserve original scopes.".into());
         }

@@ -1,114 +1,14 @@
 use super::archive::{export_codex_archive, import_codex_archive, ArchiveReport};
-use super::ingest::{
-    file_fingerprint, open_database, prune_vanished_sessions, replace_indexed_session,
-    unchanged_source, IndexedMessage, IndexedSession, IngestReport,
-};
+use super::ingest::{replace_indexed_session, IndexedMessage, IndexedSession};
 use super::TranscriptError;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::Connection;
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
-pub fn ingest(config_root: &Path, app_data_dir: &Path) -> Result<IngestReport, TranscriptError> {
-    let roots = [
-        config_root.join("sessions"),
-        config_root.join("archived_sessions"),
-    ];
-    if !roots.iter().any(|root| root.is_dir()) {
-        return Err(TranscriptError::InvalidRoot);
-    }
-
-    let titles = read_titles(&config_root.join("session_index.jsonl"));
-    let mut files = Vec::new();
-    for root in roots.iter().filter(|root| root.is_dir()) {
-        collect_rollouts(root, &mut files)?;
-    }
-    files.sort();
-
-    let mut connection = open_database(app_data_dir)?;
-    let mut seen_paths = Vec::with_capacity(files.len());
-    let mut seen_ids = HashSet::new();
-    let mut report = IngestReport {
-        sessions: 0,
-        lines_read: 0,
-        messages_indexed: 0,
-        malformed_lines: 0,
-        skipped_files: 0,
-        skipped_state_lines: 0,
-    };
-    for path in files.into_iter().rev() {
-        let source_path = path.to_string_lossy().into_owned();
-        let id = match read_session_id(&path) {
-            Ok(Some(id)) => id,
-            Ok(None) | Err(TranscriptError::Io(_)) => {
-                seen_paths.push(source_path);
-                report.skipped_files += 1;
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        if !seen_ids.insert(id) {
-            continue;
-        }
-        seen_paths.push(source_path.clone());
-        let fingerprint =
-            file_fingerprint(&path, None).map(|stamp| format!("thread-id-v2|{stamp}"));
-        if let Some(fingerprint) = &fingerprint {
-            if unchanged_source(&connection, &source_path, fingerprint)? {
-                report.sessions += 1;
-                continue;
-            }
-        }
-        match ingest_rollout(&mut connection, &path, &titles, fingerprint.as_deref()) {
-            Ok((session_id, lines, messages, malformed, skipped)) => {
-                if session_id.is_empty() {
-                    report.skipped_files += 1;
-                    continue;
-                }
-                report.sessions += 1;
-                report.lines_read += lines;
-                report.messages_indexed += messages;
-                report.malformed_lines += malformed;
-                report.skipped_state_lines += skipped;
-            }
-            Err(TranscriptError::Io(_)) => report.skipped_files += 1,
-            Err(error) => return Err(error),
-        }
-    }
-    prune_vanished_sessions(&mut connection, &seen_paths)?;
-    update_titles(&mut connection, &titles)?;
-    Ok(report)
-}
-
-fn update_titles(
-    connection: &mut Connection,
-    titles: &HashMap<String, String>,
-) -> Result<(), TranscriptError> {
-    let sessions = {
-        let mut statement = connection.prepare("SELECT session_id, title FROM sessions")?;
-        let rows = statement.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-        })?;
-        rows.collect::<Result<Vec<_>, _>>()?
-    };
-    let transaction = connection.transaction()?;
-    for (id, current) in sessions {
-        let title = match titles.get(&id).filter(|title| !title.trim().is_empty()) {
-            Some(title) => Some(title.clone()),
-            None => transaction.prepare_cached("SELECT text FROM messages WHERE session_id = ?1 AND message_type = 'user' ORDER BY position LIMIT 1")?
-                .query_row([&id], |row| row.get::<_, String>(0)).optional()?,
-        };
-        if title != current {
-            transaction
-                .prepare_cached("UPDATE sessions SET title = ?2 WHERE session_id = ?1")?
-                .execute(params![id, title])?;
-        }
-    }
-    transaction.commit()?;
-    Ok(())
-}
+pub(super) const MAX_ROLLOUT_BYTES: u64 = 256 * 1024 * 1024;
 
 pub fn export_archive(
     config_root: &Path,
@@ -294,22 +194,23 @@ pub(super) fn ingest_rollout(
 }
 
 fn read_rollout(path: &Path) -> Result<String, TranscriptError> {
-    let mut contents = String::new();
-    rollout_reader(path)?.read_to_string(&mut contents)?;
-    Ok(contents)
+    read_rollout_bounded(path, MAX_ROLLOUT_BYTES)
 }
 
-fn read_session_id(path: &Path) -> Result<Option<String>, TranscriptError> {
-    for line in BufReader::new(rollout_reader(path)?).lines() {
-        let line = line?;
-        if let Some(metadata) = serde_json::from_str::<Value>(&line)
-            .ok()
-            .and_then(|value| session_metadata(&value))
-        {
-            return Ok(Some(metadata.0));
-        }
+pub(super) fn read_rollout_bounded(path: &Path, max_bytes: u64) -> Result<String, TranscriptError> {
+    let mut bytes = Vec::new();
+    rollout_reader(path)?
+        .take(max_bytes + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(TranscriptError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Codex rollout exceeds the {max_bytes}-byte uncompressed size limit."),
+        )));
     }
-    Ok(None)
+    String::from_utf8(bytes).map_err(|error| {
+        TranscriptError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    })
 }
 
 pub(super) fn rollout_reader(path: &Path) -> Result<Box<dyn Read>, TranscriptError> {
@@ -407,13 +308,13 @@ fn normalize_completed_item(item: &Value) -> NormalizedRecord {
     match item.get("type").and_then(Value::as_str) {
         Some("user_message") => visible(
             "user",
-            collect_content(item.get("content").unwrap_or(&Value::Null)),
+            super::extract_text(item.get("content").unwrap_or(&Value::Null)),
             event_attachments(item),
             None,
         ),
         Some("agent_message") => visible(
             "assistant",
-            collect_content(item.get("content").unwrap_or(&Value::Null)),
+            super::extract_text(item.get("content").unwrap_or(&Value::Null)),
             None,
             None,
         ),
@@ -439,7 +340,7 @@ fn normalize_response_item(payload: &Value) -> NormalizedRecord {
             };
             visible(
                 message_type,
-                collect_content(payload.get("content").unwrap_or(&Value::Null)),
+                super::extract_text(payload.get("content").unwrap_or(&Value::Null)),
                 None,
                 None,
             )
@@ -518,7 +419,10 @@ fn function_call(value: &Value) -> NormalizedRecord {
 }
 
 fn function_output(value: &Value) -> NormalizedRecord {
-    let text = value.get("output").map(collect_content).unwrap_or_default();
+    let text = value
+        .get("output")
+        .map(super::extract_text)
+        .unwrap_or_default();
     visible(
         "tool_result",
         text,
@@ -544,25 +448,6 @@ fn event_attachments(value: &Value) -> Option<String> {
     .then(|| attachments.to_string())
 }
 
-fn collect_content(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        Value::Array(items) => items
-            .iter()
-            .map(collect_content)
-            .filter(|text| !text.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Value::Object(object) => object
-            .get("text")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| object.get("content").map(collect_content))
-            .unwrap_or_default(),
-        _ => String::new(),
-    }
-}
-
 fn visible(
     kind: &str,
     text: impl Into<String>,
@@ -580,8 +465,19 @@ fn visible(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transcript::{ingest::list_sessions, spine};
+    use crate::harness::{codex::CodexHarness, selected::SelectedHarness};
+    use crate::transcript::{
+        catalog,
+        ingest::{file_fingerprint, list_sessions, open_database, IngestReport},
+        spine,
+    };
+    use rusqlite::params;
     use std::io::Write;
+
+    fn index_codex(home: &Path, app: &Path) -> Result<IngestReport, String> {
+        let harness = SelectedHarness::Codex(CodexHarness::new(home.into(), home.into()));
+        catalog::index_all(&harness, app, home, |_| {})
+    }
 
     fn session_meta(id: &str, cwd: &str) -> Value {
         json!({
@@ -617,38 +513,28 @@ mod tests {
         writeln!(file, "{}", json!({"timestamp":"2026-10-22T11:00:03Z","type":"future_event","payload":{"opaque":"retained in rollout"}})).unwrap();
         fs::write(home.join("session_index.jsonl"), format!("{}\n", json!({"id":"00000000-0000-4000-8000-000000000001","thread_name":"Widget notes","updated_at":"2026-10-22T11:00:03Z"}))).unwrap();
 
-        let report = ingest(&home, &temp.path().join("appdata/codex")).unwrap();
+        let app = temp.path().join("appdata");
+        let cache = app.join("codex");
+        let report = index_codex(&home, &app).unwrap();
         assert_eq!(report.sessions, 1);
         assert_eq!(report.messages_indexed, 2);
-        let summaries = list_sessions(&temp.path().join("appdata/codex")).unwrap();
+        let summaries = list_sessions(&cache).unwrap();
         assert_eq!(
             summaries[0].session_id,
             "00000000-0000-4000-8000-000000000001"
         );
         assert_eq!(summaries[0].title.as_deref(), Some("Widget notes"));
         assert_eq!(summaries[0].project, "C:/work/demo");
-        let page = spine::thread_page(
-            &temp.path().join("appdata/codex"),
-            &summaries[0].session_id,
-            0,
-            10,
-        )
-        .unwrap();
+        let page = spine::thread_page(&cache, &summaries[0].session_id, 0, 10).unwrap();
         assert_eq!(
             page.iter()
                 .map(|message| message.text.as_str())
                 .collect::<Vec<_>>(),
             ["locate the blue widget", "I found it."]
         );
-        assert_eq!(
-            spine::search(&temp.path().join("appdata/codex"), "blue widget", 10)
-                .unwrap()
-                .len(),
-            1
-        );
+        assert_eq!(spine::search(&cache, "blue widget", 10).unwrap().len(), 1);
         assert_eq!(fs::read_to_string(&rollout).unwrap().lines().count(), 4);
-        let cache = temp.path().join("appdata/codex");
-        assert_eq!(ingest(&home, &cache).unwrap().messages_indexed, 0);
+        assert_eq!(index_codex(&home, &app).unwrap().messages_indexed, 0);
         for title in ["Native title", "Renamed native conversation"] {
             fs::write(
                 home.join("session_index.jsonl"),
@@ -660,7 +546,7 @@ mod tests {
                 ),
             )
             .unwrap();
-            let renamed = ingest(&home, &cache).unwrap();
+            let renamed = index_codex(&home, &app).unwrap();
             assert_eq!(
                 renamed.lines_read, 0,
                 "title changes do not re-read rollouts"
@@ -670,14 +556,8 @@ mod tests {
                 list_sessions(&cache).unwrap()[0].title.as_deref(),
                 Some(title)
             );
-            assert_eq!(ingest(&home, &cache).unwrap().messages_indexed, 0);
+            assert_eq!(index_codex(&home, &app).unwrap().messages_indexed, 0);
         }
-        fs::remove_file(home.join("session_index.jsonl")).unwrap();
-        assert_eq!(ingest(&home, &cache).unwrap().messages_indexed, 0);
-        assert_eq!(
-            list_sessions(&cache).unwrap()[0].title.as_deref(),
-            Some("locate the blue widget")
-        );
     }
 
     #[test]
@@ -714,8 +594,9 @@ mod tests {
         )
         .unwrap();
 
-        let app_data = temp.path().join("appdata/codex");
-        let report = ingest(&home, &app_data).unwrap();
+        let app = temp.path().join("appdata");
+        let app_data = app.join("codex");
+        let report = index_codex(&home, &app).unwrap();
         assert_eq!(report.messages_indexed, 4);
         let summaries = list_sessions(&app_data).unwrap();
         let page = spine::thread_page(&app_data, &summaries[0].session_id, 0, 10).unwrap();
@@ -740,7 +621,8 @@ mod tests {
     fn forked_rollouts_keep_their_own_identity_and_skip_unchanged_sources() {
         let temp = crate::test_support::tempdir().unwrap();
         let home = temp.path().join("codex");
-        let cache = temp.path().join("cache");
+        let app = temp.path().join("app");
+        let cache = app.join("codex");
         let sessions = home.join("sessions");
         fs::create_dir_all(&sessions).unwrap();
         let parent = "00000000-0000-4000-8000-000000000001";
@@ -761,7 +643,7 @@ mod tests {
             .unwrap();
         }
         fs::write(sessions.join(format!("rollout-2026-10-21-{parent}.jsonl")), format!("{}\n{}\n", session_meta(parent, "C:/work/demo"), json!({"type":"event_msg","payload":{"type":"user_message","message":"outdated parent conversation"}}))).unwrap();
-        ingest(&home, &cache).unwrap();
+        index_codex(&home, &app).unwrap();
         let summaries = list_sessions(&cache).unwrap();
         assert_eq!(
             summaries
@@ -781,7 +663,7 @@ mod tests {
             spine::thread_page(&cache, child, 0, 10).unwrap()[0].text,
             "child conversation"
         );
-        assert_eq!(ingest(&home, &cache).unwrap().lines_read, 0);
+        assert_eq!(index_codex(&home, &app).unwrap().lines_read, 0);
         super::super::ingest::remove_sessions(&cache, &[child.to_owned()]).unwrap();
         let child_path = sessions.join(format!("rollout-2026-10-22-{child}.jsonl"));
         {
@@ -789,7 +671,7 @@ mod tests {
             connection.execute("INSERT INTO sessions(session_id, project, source_path, fingerprint) VALUES ('legacy-owner', 'C:/work/demo', ?1, ?2)",
                 params![child_path.to_string_lossy(), file_fingerprint(&child_path, None)]).unwrap();
         }
-        ingest(&home, &cache).unwrap();
+        index_codex(&home, &app).unwrap();
         assert_eq!(
             list_sessions(&cache)
                 .unwrap()
@@ -830,8 +712,9 @@ mod tests {
             format!("{}\n", json!({"id":original_id,"thread_name":"Native title","updated_at":"2026-10-22T11:00:02Z"})),
         )
         .unwrap();
-        let app_data = temp.path().join("appdata/codex");
-        ingest(&home, &app_data).unwrap();
+        let app = temp.path().join("appdata");
+        let app_data = app.join("codex");
+        index_codex(&home, &app).unwrap();
 
         let exported = export_archive(&home, &app_data, original_id, &archive_destination).unwrap();
         assert!(matches!(
@@ -895,12 +778,13 @@ mod tests {
             ),
         )
         .unwrap();
-        let app_data = temp.path().join("appdata/codex");
-        ingest(&home, &app_data).unwrap();
+        let app = temp.path().join("appdata");
+        let app_data = app.join("codex");
+        index_codex(&home, &app).unwrap();
         assert_eq!(list_sessions(&app_data).unwrap().len(), 1);
 
         fs::remove_file(rollout).unwrap();
-        ingest(&home, &app_data).unwrap();
+        index_codex(&home, &app).unwrap();
         assert!(list_sessions(&app_data).unwrap().is_empty());
     }
 
@@ -934,8 +818,9 @@ mod tests {
         )
         .unwrap();
 
-        let app_data = temp.path().join("appdata/codex");
-        let report = ingest(&home, &app_data).unwrap();
+        let app = temp.path().join("appdata");
+        let app_data = app.join("codex");
+        let report = index_codex(&home, &app).unwrap();
         assert_eq!(report.sessions, 1);
         assert_eq!(report.messages_indexed, 2);
         assert_eq!(
@@ -953,7 +838,7 @@ mod tests {
         let imported_contents = fs::read_to_string(&imported.path).unwrap();
         assert!(imported_contents.contains("compressed archive reply"));
         assert!(imported_contents.contains(&imported.session_id));
-        let refreshed = ingest(&home, &app_data).unwrap();
+        let refreshed = index_codex(&home, &app).unwrap();
         assert_eq!(refreshed.sessions, 2);
         assert_eq!(
             spine::search(&app_data, "compressed archive search", 10)
@@ -961,5 +846,17 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn compressed_rollout_exceeding_decompression_cap_is_rejected() {
+        let temp = crate::test_support::tempdir().unwrap();
+        let payload = "x".repeat(4096);
+        let compressed = zstd::stream::encode_all(payload.as_bytes(), 1).unwrap();
+        let path = temp.path().join("rollout-bomb.jsonl.zst");
+        fs::write(&path, compressed).unwrap();
+        assert_eq!(read_rollout_bounded(&path, 4096).unwrap().len(), 4096);
+        let err = read_rollout_bounded(&path, 4095).unwrap_err();
+        assert!(err.to_string().contains("uncompressed size limit"));
     }
 }

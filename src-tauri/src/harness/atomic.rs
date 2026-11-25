@@ -14,17 +14,7 @@ use super::{HarnessError, Result};
 static MUTATION_LOCK: Mutex<()> = Mutex::new(());
 static TEMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-pub(crate) fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        metadata.file_attributes() & 0x400 != 0
-    }
-    #[cfg(not(windows))]
-    {
-        metadata.file_type().is_symlink()
-    }
-}
+pub(crate) use super::fs_guard::is_link_or_reparse;
 
 /// A non-empty chain of object keys addressing one value in a JSON document.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -620,6 +610,21 @@ fn write_backup(path: &Path, bytes: &[u8]) -> std::result::Result<(), CommitErro
     })
 }
 
+fn verify_readback(path: &Path, expected: &[u8]) -> std::result::Result<[u8; 32], CommitError> {
+    let landed = std::fs::read(path).map_err(|source| CommitError::VerifyRead {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if landed != expected {
+        return Err(CommitError::Conflict {
+            path: path.to_path_buf(),
+            expected: sha256(expected),
+            actual: sha256(&landed),
+        });
+    }
+    Ok(sha256(&landed))
+}
+
 fn apply_and_write(
     path: &Path,
     original: Option<Vec<u8>>,
@@ -627,31 +632,26 @@ fn apply_and_write(
     backup_to: Option<&Path>,
 ) -> std::result::Result<Receipt, CommitError> {
     let before = original.as_deref().map(sha256);
-    let backup = match (backup_to, original.as_deref()) {
-        (Some(backup), Some(original)) => {
-            write_backup(backup, original)?;
-            Some(backup.to_path_buf())
+    let unchanged = original.as_deref() == Some(bytes);
+    let backup = if unchanged {
+        None
+    } else {
+        match (backup_to, original.as_deref()) {
+            (Some(backup), Some(original)) => {
+                write_backup(backup, original)?;
+                Some(backup.to_path_buf())
+            }
+            _ => None,
         }
-        _ => None,
     };
-    if original.as_deref() != Some(bytes) {
+    if !unchanged {
         replace_via_temp(path, bytes)?;
     }
-    let landed = std::fs::read(path).map_err(|source| CommitError::VerifyRead {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if landed != bytes {
-        return Err(CommitError::Conflict {
-            path: path.to_path_buf(),
-            expected: sha256(bytes),
-            actual: sha256(&landed),
-        });
-    }
+    let after = verify_readback(path, bytes)?;
     Ok(Receipt {
         backup,
         before,
-        after: sha256(&landed),
+        after,
         target: path.to_path_buf(),
     })
 }
@@ -828,32 +828,25 @@ pub(crate) fn write_recorded<E>(
         }
         RecordedWrite::Create(bytes) => bytes.to_vec(),
     };
+    let unchanged = original.as_deref() == Some(candidate.as_slice());
     let plan = MutationPlan {
         target: path.to_path_buf(),
-        backup: original.as_ref().and(backup_to).map(Path::to_path_buf),
+        backup: if unchanged {
+            None
+        } else {
+            original.as_ref().and(backup_to).map(Path::to_path_buf)
+        },
         before_checksum: original.as_deref().map(|value| hex(&sha256(value))),
         after_checksum: Some(hex(&sha256(&candidate))),
     };
     reserve(&plan, &guard).map_err(RecordedMutationError::Reservation)?;
     let receipt = if create_only {
         create_via_temp(path, &candidate).map_err(RecordedMutationError::Mutation)?;
-        let landed = std::fs::read(path).map_err(|source| {
-            RecordedMutationError::Mutation(CommitError::VerifyRead {
-                path: path.to_path_buf(),
-                source,
-            })
-        })?;
-        if landed != candidate {
-            return Err(RecordedMutationError::Mutation(CommitError::Conflict {
-                path: path.to_path_buf(),
-                expected: sha256(&candidate),
-                actual: sha256(&landed),
-            }));
-        }
+        let after = verify_readback(path, &candidate).map_err(RecordedMutationError::Mutation)?;
         Receipt {
             backup: None,
             before: None,
-            after: sha256(&landed),
+            after,
             target: path.to_path_buf(),
         }
     } else {
@@ -1309,5 +1302,16 @@ mod tests {
             other => panic!("expected drift refusal, got {other:?}"),
         }
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn noop_write_does_not_create_a_backup_file() {
+        let dir = crate::test_support::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let backup = dir.path().join("backup.json");
+        write_fixture(&path, b"same");
+        let receipt = write_file(&path, b"same", Some(&backup)).unwrap();
+        assert_eq!(receipt.backup, None);
+        assert!(!backup.exists());
     }
 }

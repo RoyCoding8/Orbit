@@ -64,11 +64,13 @@ pub fn save(harness: &OpenCodeHarness, name: &str, entry: Value) -> Result<(), S
                 mcp::preserve_masked_credentials(&previous_editor, &mut edited)
                     .map_err(|error| error.to_string())?;
                 native = to_native_entry(edited)?;
-                if let Some(enabled) = previous.get("enabled") {
-                    native
-                        .as_object_mut()
-                        .expect("native MCP entry is an object")
-                        .insert("enabled".into(), enabled.clone());
+                if native.get("enabled").is_none() {
+                    if let Some(enabled) = previous.get("enabled") {
+                        native
+                            .as_object_mut()
+                            .expect("native MCP entry is an object")
+                            .insert("enabled".into(), enabled.clone());
+                    }
                 }
             }
             if contains_mask(&native) {
@@ -242,7 +244,15 @@ fn to_native_entry(mut entry: Value) -> Result<Value, String> {
             let mut command_parts = vec![Value::String(command)];
             command_parts.extend(args);
             let environment = object.remove("env");
-            let enabled = object.remove("enabled");
+            let enabled = object
+                .remove("enabled")
+                .map(|value| {
+                    value
+                        .as_bool()
+                        .map(Value::Bool)
+                        .ok_or("`enabled` must be a boolean")
+                })
+                .transpose()?;
             let timeout = object.remove("timeout");
             let mut native = Map::new();
             native.extend(object.clone());
@@ -268,7 +278,15 @@ fn to_native_entry(mut entry: Value) -> Result<Value, String> {
             }
             let headers = object.remove("headers");
             let oauth = object.remove("oauth");
-            let enabled = object.remove("enabled");
+            let enabled = object
+                .remove("enabled")
+                .map(|value| {
+                    value
+                        .as_bool()
+                        .map(Value::Bool)
+                        .ok_or("`enabled` must be a boolean")
+                })
+                .transpose()?;
             let mut native = object.clone();
             native.insert("type".into(), Value::String("remote".into()));
             native.insert("url".into(), url);
@@ -339,5 +357,36 @@ mod tests {
             .contains("// useful note"));
         delete(&harness, "fixture").unwrap();
         assert!(list(&harness).unwrap().is_empty());
+    }
+
+    #[test]
+    fn save_honors_explicit_enabled_and_preserves_when_omitted() {
+        let temp = tempdir().unwrap();
+        let harness = OpenCodeHarness::new(temp.path().join("cfg"), temp.path().to_path_buf());
+        save(
+            &harness,
+            "svc",
+            serde_json::json!({"type":"stdio","command":"node","enabled":false}),
+        )
+        .unwrap();
+        assert!(!list(&harness).unwrap()[0].enabled);
+
+        // Omitting enabled preserves false
+        save(
+            &harness,
+            "svc",
+            serde_json::json!({"type":"stdio","command":"node2"}),
+        )
+        .unwrap();
+        assert!(!list(&harness).unwrap()[0].enabled);
+
+        // Explicitly setting enabled: true overrides previous false
+        save(
+            &harness,
+            "svc",
+            serde_json::json!({"type":"stdio","command":"node2","enabled":true}),
+        )
+        .unwrap();
+        assert!(list(&harness).unwrap()[0].enabled);
     }
 }

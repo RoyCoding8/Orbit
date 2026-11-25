@@ -1,0 +1,12 @@
+[package]
+name = "orbit-formal"
+version = "0.1.0"
+edition = "2021"
+description = "Kani formal verification proof harnesses directly verifying orbit-core's production security, state-machine, credential, and parsing invariants."
+publish = false
+
+[dependencies]
+orbit-core = { path = "../orbit-core" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

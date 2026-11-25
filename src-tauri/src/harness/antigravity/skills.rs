@@ -1,7 +1,6 @@
 use super::{discovery, AntigravityHarness};
 use crate::{
     harness::{
-        atomic,
         claude::{
             skills::{self, SkillEntry},
             SkillOverride,
@@ -10,14 +9,10 @@ use crate::{
     },
     ledger,
 };
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 fn id(path: &Path) -> String {
-    format!(
-        "skill-{}",
-        atomic::hex(&Sha256::digest(path.to_string_lossy().as_bytes()))
-    )
+    crate::harness::skill_store::hashed_skill_id(path)
 }
 
 pub fn owned_roots(harness: &AntigravityHarness, project: &Path) -> Vec<PathBuf> {
@@ -31,10 +26,20 @@ pub fn owned_roots(harness: &AntigravityHarness, project: &Path) -> Vec<PathBuf>
 }
 
 pub fn owned(harness: &AntigravityHarness, project: &Path, file: &Path) -> bool {
+    let Some(resolved_file) = crate::harness::fs_guard::canonical_or_missing_tail(file) else {
+        return false;
+    };
     owned_roots(harness, project).iter().any(|root| {
-        let root = root.canonicalize().unwrap_or_else(|_| root.clone());
-        file.strip_prefix(root).is_ok_and(|p| {
-            p.components().count() == 2 && p.file_name().is_some_and(|n| n == "SKILL.md")
+        let Some(resolved_root) = crate::harness::fs_guard::canonical_or_missing_tail(root) else {
+            return false;
+        };
+        resolved_file.strip_prefix(&resolved_root).is_ok_and(|p| {
+            let parts: Vec<_> = p.components().collect();
+            parts.len() == 2
+                && parts
+                    .iter()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
+                && p.file_name().is_some_and(|n| n == "SKILL.md")
         })
     })
 }

@@ -95,9 +95,9 @@ impl Harness for KiroHarness {
                     .collect()
             }),
         };
-        resources.map_err(|message| HarnessError::Mutation {
+        resources.map_err(|message| HarnessError::Read {
             path: self.home.clone(),
-            message,
+            source: std::io::Error::other(message),
         })
     }
 }

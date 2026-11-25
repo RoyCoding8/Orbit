@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useHarness } from "../HarnessContext";
-import { displayPath } from "../pathDisplay";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { M3eButton } from "@m3e/react/button";
 import "@m3e/web/button";
+import { useHarness } from "../lib/HarnessContext";
+import { displayPath } from "../lib/pathDisplay";
+import { useSequencedLoad } from "../lib/useSequencedLoad";
 import { JsonValue } from "../components/JsonValue";
 import { JsonEditor } from "../components/JsonEditor";
-import "./ConfigSearch.css";
+import { SearchField } from "../components/SearchField";
+import "../styles/ConfigSearch.css";
 
 type LayerName = "user" | "project" | "local";
 type Layer = { name: LayerName | "project_parent"; path: string; values: Record<string, unknown> };
@@ -29,27 +31,27 @@ export function Config() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
-  const loadSequenceRef = useRef(0);
+  const { start: startLoad } = useSequencedLoad();
 
   const load = useCallback(async () => {
-    const requestId = ++loadSequenceRef.current;
+    const request = startLoad();
     setLoading(true);
     setSnapshot(emptySnapshot);
     setKey("");
     setValueText("");
     try {
       const loaded = await invoke<Snapshot>("config_load", { projectRoot });
-      if (requestId !== loadSequenceRef.current) return;
+      if (!request.isCurrent()) return;
       setSnapshot(loaded);
       setActiveLayer(current => loaded.layers.some(layer => layer.name === current) ? current : "user");
       setError("");
     } catch (cause) {
-      if (requestId !== loadSequenceRef.current) return;
+      if (!request.isCurrent()) return;
       setError(String(cause));
     } finally {
-      if (requestId === loadSequenceRef.current) setLoading(false);
+      if (request.isCurrent()) setLoading(false);
     }
-  }, [projectRoot, invoke]);
+  }, [projectRoot, invoke, startLoad]);
 
   useEffect(() => {
     void load();
@@ -59,10 +61,18 @@ export function Config() {
     () => snapshot.layers.find((layer) => layer.name === activeLayer),
     [activeLayer, snapshot.layers],
   );
-  const matchingSettings = Object.entries(snapshot.effective).filter(([settingKey, entry]) => {
+  const matchingSettings = useMemo(() => {
+    const entries = Object.entries(snapshot.effective);
     const query = effectiveSearch.trim().toLocaleLowerCase();
-    return !query || [settingKey, entry.source, JSON.stringify(entry.value) ?? ""].some((value) => value.toLocaleLowerCase().includes(query));
-  });
+    if (!query) return entries;
+    return entries.filter(([settingKey, entry]) =>
+      [settingKey, entry.source, JSON.stringify(entry.value) ?? ""].some((value) => value.toLocaleLowerCase().includes(query)),
+    );
+  }, [snapshot.effective, effectiveSearch]);
+  const parentLayers = useMemo(
+    () => snapshot.layers.filter((layer) => layer.name === "project_parent"),
+    [snapshot.layers],
+  );
 
   const chooseProject = async () => {
     try {
@@ -228,10 +238,10 @@ export function Config() {
               {effectiveSearch.trim() ? `${matchingSettings.length} of ${Object.keys(snapshot.effective).length} keys` : `${Object.keys(snapshot.effective).length} keys`}
             </span>
           </div>
-          {snapshot.layers.some(layer => layer.name === "project_parent") && (
+          {parentLayers.length > 0 && (
             <details>
               <summary>Inherited project files</summary>
-              {snapshot.layers.filter(layer => layer.name === "project_parent").map(layer => <p key={layer.path} className="layer-path">{displayPath(layer.path)}</p>)}
+              {parentLayers.map(layer => <p key={layer.path} className="layer-path">{displayPath(layer.path)}</p>)}
             </details>
           )}
           {error && (
@@ -239,13 +249,18 @@ export function Config() {
               {displayPath(error)}
             </p>
           )}
-          <div className="effective-search">
-            <label htmlFor="effective-search">Search effective settings</label>
-            <div className="effective-search-controls">
-              <input id="effective-search" type="search" value={effectiveSearch} onChange={(event) => setEffectiveSearch(event.target.value)} placeholder="Key, source, or value" />
-              <button type="button" className="text-button" onClick={() => setEffectiveSearch("")} disabled={!effectiveSearch} aria-label="Clear settings search">Clear</button>
-            </div>
-          </div>
+          <SearchField
+            id="effective-search"
+            label="Search effective settings"
+            value={effectiveSearch}
+            onChange={setEffectiveSearch}
+            placeholder="Key, source, or value"
+            className="effective-search"
+            controlsClassName="effective-search-controls"
+            clearLabel="Clear"
+            clearAriaLabel="Clear settings search"
+            alwaysShowClear
+          />
           {loading ? (
             <p className="config-empty" role="status">
               Loading settings…

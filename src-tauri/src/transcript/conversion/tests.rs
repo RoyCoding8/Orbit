@@ -636,3 +636,65 @@ fn native_pi_resumes_converted_history_and_inline_images_without_inference() {
     }
     assert_eq!(fs::read(&original.path).unwrap(), source_bytes);
 }
+
+#[test]
+fn kiro_assistant_image_coalescing_splits_images_into_user_attachment_turn() {
+    let chat = decode_kiro(
+        &json!({"cwd":"/kiro","title":"Kiro"}),
+        &[
+            json!({"kind":"Prompt","data":{"message_id":"u1","content":{"type":"text","text":"show chart"}}}),
+            json!({"kind":"AssistantMessage","data":{"message_id":"a1","content":{"kind":"Text","data":"Here is "}}}),
+            json!({"kind":"AssistantMessage","data":{"message_id":"a1","content":{"kind":"Text","data":"the chart"}}}),
+            json!({"kind":"AssistantMessage","data":{"message_id":"a1","content":{"type":"image","mimeType":"image/png","data":"AAAA"}}}),
+        ],
+    )
+    .unwrap();
+    assert_eq!(chat.turns.len(), 3);
+    assert_eq!(chat.turns[1].role, Role::Assistant);
+    assert!(matches!(&chat.turns[1].content[0], Content::Text(t) if t == "Here is the chart"));
+    assert_eq!(chat.turns[2].role, Role::User);
+    assert!(
+        matches!(&chat.turns[2].content[1], Content::Image { mime, data } if mime == "image/png" && data == "AAAA")
+    );
+}
+
+#[test]
+fn pi_backward_leaf_scan_skips_trailing_entries_without_id() {
+    let records = vec![
+        json!({"type":"session","version":3,"id":"10000000-0000-4000-8000-000000000001","cwd":"/pi","timestamp":"2026-10-23T12:00:00Z"}),
+        json!({"type":"message","id":"u1","parentId":null,"message":{"role":"user","content":"hello"}}),
+        json!({"type":"message","id":"a1","parentId":"u1","message":{"role":"assistant","content":"world"}}),
+        json!({"type":"metadata_without_id","note":"trailing"}),
+    ];
+    let chat = decode_pi(&records).unwrap();
+    assert_eq!(chat.turns.len(), 2);
+}
+
+#[test]
+fn codex_thread_rolled_back_breaks_immediately_for_huge_num_turns() {
+    let records = vec![
+        json!({"type":"session_meta","payload":{"cwd":"/project"}}),
+        json!({"type":"event_msg","payload":{"type":"user_message","message":"one"}}),
+        json!({"type":"event_msg","payload":{"type":"thread_rolled_back","num_turns":u64::MAX}}),
+    ];
+    let chat = decode_codex(&records).unwrap();
+    assert!(chat.turns.is_empty());
+}
+
+#[test]
+fn kiro_decode_rejects_traversal_source_session_id() {
+    let temp = crate::test_support::tempdir().unwrap();
+    let kiro = harness(Client::Kiro, &temp.path().join("kiro"));
+    let root = temp.path().join("bad-kiro-archive");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("orbit-backup.json"),
+        serde_json::to_vec(&json!({"sourceSessionId":"kiro-v2:../../escape"})).unwrap(),
+    )
+    .unwrap();
+    let err = decode(&kiro, &root).unwrap_err();
+    assert!(
+        err.contains("sourceSessionId is invalid"),
+        "unexpected error: {err}"
+    );
+}

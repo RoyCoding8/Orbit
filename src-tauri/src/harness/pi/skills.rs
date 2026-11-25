@@ -17,29 +17,35 @@ use crate::{
 };
 
 pub fn inventory(harness: &PiHarness, project: &Path) -> Result<Vec<SkillEntry>, String> {
-    let mut roots = vec![(harness.config_root().join("skills"), true)];
+    let mut roots = vec![(harness.config_root().join("skills"), true, false)];
     if project.is_dir() {
-        roots.push((harness.project_root(project).join("skills"), true));
-        roots.push((harness.home().join(".agents/skills"), false));
+        roots.push((harness.project_root(project).join("skills"), true, false));
+        roots.push((harness.home().join(".agents/skills"), false, false));
         for ancestor in project_ancestors(project) {
-            roots.push((ancestor.join(".agents/skills"), false));
+            roots.push((ancestor.join(".agents/skills"), false, false));
         }
         for path in configured_paths(harness, project)? {
-            roots.push((path, false));
+            roots.push((path, false, true));
         }
     } else {
-        roots.push((harness.home().join(".agents/skills"), false));
+        roots.push((harness.home().join(".agents/skills"), false, false));
     }
     let mut entries = BTreeMap::new();
-    for (root, editable_root) in roots {
-        collect(&root, editable_root, &mut entries, 0)?;
+    for (root, editable_root, allow_root_skill) in roots {
+        collect(&root, editable_root, allow_root_skill, &mut entries, 0)?;
     }
     Ok(entries.into_values().collect())
 }
 
 pub(crate) fn list_global(harness: &PiHarness) -> Result<Vec<SkillEntry>, String> {
     let mut entries = BTreeMap::new();
-    collect(&harness.config_root().join("skills"), true, &mut entries, 0)?;
+    collect(
+        &harness.config_root().join("skills"),
+        true,
+        false,
+        &mut entries,
+        0,
+    )?;
     Ok(entries.into_values().collect())
 }
 
@@ -183,6 +189,8 @@ pub fn restore(harness: &PiHarness, project: &Path, id: &str, backup: &Path) -> 
         .before_checksum
         .as_deref()
         .is_some_and(|checksum| checksum.starts_with("tree-v2-sha256:"));
+    let target = crate::harness::fs_guard::canonical_or_missing_tail(&target)
+        .ok_or("uninstall target is outside Pi global and selected-project skill roots")?;
     let identity = if file_backup {
         target.clone()
     } else {
@@ -256,22 +264,29 @@ pub(crate) fn allowed_skill_path(harness: &PiHarness, project: &Path, target: &P
         };
         roots.push(project.join(".pi/skills"));
     }
+    let Some(resolved_target) = crate::harness::fs_guard::canonical_or_missing_tail(&target) else {
+        return false;
+    };
     roots.into_iter().any(|root| {
-        let target = canonical_or_deleted(&target);
-        let root = canonical_or_deleted(&root);
-        target.strip_prefix(root).is_ok_and(|relative| {
-            let parts: Vec<_> = relative.components().collect();
-            parts
-                .iter()
-                .all(|part| matches!(part, std::path::Component::Normal(_)))
-                && !parts.is_empty()
-        })
+        let Some(resolved_root) = crate::harness::fs_guard::canonical_or_missing_tail(&root) else {
+            return false;
+        };
+        resolved_target
+            .strip_prefix(resolved_root)
+            .is_ok_and(|relative| {
+                let parts: Vec<_> = relative.components().collect();
+                parts
+                    .iter()
+                    .all(|part| matches!(part, std::path::Component::Normal(_)))
+                    && !parts.is_empty()
+            })
     })
 }
 
 fn collect(
     root: &Path,
     editable: bool,
+    allow_root_skill: bool,
     entries: &mut BTreeMap<PathBuf, SkillEntry>,
     depth: usize,
 ) -> Result<(), String> {
@@ -287,7 +302,7 @@ fn collect(
     }
     claude::skills::ensure_plain_directory(root)?;
     let skill_file = root.join("SKILL.md");
-    if skill_file.is_file() {
+    if (depth > 0 || allow_root_skill) && skill_file.is_file() {
         add_skill(&skill_file, editable, entries)?;
         return Ok(());
     }
@@ -296,7 +311,7 @@ fn collect(
         let path = item.path();
         let metadata = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
         if metadata.is_dir() && !atomic::is_link_or_reparse(&metadata) {
-            collect(&path, editable, entries, depth + 1)?;
+            collect(&path, editable, allow_root_skill, entries, depth + 1)?;
         } else if depth == 0
             && metadata.is_file()
             && !atomic::is_link_or_reparse(&metadata)
@@ -395,14 +410,7 @@ fn project_ancestors(project: &Path) -> Vec<PathBuf> {
 }
 
 fn skill_id(path: &Path) -> String {
-    format!(
-        "skill-{}",
-        atomic::hex(&Sha256::digest(path.to_string_lossy().as_bytes()))
-    )
-}
-
-fn canonical_or_deleted(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    crate::harness::skill_store::hashed_skill_id(path)
 }
 
 fn validate_name(name: &str) -> Result<(), String> {
@@ -568,5 +576,27 @@ mod tests {
                 .unwrap()
                 .editable
         );
+    }
+
+    #[test]
+    fn root_skill_md_at_depth_zero_does_not_hide_nested_skills() {
+        let root = crate::test_support::tempdir().unwrap();
+        let home = root.path().join("home");
+        let harness = PiHarness::new(home.join(".pi/agent"), home);
+        let project = root.path().join("project");
+        let skills_dir = project.join(".pi/skills");
+        std::fs::create_dir_all(skills_dir.join("nested")).unwrap();
+        std::fs::write(
+            skills_dir.join("SKILL.md"),
+            "---\nname: root-file\ndescription: flat\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            skills_dir.join("nested/SKILL.md"),
+            "---\nname: nested\ndescription: nested skill\n---\n",
+        )
+        .unwrap();
+        let entries = inventory(&harness, &project).unwrap();
+        assert!(entries.iter().any(|e| e.name == "nested"));
     }
 }

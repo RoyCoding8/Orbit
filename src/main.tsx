@@ -12,11 +12,3 @@ createRoot(rootElement).render(
     <App />
   </StrictMode>,
 );
-
-declare global {
-  interface Window {
-    shellReady?: boolean;
-  }
-}
-window.shellReady = true;
-console.log("shell-ready");

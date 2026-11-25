@@ -50,44 +50,210 @@ pub(super) enum Section {
     Extensions,
 }
 
-pub(super) fn relative(text: &str) -> Result<PathBuf, String> {
-    if text.is_empty() || text.len() > 500 || text.contains(['\\', ':', '\0']) {
-        return Err("Archive contains an unsafe relative path".into());
+#[derive(Clone, Copy)]
+struct HarnessSpec {
+    project_dir: &'static str,
+    mcp_pointer: &'static str,
+    extensions_key: &'static str,
+    managed_keys: &'static [&'static str],
+    hook_folder: &'static str,
+}
+
+fn harness_spec(harness: &str) -> HarnessSpec {
+    match harness {
+        "claude-code" => HarnessSpec {
+            project_dir: ".claude",
+            mcp_pointer: "/mcpServers",
+            extensions_key: "plugins",
+            managed_keys: &["hooks", "mcpServers"],
+            hook_folder: "hooks",
+        },
+        "codex" => HarnessSpec {
+            project_dir: ".codex",
+            mcp_pointer: "/mcp_servers",
+            extensions_key: "plugins",
+            managed_keys: &["hooks", "mcp_servers"],
+            hook_folder: "hooks",
+        },
+        "kiro" => HarnessSpec {
+            project_dir: ".kiro",
+            mcp_pointer: "/mcpServers",
+            extensions_key: "plugins",
+            managed_keys: &["hooks", "mcpServers"],
+            hook_folder: "hooks",
+        },
+        "opencode" => HarnessSpec {
+            project_dir: ".opencode",
+            mcp_pointer: "/mcp/servers",
+            extensions_key: "plugins",
+            managed_keys: &["mcp", "plugins"],
+            hook_folder: "plugins",
+        },
+        "pi" => HarnessSpec {
+            project_dir: ".pi",
+            mcp_pointer: "/mcpServers",
+            extensions_key: "extensions",
+            managed_keys: &["extensions"],
+            hook_folder: "extensions",
+        },
+        "antigravity" => HarnessSpec {
+            project_dir: ".agents",
+            mcp_pointer: "/mcpServers",
+            extensions_key: "plugins",
+            managed_keys: &["hooks", "mcpServers"],
+            hook_folder: "hooks",
+        },
+        _ => unreachable!(),
     }
-    for component in text.split('/') {
-        let stem = component.split('.').next().unwrap_or("").to_uppercase();
-        if component.is_empty()
-            || component == "."
-            || component == ".."
-            || component.ends_with(['.', ' '])
-            || component
-                .chars()
-                .any(|c| c.is_control() || "<>\"|?*".contains(c))
-            || matches!(component.to_lowercase().as_str(), ".git" | ".orbit")
-            || matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-            || (stem.len() == 4
-                && (stem.starts_with("COM") || stem.starts_with("LPT"))
-                && stem.ends_with(['1', '2', '3', '4', '5', '6', '7', '8', '9']))
-        {
-            return Err("Archive contains an unsafe relative path".into());
+}
+
+/// Pure allowlist check for primary instruction archive paths per harness.
+pub fn is_primary_instruction_path(harness: &str, path: &str) -> bool {
+    if !path.ends_with(".md") {
+        return false;
+    }
+    match harness {
+        "antigravity" => matches!(path, "AGENTS.md" | "GEMINI.md"),
+        "claude-code" => {
+            matches!(
+                path,
+                "CLAUDE.md" | "CLAUDE.local.md" | ".claude/CLAUDE.md" | ".claude/CLAUDE.local.md"
+            ) || path.starts_with("rules/")
+                || path.starts_with(".claude/rules/")
+        }
+        "codex" => matches!(path, "AGENTS.md" | "AGENTS.override.md"),
+        "kiro" => path == "AGENTS.md" || path.ends_with("/AGENTS.md"),
+        "opencode" => matches!(path, "AGENTS.md" | "CLAUDE.md") || path.ends_with("/AGENTS.md"),
+        "pi" => {
+            matches!(
+                path,
+                "AGENTS.md" | "CLAUDE.md" | "SYSTEM.md" | "APPEND_SYSTEM.md"
+            ) || path.ends_with("/AGENTS.md")
+                || path.ends_with("/CLAUDE.md")
+        }
+        _ => false,
+    }
+}
+
+fn resolve_relative_markdown_link(source_rel: &str, link: &str) -> Option<String> {
+    if link.is_empty()
+        || link.starts_with('/')
+        || link.starts_with('\\')
+        || link.contains("://")
+        || link.contains(':')
+    {
+        return None;
+    }
+    let clean_link = link.split(['#', '?']).next().unwrap_or(link);
+    if clean_link.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<&str> = match source_rel.rsplit_once('/') {
+        Some((dir, _)) if !dir.is_empty() => dir.split('/').collect(),
+        _ => Vec::new(),
+    };
+    let normalized = clean_link.replace('\\', "/");
+    for segment in normalized.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            other => parts.push(other),
         }
     }
-    if text.split('/').count() > 24 {
-        return Err("Archive path is too deeply nested".into());
+    if parts.is_empty() {
+        return None;
     }
-    Ok(PathBuf::from(text))
+    Some(parts.join("/"))
+}
+
+/// Validate that every `Area::Instructions` entry in a bundle is either on the
+/// harness's primary instruction allowlist or transitively linked from one.
+pub(super) fn validate_instruction_allowlist(
+    harness: &str,
+    entries: &[Entry],
+    data: &BTreeMap<String, Vec<u8>>,
+) -> Result<(), String> {
+    let instruction_entries: Vec<&Entry> = entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.resource,
+                Resource::File {
+                    area: Area::Instructions,
+                    ..
+                }
+            )
+        })
+        .collect();
+    if instruction_entries.is_empty() {
+        return Ok(());
+    }
+    let mut allowed: HashSet<(u8, String)> = HashSet::new();
+    let mut queue: Vec<(u8, String, &str)> = Vec::new();
+    let mut by_scope_path: BTreeMap<(u8, String), &Entry> = BTreeMap::new();
+    for entry in &instruction_entries {
+        if let Resource::File { path, .. } = &entry.resource {
+            let key = (entry.scope as u8, path.clone());
+            by_scope_path.insert(key.clone(), *entry);
+            if is_primary_instruction_path(harness, path) && allowed.insert(key.clone()) {
+                queue.push((key.0, key.1, entry.blob.as_str()));
+            }
+        }
+    }
+    if harness != "antigravity" {
+        let mut cursor = 0;
+        while cursor < queue.len() {
+            let (scope_id, source_path, blob) = queue[cursor].clone();
+            cursor += 1;
+            let Some(bytes) = data.get(blob) else {
+                continue;
+            };
+            let Ok(text) = std::str::from_utf8(bytes) else {
+                continue;
+            };
+            for (link, _) in
+                crate::harness::memory_links::parse_references(text, harness == "claude-code")
+            {
+                let Some(resolved) = resolve_relative_markdown_link(&source_path, &link) else {
+                    continue;
+                };
+                let target_key = (scope_id, resolved);
+                if let Some(target_entry) = by_scope_path.get(&target_key) {
+                    if allowed.insert(target_key.clone()) {
+                        queue.push((target_key.0, target_key.1, target_entry.blob.as_str()));
+                    }
+                }
+            }
+        }
+    }
+    for entry in instruction_entries {
+        if let Resource::File { path, .. } = &entry.resource {
+            if !allowed.contains(&(entry.scope as u8, path.clone())) {
+                return Err(format!(
+                    "Archive instruction path is not in the {harness} allowlist: {path}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Pure validator for relative archive paths (rejects traversal, drive prefixes,
+/// control characters, reserved Windows device names, and `.git`/`.orbit`).
+pub fn validate_relative_path(text: &str) -> Result<PathBuf, String> {
+    relative(text)
+}
+
+pub(super) fn relative(text: &str) -> Result<PathBuf, String> {
+    orbit_core::path_safety::validate_relative_path(text)
+        .map(|()| PathBuf::from(text))
+        .map_err(str::to_owned)
 }
 
 fn project_config(harness: &impl Harness, project: &Path) -> PathBuf {
-    match harness.id().0 {
-        "claude-code" => project.join(".claude"),
-        "codex" => project.join(".codex"),
-        "kiro" => project.join(".kiro"),
-        "opencode" => project.join(".opencode"),
-        "pi" => project.join(".pi"),
-        "antigravity" => project.join(".agents"),
-        _ => unreachable!(),
-    }
+    project.join(harness_spec(harness.id().0).project_dir)
 }
 
 fn skill_root(harness: &impl Harness, project: &Path, scope: Scope) -> PathBuf {
@@ -131,11 +297,7 @@ fn memory_root(harness: &impl Harness, project: &Path) -> Result<PathBuf, String
 }
 
 pub(super) fn project_memory_key(project: &Path) -> Result<String, String> {
-    let text = project.to_string_lossy();
-    let native = text
-        .strip_prefix(r"\\?\UNC\")
-        .map(|tail| format!(r"\\{tail}"))
-        .unwrap_or_else(|| text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned());
+    let native = crate::transcript::native_path(project);
     claude::project_key(&native).ok_or("Project path cannot be encoded for Claude memory".into())
 }
 
@@ -315,28 +477,15 @@ fn encode(value: &Value, harness: &str, slot: &Slot) -> Result<Vec<u8>, String> 
 }
 
 fn mcp_pointer(harness: &str) -> &'static str {
-    match harness {
-        "codex" => "/mcp_servers",
-        "opencode" => "/mcp/servers",
-        _ => "/mcpServers",
-    }
+    harness_spec(harness).mcp_pointer
 }
 
 fn extensions_key(harness: &str) -> &'static str {
-    if harness == "pi" {
-        "extensions"
-    } else {
-        "plugins"
-    }
+    harness_spec(harness).extensions_key
 }
 
 pub(super) fn managed_keys(harness: &str) -> &'static [&'static str] {
-    match harness {
-        "codex" => &["hooks", "mcp_servers"],
-        "opencode" => &["mcp", "plugins"],
-        "pi" => &["extensions"],
-        _ => &["hooks", "mcpServers"],
-    }
+    harness_spec(harness).managed_keys
 }
 
 fn settings_only(mut value: Value, harness: &str) -> Value {
@@ -607,11 +756,8 @@ pub(super) fn validate(entry: &Entry, bytes: &[u8], harness: &str) -> Result<(),
             match area {
                 Area::Skills => Category::Skills,
                 Area::HookFiles => {
-                    if !path.starts_with(match harness {
-                        "opencode" => "plugins/",
-                        "pi" => "extensions/",
-                        _ => "hooks/",
-                    }) {
+                    let folder = harness_spec(harness).hook_folder;
+                    if !path.starts_with(&format!("{folder}/")) {
                         return Err("Invalid native hook file path".into());
                     }
                     Category::Hooks
@@ -930,11 +1076,7 @@ pub(super) fn collect(
             } else {
                 project_config(harness, project)
             };
-            let folder = match harness.id().0 {
-                "opencode" => "plugins",
-                "pi" => "extensions",
-                _ => "hooks",
-            };
+            let folder = harness_spec(harness.id().0).hook_folder;
             if !matches!(harness.id().0, "codex" | "antigravity") {
                 add_tree(
                     &mut bundle,
@@ -1111,13 +1253,13 @@ pub(super) fn collect(
             entry.checksum.clone(),
         ))
     });
-    let used: HashSet<_> = bundle
+    let used: HashSet<&str> = bundle
         .manifest
         .entries
         .iter()
-        .map(|entry| entry.blob.clone())
+        .map(|entry| entry.blob.as_str())
         .collect();
-    bundle.data.retain(|key, _| used.contains(key));
+    bundle.data.retain(|key, _| used.contains(key.as_str()));
     if bundle.data.values().map(Vec::len).sum::<usize>() as u64 > super::LIMIT {
         return Err("Selected resources exceed the archive size limit".into());
     }
@@ -1129,29 +1271,48 @@ fn collect_memory_links(
     harness: &impl Harness,
     project: &Path,
 ) -> Result<(), String> {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let mut existing_files: HashSet<(u8, u8, String)> = bundle
+        .manifest
+        .entries
+        .iter()
+        .filter_map(|e| match &e.resource {
+            Resource::File { area, path } => Some((e.scope as u8, *area as u8, path.clone())),
+            _ => None,
+        })
+        .collect();
     let mut seen = HashSet::new();
     let mut index = 0;
     while index < bundle.manifest.entries.len() {
-        let entry = bundle.manifest.entries[index].clone();
-        index += 1;
-        if entry.category != Category::Memories {
-            continue;
-        }
-        let Resource::File { area, path } = &entry.resource else {
-            continue;
+        let (scope, area, path, blob) = {
+            let entry = &bundle.manifest.entries[index];
+            index += 1;
+            if entry.category != Category::Memories {
+                continue;
+            }
+            let Resource::File { area, path } = &entry.resource else {
+                continue;
+            };
+            (entry.scope, *area, path.clone(), entry.blob.clone())
         };
-        let root = file_root(harness, project, entry.scope, *area)?;
+        let root = file_root(harness, project, scope, area)?;
         let root = root.canonicalize().unwrap_or(root);
-        let source = root.join(relative(path)?);
+        let source = root.join(relative(&path)?);
         if !seen.insert(source.clone()) {
             continue;
         }
-        let text =
-            std::str::from_utf8(&bundle.data[&entry.blob]).map_err(|_| "Memory is not UTF-8")?;
+        let text = std::str::from_utf8(&bundle.data[&blob]).map_err(|_| "Memory is not UTF-8")?;
         for (link, _) in
             crate::harness::memory_links::parse_references(text, harness.id().0 == "claude-code")
         {
-            let Some(path) = crate::harness::memory_links::resolve_reference(&source, &link) else {
+            let Some(path) = crate::harness::memory_links::resolve_reference_with_home(
+                &source,
+                &link,
+                home.as_deref(),
+            ) else {
                 continue;
             };
             if !path.starts_with(&root)
@@ -1166,16 +1327,15 @@ fn collect_memory_links(
                 .map_err(|e| e.to_string())?
                 .to_string_lossy()
                 .replace('\\', "/");
-            if bundle.manifest.entries.iter().any(|e| e.scope == entry.scope && matches!(&e.resource, Resource::File { area: other, path } if other == area && path == &rel)) { continue; }
+            if !existing_files.insert((scope as u8, area as u8, rel.clone())) {
+                continue;
+            }
             bundle.add(
                 harness.id().0,
                 Category::Memories,
-                entry.scope,
+                scope,
                 rel.clone(),
-                Resource::File {
-                    area: *area,
-                    path: rel,
-                },
+                Resource::File { area, path: rel },
                 super::read_file(&path, super::FILE_LIMIT)?,
             )?;
         }
@@ -1191,16 +1351,15 @@ fn collect_discovered_skills(
     let home = harness
         .user_home()
         .and_then(|path| path.canonicalize().ok());
-    let config = harness
-        .config_root()
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
+    let config = harness.config_root().canonicalize().ok();
     for skill in harness.skills_inventory(project)? {
         let path = skill.path;
         let canonical = path.canonicalize().map_err(|e| e.to_string())?;
         let scope = if canonical.starts_with(project) {
             Scope::Project
-        } else if canonical.starts_with(&config)
+        } else if config
+            .as_ref()
+            .is_some_and(|config| canonical.starts_with(config))
             || home
                 .as_ref()
                 .is_some_and(|home| canonical.starts_with(home))
@@ -1290,6 +1449,7 @@ pub(crate) fn history_scope(
         let roots = [
             skill_root(harness, project, scope),
             native.join("steering"),
+            native.join("rules"),
             native.join("hooks"),
             native.join("plugins"),
             native.join("extensions"),
@@ -1299,13 +1459,21 @@ pub(crate) fn history_scope(
                 return Some(scope == Scope::User);
             }
         }
-        let instructions = if scope == Scope::User {
-            harness.config_root().to_path_buf()
+        let mut instruction_roots = Vec::new();
+        if scope == Scope::User {
+            instruction_roots.push(harness.config_root().to_path_buf());
+            if harness.id().0 == "antigravity" {
+                if let Some(home) = harness.user_home() {
+                    instruction_roots.push(home.join(".gemini"));
+                }
+            }
         } else {
-            project.to_path_buf()
-        };
-        if canonical(instructions).is_some_and(|root| target_path.starts_with(root))
-            && target_path.extension().is_some_and(|ext| ext == "md")
+            instruction_roots.push(project.to_path_buf());
+        }
+        if target_path.extension().is_some_and(|ext| ext == "md")
+            && instruction_roots
+                .into_iter()
+                .any(|root| canonical(root).is_some_and(|root| target_path.starts_with(root)))
         {
             return Some(scope == Scope::User);
         }

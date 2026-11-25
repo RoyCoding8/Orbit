@@ -1,4 +1,5 @@
-use super::{archive, ingest::open_database};
+pub(super) use super::native_path;
+use super::{archive, image_mime_for_extension, ingest::open_database, is_safe_path_component};
 use crate::harness::{selected::SelectedHarness, Harness};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Serialize;
@@ -208,8 +209,17 @@ fn decode(source: &SelectedHarness, root: &Path) -> Result<Conversation, String>
         SelectedHarness::Pi(_) => decode_pi(&read_lines(&root.join("session.jsonl"))?),
         SelectedHarness::Opencode(_) => decode_opencode(&read_json(&root.join("session.json"))?),
         SelectedHarness::Kiro(_) => {
-            let id = required(&manifest, "sourceSessionId")?.trim_start_matches("kiro-v2:");
+            let raw_id = required(&manifest, "sourceSessionId")?;
+            let id = raw_id.strip_prefix("kiro-v2:").unwrap_or(raw_id);
+            if !is_safe_path_component(id) {
+                return Err("Kiro archive sourceSessionId is invalid.".into());
+            }
             let header = read_json(&root.join(format!("{id}.json")))?;
+            if let Some(header_id) = header["session_id"].as_str() {
+                if header_id != id {
+                    return Err("Kiro archive session header does not match manifest.".into());
+                }
+            }
             decode_kiro(&header, &read_lines(&root.join(format!("{id}.jsonl")))?)
         }
     }
@@ -258,7 +268,7 @@ fn decode_pi(records: &[Value]) -> Result<Conversation, String> {
         }
     }
     let entries = &records[1..];
-    let leaf = entries.last().and_then(|r| r["id"].as_str());
+    let leaf = entries.iter().rev().find_map(|r| r["id"].as_str());
     for entry in branch(entries, "id", "parentId", leaf, &mut chat.notes)? {
         match entry["type"].as_str() {
             Some("message") => {
@@ -340,6 +350,8 @@ fn decode_codex(records: &[Value]) -> Result<Conversation, String> {
                             chat.turns.iter().rposition(|turn| turn.role == Role::User)
                         {
                             chat.turns.truncate(position);
+                        } else {
+                            break;
                         }
                     }
                 }
@@ -402,21 +414,22 @@ fn embed_codex_attachments(
             let Some(file) = assets.get(hash.as_str()) else {
                 continue;
             };
+            if archive::validate_codex_archive_path(file).is_err() {
+                continue;
+            }
             let path = root.join(file);
-            let mime = match path
+            let Some(mime) = path
                 .extension()
                 .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase()
-                .as_str()
-            {
-                "png" => "image/png",
-                "jpg" | "jpeg" => "image/jpeg",
-                "webp" => "image/webp",
-                "gif" => "image/gif",
-                _ => continue,
+                .and_then(image_mime_for_extension)
+            else {
+                continue;
             };
-            if fs::metadata(&path).map_err(|e| e.to_string())?.len() > MAX_BYTES {
+            let metadata = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+            if crate::harness::atomic::is_link_or_reparse(&metadata) || !metadata.is_file() {
+                return Err("Codex archive image must be a plain file.".into());
+            }
+            if metadata.len() > MAX_BYTES {
                 return Err("A source image exceeds the conversion size limit.".into());
             }
             let bytes = fs::read(path).map_err(|e| e.to_string())?;
@@ -439,25 +452,21 @@ fn codex_message(
     if let Some((was_response, previous_key, index)) = echo.take() {
         if was_response != response && previous_key == key && index + 1 == chat.turns.len() {
             let previous = &mut chat.turns[index].content;
-            let prompt = key.strip_prefix(&format!("{role}\n")).unwrap_or("");
-            if response {
-                for attachment in previous
-                    .iter()
-                    .filter(|block| !matches!(block, Content::Text(text) if text == prompt))
-                {
-                    if !content.contains(attachment) {
-                        content.push(attachment.clone());
-                    }
-                }
-                *previous = content;
+            let prompt = key
+                .strip_prefix(role)
+                .and_then(|rest| rest.strip_prefix('\n'))
+                .unwrap_or("");
+            let (base, extra) = if response {
+                (content, std::mem::take(previous))
             } else {
-                for attachment in content
-                    .into_iter()
-                    .filter(|block| !matches!(block, Content::Text(text) if text == prompt))
+                (std::mem::take(previous), content)
+            };
+            *previous = base;
+            for block in extra {
+                if !matches!(&block, Content::Text(text) if text == prompt)
+                    && !previous.contains(&block)
                 {
-                    if !previous.contains(&attachment) {
-                        previous.push(attachment);
-                    }
+                    previous.push(block);
                 }
             }
             return;
@@ -492,16 +501,22 @@ fn codex_item(chat: &mut Conversation, item: &Value) {
 }
 
 fn echo_key(role: &str, content: &Value) -> String {
-    let text = match content {
-        Value::String(text) => text.clone(),
-        Value::Array(blocks) => blocks
-            .iter()
-            .filter_map(|block| block["text"].as_str())
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
-    };
-    format!("{role}\n{text}")
+    let mut key = String::with_capacity(role.len() + 1);
+    key.push_str(role);
+    key.push('\n');
+    match content {
+        Value::String(text) => key.push_str(text),
+        Value::Array(blocks) => {
+            for (i, text) in blocks.iter().filter_map(|b| b["text"].as_str()).enumerate() {
+                if i > 0 {
+                    key.push('\n');
+                }
+                key.push_str(text);
+            }
+        }
+        _ => {}
+    }
+    key
 }
 
 fn decode_opencode(transfer: &Value) -> Result<Conversation, String> {
@@ -568,6 +583,7 @@ fn decode_kiro(header: &Value, records: &[Value]) -> Result<Conversation, String
         title: header["title"].as_str().unwrap_or("").into(),
         ..Default::default()
     };
+    let mut pending: Vec<(Role, Vec<Content>)> = Vec::new();
     let mut chunks = HashMap::<(Role, String), usize>::new();
     for record in records {
         let role = match record["kind"].as_str() {
@@ -583,18 +599,21 @@ fn decode_kiro(header: &Value, records: &[Value]) -> Result<Conversation, String
         }
         if let Some(id) = data["message_id"].as_str() {
             let key = (role, id.to_owned());
-            if let Some(index) = chunks.get(&key) {
+            if let Some(&index) = chunks.get(&key) {
                 if let (Some(Content::Text(tail)), Some(Content::Text(head))) =
-                    (chat.turns[*index].content.last_mut(), content.first())
+                    (pending[index].1.last_mut(), content.first())
                 {
                     tail.push_str(head);
                     content.remove(0);
                 }
-                chat.turns[*index].content.extend(content);
+                pending[index].1.extend(content);
                 continue;
             }
-            chunks.insert(key, chat.turns.len());
+            chunks.insert(key, pending.len());
         }
+        pending.push((role, content));
+    }
+    for (role, content) in pending {
         chat.push(role, content);
     }
     chat.notes.insert("Kiro conversion reads v2 ACP prompt and assistant content. Other ACP events and v3 server-owned sessions are not converted.".into());
@@ -990,14 +1009,6 @@ fn required<'a>(object: &'a Value, field: &str) -> Result<&'a str, String> {
         .as_str()
         .filter(|s| !s.is_empty())
         .ok_or_else(|| format!("Source chat is missing {field}."))
-}
-
-pub(super) fn native_path(path: &Path) -> String {
-    let value = path.to_string_lossy();
-    value
-        .strip_prefix(r"\\?\UNC\")
-        .map(|s| format!(r"\\{s}"))
-        .unwrap_or_else(|| value.strip_prefix(r"\\?\").unwrap_or(&value).into())
 }
 
 #[cfg(test)]

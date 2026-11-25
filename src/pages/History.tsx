@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useHarness } from "../HarnessContext";
-import { displayPath } from "../pathDisplay";
-import "./History.css";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useHarness } from "../lib/HarnessContext";
+import { displayPath } from "../lib/pathDisplay";
+import { useSequencedLoad } from "../lib/useSequencedLoad";
+import "../styles/History.css";
 
 type Scope = "global" | "project" | "other";
 type VersionKind = "file" | "directory";
@@ -82,31 +83,28 @@ export function History() {
   const [projectRoot, setProjectRoot] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const requestNumber = useRef(0);
+  const { start: startLoad } = useSequencedLoad();
 
   const load = useCallback(async () => {
-    const request = ++requestNumber.current;
+    const request = startLoad();
     setLoadState("loading");
     try {
       const result = await invoke<HistorySnapshot>("history_load", {
         projectRoot,
       });
-      if (request !== requestNumber.current) return;
+      if (!request.isCurrent()) return;
       setSnapshot(result);
       setError("");
       setLoadState("ready");
     } catch (cause) {
-      if (request !== requestNumber.current) return;
+      if (!request.isCurrent()) return;
       setError(`Could not load history. ${String(cause)}`);
       setLoadState("error");
     }
-  }, [projectRoot, invoke]);
+  }, [projectRoot, invoke, startLoad]);
 
   useEffect(() => {
     void load();
-    return () => {
-      requestNumber.current += 1;
-    };
   }, [load]);
 
   const normalizedSearch = displayPath(search.trim()).toLocaleLowerCase();
@@ -125,7 +123,7 @@ export function History() {
     [scopeFilter, snapshot.logs],
   );
   const visibleVersions = useMemo(
-    () => scopedVersions.filter((version) => matchesSearch(normalizedSearch, [
+    () => !normalizedSearch ? scopedVersions : scopedVersions.filter((version) => matchesSearch(normalizedSearch, [
       version.id,
       version.resourceKind,
       version.resourceId,
@@ -142,7 +140,7 @@ export function History() {
     [normalizedSearch, scopedVersions],
   );
   const visibleLogs = useMemo(
-    () => scopedLogs.filter((entry) => matchesSearch(normalizedSearch, [
+    () => !normalizedSearch ? scopedLogs : scopedLogs.filter((entry) => matchesSearch(normalizedSearch, [
       entry.id,
       entry.resourceKind,
       entry.resourceId,

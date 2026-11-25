@@ -7,11 +7,11 @@ import { Hooks } from "./pages/Hooks";
 import { Memories } from "./pages/Memories";
 import { History } from "./pages/History";
 import { HarnessTransfer } from "./components/HarnessTransfer";
-import { HarnessProvider, type Client } from "./HarnessContext";
-import { clients, harnesses, isClient } from "./harnesses";
+import { HarnessProvider, type Client } from "./lib/HarnessContext";
+import { clients, harnesses, isClient } from "./lib/harnesses";
 import "@m3e/web/theme";
-import "./app.css";
-import "./theme.css";
+import "./styles/app.css";
+import "./styles/theme.css";
 
 const pages = [
   { id: "overview", label: "Overview", icon: "▦", description: "Your coding workspace" },

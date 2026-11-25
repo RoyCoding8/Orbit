@@ -8,12 +8,8 @@ use sha2::{Digest, Sha256};
 use super::PiHarness;
 use crate::harness::{
     atomic,
-    claude::memories::{
-        MemoryCatalog, MemoryFile, MemoryGroup, MemoryReference, MemoryRole, MemorySource,
-        ReferenceStatus,
-    },
+    claude::memories::{MemoryCatalog, MemoryFile, MemoryGroup, MemoryRole, MemorySource},
     claude::skills,
-    memory_links::{parse_references, resolve_reference},
     Harness,
 };
 
@@ -123,30 +119,13 @@ pub fn catalog(harness: &PiHarness, project: &Path) -> Result<MemoryCatalog, Str
         .map(|(path, file)| (path.clone(), file.id.clone()))
         .collect();
     let roots = [global.as_path(), project.as_path()];
-    for file in files.values_mut() {
-        file.references = parse_references(&file.content, false)
-            .into_iter()
-            .map(|(target, kind)| {
-                let resolved = resolve_reference(Path::new(&file.path), &target);
-                let inside = resolved
-                    .as_deref()
-                    .is_some_and(|path| roots.iter().any(|root| path.starts_with(root)));
-                let file_id = resolved.as_ref().and_then(|path| known.get(path).cloned());
-                MemoryReference {
-                    target,
-                    kind,
-                    status: if !inside {
-                        ReferenceStatus::External
-                    } else if file_id.is_some() {
-                        ReferenceStatus::Known
-                    } else {
-                        ReferenceStatus::Unresolved
-                    },
-                    file_id,
-                }
-            })
-            .collect();
-    }
+    crate::harness::memory_links::populate_references(
+        files.values_mut(),
+        &known,
+        false,
+        Some(harness.home()),
+        |_, path| path.is_some_and(|p| roots.iter().any(|root| p.starts_with(root))),
+    );
     Ok(MemoryCatalog {
         project_root: project.to_string_lossy().into_owned(),
         groups,

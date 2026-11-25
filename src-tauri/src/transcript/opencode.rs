@@ -1,10 +1,9 @@
 use super::{
     archive::{ArchiveAction, ArchiveReport},
     ingest::{
-        open_database, prune_vanished_sessions, replace_indexed_session, IndexedMessage,
-        IndexedSession, IngestReport,
+        open_database, replace_indexed_session, IndexedMessage, IndexedSession, IngestReport,
     },
-    TranscriptError,
+    unique_title,
 };
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -61,46 +60,6 @@ pub(super) fn stage_conversion(root: &Path, id: &str, bytes: &[u8]) -> Result<()
         sha256: format!("{:x}", Sha256::digest(bytes)),
     };
     super::conversion::stage_archive(root, DATA_FILE, bytes, &manifest)
-}
-
-pub fn ingest(app_data_dir: &Path, _project: &Path) -> Result<IngestReport, TranscriptError> {
-    ingest_with_environment(app_data_dir, &CliEnvironment::default())
-}
-
-fn ingest_with_environment(
-    app_data_dir: &Path,
-    environment: &CliEnvironment,
-) -> Result<IngestReport, TranscriptError> {
-    let sessions = list_native_sessions(None, environment, SESSION_PAGE_SIZE)
-        .map_err(|error| TranscriptError::Io(std::io::Error::other(error)))?;
-    let mut connection = open_database(app_data_dir)?;
-    let mut seen_paths = Vec::with_capacity(sessions.len());
-    let mut report = IngestReport {
-        sessions: 0,
-        lines_read: 0,
-        messages_indexed: 0,
-        malformed_lines: 0,
-        skipped_files: 0,
-        skipped_state_lines: 0,
-    };
-    for session in sessions {
-        let id = format!("opencode:{}", session.id);
-        let source = PathBuf::from(format!("opencode://session/{}", session.id));
-        seen_paths.push(source.to_string_lossy().into_owned());
-        match export_native(&session.id, Some(&session.directory), environment) {
-            Ok(bytes) => match index_export(&mut connection, &bytes, &id, &source) {
-                Ok((indexed, count)) => {
-                    report.sessions += 1;
-                    report.messages_indexed += indexed;
-                    report.lines_read += count;
-                }
-                Err(_) => report.skipped_files += 1,
-            },
-            Err(_) => report.skipped_files += 1,
-        }
-    }
-    prune_vanished_sessions(&mut connection, &seen_paths)?;
-    Ok(report)
 }
 
 pub(super) fn metadata() -> Result<Vec<super::catalog::Metadata>, String> {
@@ -229,21 +188,43 @@ pub fn import_archive(
     import_archive_with_environment(source, project, &CliEnvironment::default())
 }
 
+fn ensure_plain_dir(path: &Path, label: &str) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("could not inspect {label}: {error}"))?;
+    if crate::harness::atomic::is_link_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err(format!(
+            "{label} must be a plain directory (symlinks are refused)"
+        ));
+    }
+    Ok(())
+}
+
+fn read_plain_archive_file(path: &Path, label: &str) -> Result<Vec<u8>, String> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| format!("could not read {label}: {error}"))?;
+    if crate::harness::atomic::is_link_or_reparse(&metadata) || !metadata.is_file() {
+        return Err(format!(
+            "{label} must be a plain file (symlinks are refused)"
+        ));
+    }
+    fs::read(path).map_err(|error| format!("could not read {label}: {error}"))
+}
+
 fn import_archive_with_environment(
     source: &Path,
     project: &Path,
     environment: &CliEnvironment,
 ) -> Result<ArchiveReport, String> {
+    ensure_plain_dir(source, "OpenCode archive source")?;
     let manifest_path = source.join(MANIFEST_FILE);
-    let manifest_bytes = fs::read(&manifest_path)
-        .map_err(|error| format!("could not read OpenCode archive manifest: {error}"))?;
+    let manifest_bytes = read_plain_archive_file(&manifest_path, "OpenCode archive manifest")?;
     let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|error| format!("invalid OpenCode archive manifest: {error}"))?;
     if manifest.version != ARCHIVE_VERSION || manifest.data_file != DATA_FILE {
         return Err("unsupported OpenCode archive format".into());
     }
-    let native_bytes = fs::read(source.join(&manifest.data_file))
-        .map_err(|error| format!("could not read archived session: {error}"))?;
+    let native_bytes =
+        read_plain_archive_file(&source.join(&manifest.data_file), "archived session")?;
     let digest = format!("{:x}", Sha256::digest(&native_bytes));
     if digest != manifest.sha256 {
         return Err("OpenCode archive checksum does not match session bytes".into());
@@ -277,17 +258,10 @@ fn import_archive_with_environment(
         .unwrap_or("Imported session");
     let used_titles = existing_sessions
         .iter()
-        .filter_map(|item| item.title.as_deref())
+        .filter_map(|item| item.title.clone())
         .collect::<HashSet<_>>();
-    let title_suffix = if used_titles.contains(imported_title) {
-        let mut suffix = 1usize;
-        while used_titles.contains(format!("{imported_title}-{suffix}").as_str()) {
-            suffix += 1;
-        }
-        Some(suffix)
-    } else {
-        None
-    };
+    let resolved_title = unique_title(imported_title, &used_titles);
+    let title_changed = resolved_title != imported_title;
     let mut target_id = if collision_ids.contains(&imported_id) {
         format!("ses_{}", Uuid::new_v4().simple())
     } else {
@@ -296,12 +270,8 @@ fn import_archive_with_environment(
     // Message and tool-part IDs are globally unique in the native store. Remap
     // them on every import so a distinct session archive cannot collide.
     remap_native_ids(&mut transfer, &target_id)?;
-    if let Some(suffix) = title_suffix {
-        let title = transfer["info"]["title"]
-            .as_str()
-            .unwrap_or("Imported session")
-            .to_owned();
-        transfer["info"]["title"] = Value::String(format!("{title}-{suffix}"));
+    if title_changed {
+        transfer["info"]["title"] = Value::String(resolved_title);
     }
     let default_temp_dir = env::temp_dir();
     let transfer_file = environment
@@ -1061,9 +1031,7 @@ fn native_session_id(id: &str) -> Result<String, String> {
 }
 
 fn unique_archive_directory(destination: &Path, session_id: &str) -> Result<PathBuf, String> {
-    if !destination.is_dir() {
-        return Err("archive destination must be an existing directory".into());
-    }
+    ensure_plain_dir(destination, "archive destination")?;
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -1392,10 +1360,22 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stamp, source.fingerprint);
-        let report = ingest_with_environment(&app_data, &environment).unwrap();
-        assert_eq!(report.sessions, 5);
+        let mut connection = super::super::ingest::open_database(&app_data).unwrap();
+        let all_meta = metadata_with_environment(&environment).unwrap();
+        assert_eq!(all_meta.len(), 5);
+        let mut total_indexed = 0;
+        for entry in &all_meta {
+            let indexed = index_session_with_environment(
+                &mut connection,
+                &entry.id,
+                &entry.project,
+                &environment,
+            )
+            .unwrap();
+            total_indexed += indexed.messages_indexed;
+        }
         assert_eq!(
-            report.messages_indexed,
+            total_indexed,
             2,
             "native export {}",
             String::from_utf8_lossy(
@@ -1440,8 +1420,17 @@ mod tests {
             "Orbit V2 native fixture message 1"
         );
         assert_ne!(imported_id, duplicate_title_id);
-        let report = ingest_with_environment(&app_data, &environment).unwrap();
-        assert_eq!(report.sessions, 6);
+        let all_meta = metadata_with_environment(&environment).unwrap();
+        assert_eq!(all_meta.len(), 6);
+        for entry in &all_meta {
+            index_session_with_environment(
+                &mut connection,
+                &entry.id,
+                &entry.project,
+                &environment,
+            )
+            .unwrap();
+        }
         let cached = super::super::ingest::list_sessions(&app_data).unwrap();
         assert_eq!(cached.len(), 6);
         assert!(cached
@@ -1488,5 +1477,36 @@ mod tests {
                 .contains("child")
         );
         assert!(export_native(&restored_id, Some(&project_b), &environment).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_import_and_export_refuse_symlinks() {
+        use std::os::unix::fs::symlink;
+        let temp = crate::test_support::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let real_dir = temp.path().join("real");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&real_dir).unwrap();
+        let linked_dir = temp.path().join("linked");
+        symlink(&real_dir, &linked_dir).unwrap();
+
+        let err =
+            import_archive_with_environment(&linked_dir, &project, &CliEnvironment::default())
+                .unwrap_err();
+        assert!(err.contains("symlink"), "unexpected error: {err}");
+
+        let err = unique_archive_directory(&linked_dir, "ses_1").unwrap_err();
+        assert!(err.contains("symlink"), "unexpected error: {err}");
+
+        // Plain archive dir with symlinked manifest.json
+        let archive = temp.path().join("archive");
+        fs::create_dir_all(&archive).unwrap();
+        let secret = temp.path().join("secret.json");
+        fs::write(&secret, b"{}").unwrap();
+        symlink(&secret, archive.join(MANIFEST_FILE)).unwrap();
+        let err = import_archive_with_environment(&archive, &project, &CliEnvironment::default())
+            .unwrap_err();
+        assert!(err.contains("symlink"), "unexpected error: {err}");
     }
 }

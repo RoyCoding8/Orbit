@@ -7,7 +7,10 @@ use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-use super::{ingest::open_database, SessionTitle};
+use super::{
+    ingest::open_database, is_allowed_image_path, is_safe_path_component,
+    strip_windows_extended_prefix, unique_title, SessionTitle,
+};
 
 const MANIFEST_NAME: &str = "manifest.json";
 const MANIFEST_VERSION: u32 = 1;
@@ -351,14 +354,11 @@ pub(super) fn export_codex_archive(
         }];
         let mut attachments = Vec::new();
         let contents = read_codex_rollout(&source_file)?;
+        let allowed_roots = codex_image_roots(&home, &contents);
         for (index, reference) in rollout_image_references(&contents).into_iter().enumerate() {
-            let source = PathBuf::from(&reference);
-            let Ok(metadata) = fs::symlink_metadata(&source) else {
+            let Some(source) = checked_codex_local_image(&reference, &allowed_roots) else {
                 continue;
             };
-            if crate::harness::atomic::is_link_or_reparse(&metadata) || !metadata.is_file() {
-                continue;
-            }
             let Some(file_name) = source.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
@@ -575,21 +575,62 @@ fn checked_codex_rollout(home: &Path, source: &Path) -> Result<PathBuf, String> 
     Ok(path)
 }
 
+fn codex_image_roots(home: &Path, contents: &str) -> Vec<PathBuf> {
+    let mut roots = vec![home.to_path_buf()];
+    if let Some(cwd) = contents
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|value| value.get("type").and_then(Value::as_str) == Some("session_meta"))
+        .and_then(|value| {
+            value
+                .get("payload")?
+                .get("cwd")?
+                .as_str()
+                .map(PathBuf::from)
+        })
+        .and_then(|cwd| cwd.canonicalize().ok())
+        .filter(|cwd| cwd.is_dir())
+    {
+        if !roots.contains(&cwd) {
+            roots.push(cwd);
+        }
+    }
+    roots
+}
+
+fn checked_codex_local_image(reference: &str, allowed_roots: &[PathBuf]) -> Option<PathBuf> {
+    let source = PathBuf::from(reference);
+    if !is_allowed_image_path(&source) {
+        return None;
+    }
+    let metadata = fs::symlink_metadata(&source).ok()?;
+    if crate::harness::atomic::is_link_or_reparse(&metadata) || !metadata.is_file() {
+        return None;
+    }
+    let canonical = source.canonicalize().ok()?;
+    if !allowed_roots.iter().any(|root| canonical.starts_with(root)) {
+        return None;
+    }
+    Some(canonical)
+}
+
 pub(super) fn read_codex_rollout(path: &Path) -> Result<String, String> {
-    read_codex_rollout_bounded(path, 256 * 1024 * 1024)
+    read_codex_rollout_bounded(path, super::codex::MAX_ROLLOUT_BYTES)
 }
 
 fn read_codex_rollout_bounded(path: &Path, max_bytes: u64) -> Result<String, String> {
-    let mut contents = Vec::new();
-    open_codex_rollout_reader(path)?
-        .take(max_bytes + 1)
-        .read_to_end(&mut contents)
-        .map_err(|error| format!("Could not read Codex rollout contents: {error}"))?;
-    if contents.len() as u64 > max_bytes {
-        return Err(format!(
-            "Codex rollout exceeds the {max_bytes}-byte uncompressed size limit."
-        ));
-    }
+    let contents = orbit_core::transcript_and_parsing::read_bounded_bytes(
+        open_codex_rollout_reader(path)?,
+        max_bytes,
+    )
+    .map_err(|error| match error {
+        orbit_core::transcript_and_parsing::ReadBoundedError::Io(err) => {
+            format!("Could not read Codex rollout contents: {err}")
+        }
+        orbit_core::transcript_and_parsing::ReadBoundedError::TooLarge => {
+            format!("Codex rollout exceeds the {max_bytes}-byte uncompressed size limit.")
+        }
+    })?;
     String::from_utf8(contents)
         .map_err(|error| format!("Could not read Codex rollout contents: {error}"))
 }
@@ -706,22 +747,9 @@ fn validate_codex_archive(root: &Path, manifest: &CodexManifest) -> Result<(), S
     validate_archive_inventory(root, &expected_files, &directories)
 }
 
-fn validate_codex_archive_path(path: &str) -> Result<(), String> {
-    let safe = matches!(path, "rollout.jsonl" | "rollout.jsonl.zst")
-        || (path.starts_with("assets/")
-            && path.split('/').all(|component| {
-                !component.is_empty()
-                    && component != "."
-                    && component != ".."
-                    && !component.contains('\\')
-                    && !component.contains(':')
-                    && !component.contains('\0')
-            }));
-    if safe {
-        Ok(())
-    } else {
-        Err("Codex archive contains an unsafe file path.".to_owned())
-    }
+/// Pure validator for relative file paths inside a Codex transcript archive.
+pub fn validate_codex_archive_path(path: &str) -> Result<(), String> {
+    orbit_core::path_safety::validate_codex_archive_path(path).map_err(str::to_owned)
 }
 
 fn install_codex_attachments(
@@ -1564,20 +1592,6 @@ fn existing_sessions(project_directory: &Path) -> Result<ExistingSessions, Strin
     Ok(existing)
 }
 
-fn unique_title(source: &str, existing: &HashSet<String>) -> String {
-    if !existing.contains(source) {
-        return source.to_owned();
-    }
-    let mut index = 1u64;
-    loop {
-        let candidate = format!("{source}-{index}");
-        if !existing.contains(&candidate) {
-            return candidate;
-        }
-        index += 1;
-    }
-}
-
 fn ensure_project_directory(projects_root: &Path, project_directory: &Path) -> Result<(), String> {
     if let Ok(metadata) = fs::symlink_metadata(project_directory) {
         if crate::harness::atomic::is_link_or_reparse(&metadata) || !metadata.is_dir() {
@@ -1617,25 +1631,7 @@ fn claude_path_string(path: &Path) -> Result<String, String> {
     let value = path
         .to_str()
         .ok_or_else(|| "The destination project path is not valid UTF-8.".to_owned())?;
-    #[cfg(windows)]
-    {
-        Ok(strip_windows_extended_prefix(value))
-    }
-    #[cfg(not(windows))]
-    {
-        Ok(value.to_owned())
-    }
-}
-
-#[cfg(windows)]
-fn strip_windows_extended_prefix(path: &str) -> String {
-    if let Some(unc) = path.strip_prefix("\\\\?\\UNC\\") {
-        format!("\\\\{unc}")
-    } else if let Some(drive) = path.strip_prefix("\\\\?\\") {
-        drive.to_owned()
-    } else {
-        path.to_owned()
-    }
+    Ok(strip_windows_extended_prefix(value))
 }
 
 fn checked_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
@@ -1649,14 +1645,7 @@ fn checked_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
 }
 
 fn validate_path_component(value: &str) -> Result<(), String> {
-    if value.is_empty()
-        || value == "."
-        || value == ".."
-        || value.contains('/')
-        || value.contains('\\')
-        || value.contains(':')
-        || value.contains('\0')
-    {
+    if !is_safe_path_component(value) {
         return Err("The archive contains an unsafe path component.".to_owned());
     }
     Ok(())
@@ -1999,7 +1988,14 @@ mod tests {
         );
         let imported_text = fs::read_to_string(imported.path).unwrap();
         assert!(imported_text.contains("\"customTitle\":\"Agent-1\""));
-        super::super::ingest::ingest_projects(projects.parent().unwrap(), &app_data).unwrap();
+        let claude_root = projects.parent().unwrap();
+        let claude_harness = crate::harness::selected::SelectedHarness::Claude(
+            crate::harness::claude::ClaudeCodeHarness::new(crate::harness::resolve_paths(
+                Some(claude_root.to_str().unwrap()),
+                claude_root,
+            )),
+        );
+        super::super::catalog::index_all(&claude_harness, &app_data, &destination, |_| {}).unwrap();
         let sessions = super::super::ingest::list_sessions(&app_data).unwrap();
         assert_eq!(
             sessions
@@ -2060,5 +2056,56 @@ mod tests {
         assert!(import_archive(&projects, &archive, &project)
             .unwrap_err()
             .contains("symbolic link"));
+    }
+
+    #[test]
+    fn codex_export_skips_disallowed_extensions_and_outside_local_images() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("codex");
+        let project = temp.path().join("project");
+        let outside = temp.path().join("outside");
+        let dest = temp.path().join("archives");
+        for d in [&home, &project, &outside, &dest] {
+            fs::create_dir_all(d).unwrap();
+        }
+        let valid_img = project.join("ok.png");
+        let bad_ext = project.join("secret.txt");
+        let outside_img = outside.join("escape.png");
+        fs::write(&valid_img, b"PNGDATA").unwrap();
+        fs::write(&bad_ext, b"TOPSECRET").unwrap();
+        fs::write(&outside_img, b"OUTSIDE").unwrap();
+
+        let id = "00000000-0000-4000-8000-000000000010";
+        let rollout = home.join(format!(
+            "sessions/2026/11/25/rollout-2026-11-25T10-00-00-{id}.jsonl"
+        ));
+        fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        let contents = format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"session_meta","payload":{"id":id,"session_id":id,"cwd":project.to_string_lossy()}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"user_message","message":"hi","local_images":[
+                valid_img.to_string_lossy(),
+                bad_ext.to_string_lossy(),
+                outside_img.to_string_lossy()
+            ]}}),
+        );
+        fs::write(&rollout, contents).unwrap();
+        let app = temp.path().join("app");
+        let cache = app.join("codex");
+        let codex_harness = crate::harness::selected::SelectedHarness::Codex(
+            crate::harness::codex::CodexHarness::new(home.clone(), home.clone()),
+        );
+        super::super::catalog::index_all(&codex_harness, &app, &project, |_| {}).unwrap();
+
+        let exported = export_codex_archive(&home, &cache, id, &dest).unwrap();
+        let archive_dir = PathBuf::from(&exported.path);
+        let manifest: CodexManifest =
+            serde_json::from_slice(&fs::read(archive_dir.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest.attachments.len(), 1);
+        assert!(manifest.attachments[0].path.ends_with("-ok.png"));
+        assert!(validate_codex_archive_path("assets/0-ok.png").is_ok());
+        assert!(validate_codex_archive_path("assets/secret.txt").is_err());
+        assert!(validate_codex_archive_path("assets/../escape.png").is_err());
+        assert!(validate_codex_archive_path("assets/nested/ok.png").is_err());
     }
 }

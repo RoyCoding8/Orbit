@@ -13,6 +13,7 @@ pub mod spine;
 
 use serde::Serialize;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -101,3 +102,61 @@ pub struct SearchHit {
 pub fn database_path(app_data_dir: &Path) -> std::path::PathBuf {
     app_data_dir.join("transcripts.sqlite3")
 }
+
+/// Strip Windows extended-length path prefixes (`\\?\UNC\` and `\\?\`).
+pub fn strip_windows_extended_prefix(value: &str) -> String {
+    if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else if let Some(drive) = value.strip_prefix(r"\\?\") {
+        drive.to_owned()
+    } else {
+        value.to_owned()
+    }
+}
+
+/// Format a filesystem path as a native path string without Windows extended prefixes.
+pub fn native_path(path: &Path) -> String {
+    strip_windows_extended_prefix(&path.to_string_lossy())
+}
+
+pub use orbit_core::transcript_and_parsing::unique_title;
+
+/// Recursively collect non-empty text segments from a JSON message/content value.
+pub fn collect_text(value: &serde_json::Value, parts: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) if !text.is_empty() => parts.push(text.clone()),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_text(item, parts);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if let Some(text) = map.get("text").and_then(serde_json::Value::as_str) {
+                if !text.is_empty() {
+                    parts.push(text.to_owned());
+                }
+            } else if let Some(content) = map.get("content") {
+                collect_text(content, parts);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Extract normalized newline-joined text from a JSON message or content block value.
+pub fn extract_text(value: &serde_json::Value) -> String {
+    let mut parts = Vec::new();
+    collect_text(value, &mut parts);
+    parts.join("\n")
+}
+
+/// Convert a `SystemTime` to an epoch-millisecond decimal string.
+pub fn modified_epoch_ms(time: SystemTime) -> Option<String> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis().to_string())
+}
+
+pub use orbit_core::path_safety::{
+    image_mime_for_extension, is_allowed_image_path, is_safe_path_component,
+};

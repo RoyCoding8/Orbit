@@ -36,7 +36,7 @@ pub(crate) fn delete_session(harness: &CodexHarness, session_id: &str) -> Result
         .map_err(|error| format!("Could not start Codex session deletion: {error}"))?;
     let deadline = Instant::now() + REQUEST_TIMEOUT;
     loop {
-        match child.child_mut().try_wait() {
+        match child.try_wait() {
             Ok(Some(status)) => {
                 child.cleanup();
                 return status

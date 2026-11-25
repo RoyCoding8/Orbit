@@ -459,6 +459,10 @@ fn standalone_source(
 }
 
 fn plain_directory(path: &Path) -> Result<bool, String> {
+    if !crate::harness::fs_guard::path_exists_no_follow(path)? {
+        return Ok(false);
+    }
+    crate::harness::fs_guard::ensure_plain_components(path)?;
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => Ok(!atomic::is_link_or_reparse(&metadata) && metadata.is_dir()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -505,9 +509,10 @@ fn read_hooks(source: &Source) -> Result<HashMap<String, Vec<Value>>, String> {
             }
         }
         Format::V3AgentMarkdown => {
-            let markdown =
-                std::fs::read_to_string(&source.path).map_err(|error| error.to_string())?;
-            let Some(frontmatter) = markdown_frontmatter(&markdown) else {
+            let markdown = crate::harness::fs_guard::read_plain_file(&source.path)?;
+            let Some(frontmatter) =
+                crate::harness::skill_store::extract_frontmatter_body(&markdown)
+            else {
                 return Ok(output);
             };
             let profile: serde_yaml::Value = serde_yaml::from_str(frontmatter)
@@ -558,13 +563,17 @@ fn locate(
 }
 
 fn entry_id(source: &Source, event: &str, index: usize, entry: &Value) -> String {
-    let mut identity = source.id.as_bytes().to_vec();
-    identity.extend_from_slice(event.as_bytes());
-    identity.extend_from_slice(&index.to_le_bytes());
+    let mut hasher = Sha256::new();
+    hasher.update(source.id.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(event.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(index.to_le_bytes());
+    hasher.update([0u8]);
     if let Some(name) = entry.get("name").and_then(Value::as_str) {
-        identity.extend_from_slice(name.as_bytes());
+        hasher.update(name.as_bytes());
     }
-    format!("kiro-hook-{}", atomic::hex(&Sha256::digest(identity)))
+    format!("kiro-hook-{}", atomic::hex(&hasher.finalize()))
 }
 
 fn edit_v2(
@@ -693,8 +702,7 @@ fn edit_v3(
         entries.remove(index);
         entries.push(updated);
     } else {
-        let index = NEXT_HOOK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let name = format!("orbit-hook-{index}");
+        let name = next_orbit_hook_name(entries);
         let mut hook = serde_json::json!({
             "name":name,
             "trigger":event,
@@ -720,7 +728,22 @@ fn edit_v3(
     )
 }
 
-static NEXT_HOOK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+fn next_orbit_hook_name(entries: &[Value]) -> String {
+    let mut used = std::collections::HashSet::new();
+    for entry in entries {
+        if let Some(name) = entry.get("name").and_then(Value::as_str) {
+            used.insert(name);
+        }
+    }
+    let mut index = 0u64;
+    loop {
+        let candidate = format!("orbit-hook-{index}");
+        if !used.contains(candidate.as_str()) {
+            return candidate;
+        }
+        index += 1;
+    }
+}
 
 fn mutate_located(
     harness: &KiroHarness,
@@ -863,15 +886,6 @@ fn command_of(format: Format, entry: &Value) -> Option<&str> {
             .and_then(|action| action.get("command"))
             .and_then(Value::as_str),
     }
-}
-
-fn markdown_frontmatter(markdown: &str) -> Option<&str> {
-    let rest = markdown.strip_prefix("---")?;
-    let rest = rest
-        .strip_prefix('\n')
-        .or_else(|| rest.strip_prefix("\r\n"))?;
-    let end = rest.find("\n---")?;
-    Some(rest[..end].strip_suffix('\r').unwrap_or(&rest[..end]))
 }
 
 fn set_optional_string(object: &mut Map<String, Value>, key: &str, value: Option<String>) {
@@ -1322,5 +1336,31 @@ mod tests {
         )
         .unwrap_err()
         .contains("unsupported Kiro V2 hook trigger"));
+    }
+
+    #[test]
+    fn next_orbit_hook_name_avoids_existing_names_and_entry_id_uses_delimiters() {
+        let existing = vec![
+            json!({"name": "orbit-hook-0"}),
+            json!({"name": "orbit-hook-1"}),
+        ];
+        assert_eq!(next_orbit_hook_name(&existing), "orbit-hook-2");
+
+        let src_a = Source {
+            id: "a".into(),
+            label: "a".into(),
+            layer: SettingsLayer::User,
+            path: PathBuf::from("a"),
+            format: Format::V3Standalone,
+            editable: true,
+        };
+        let src_ab = Source {
+            id: "ab".into(),
+            ..src_a.clone()
+        };
+        assert_ne!(
+            entry_id(&src_a, "bc", 0, &json!({})),
+            entry_id(&src_ab, "c", 0, &json!({}))
+        );
     }
 }

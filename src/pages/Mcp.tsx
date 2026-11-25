@@ -5,13 +5,16 @@ import {
   useState,
   type FormEvent,
 } from "react";
-import { useHarness } from "../HarnessContext";
-import { displayPath } from "../pathDisplay";
+import { useHarness } from "../lib/HarnessContext";
+import { displayPath } from "../lib/pathDisplay";
+import { useSequencedLoad } from "../lib/useSequencedLoad";
+import { useModalDialog } from "../lib/useModalDialog";
 import { JsonValue } from "../components/JsonValue";
 import { JsonEditor } from "../components/JsonEditor";
+import { SearchField } from "../components/SearchField";
 import { M3eButton } from "@m3e/react/button";
-import "./Mcp.css";
-import "./ListControls.css";
+import "../styles/Mcp.css";
+import "../styles/ListControls.css";
 
 const MASK = "••••••••";
 type Transport = "stdio" | "http";
@@ -142,9 +145,10 @@ export function McpPage() {
     error?: string;
   } | null>(null);
   const [busy, setBusy] = useState(false);
-  const dialog = useRef<HTMLDialogElement>(null);
   const firstInput = useRef<HTMLInputElement>(null);
   const isEditing = editor !== null;
+  const dialog = useModalDialog(isEditing, firstInput);
+  const { start: startLoad } = useSequencedLoad();
   const canMutate = loadState.kind === "ready" && !busy;
   const normalizedServerSearch = serverSearch.trim().toLocaleLowerCase();
   const visibleServers = normalizedServerSearch
@@ -158,27 +162,23 @@ export function McpPage() {
     : servers;
 
   const refresh = useCallback(async () => {
+    const request = startLoad();
     setLoadState({ kind: "loading" });
     try {
-      setServers(await invoke<Server[]>("mcp_list"));
+      const next = await invoke<Server[]>("mcp_list");
+      if (!request.isCurrent()) return;
+      setServers(next);
       setError("");
       setLoadState({ kind: "ready" });
     } catch (caught) {
+      if (!request.isCurrent()) return;
       setLoadState({ kind: "error", message: String(caught) });
     }
-  }, []);
+  }, [invoke, startLoad]);
+
   useEffect(() => {
     void refresh();
   }, [refresh]);
-  useEffect(() => {
-    const element = dialog.current;
-    if (!isEditing || !element) return;
-    element.showModal();
-    firstInput.current?.focus();
-    return () => {
-      if (element.open) element.close();
-    };
-  }, [isEditing]);
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
@@ -296,14 +296,13 @@ export function McpPage() {
         </div>
       ) : (
         <>
-        <div className="collection-search">
-          <label htmlFor="mcp-search">Search MCP servers</label>
-          <div>
-            <input id="mcp-search" type="search" value={serverSearch} onChange={(event) => setServerSearch(event.target.value)} />
-            {serverSearch && <button type="button" className="text-button" onClick={() => setServerSearch("")}>Clear search</button>}
-          </div>
-          <p role="status">Showing {visibleServers.length} of {servers.length} MCP servers</p>
-        </div>
+        <SearchField
+          id="mcp-search"
+          label="Search MCP servers"
+          value={serverSearch}
+          onChange={setServerSearch}
+          status={`Showing ${visibleServers.length} of ${servers.length} MCP servers`}
+        />
         {visibleServers.length === 0 ? (
           <p className="empty-copy">No MCP servers match "{serverSearch.trim()}".</p>
         ) : (
@@ -390,7 +389,7 @@ export function McpPage() {
                       </details>
                     </>
                   ) : bench.error ? (
-                    <p className="mcp-error">{bench.error}</p>
+                    <p className="mcp-error">{displayPath(bench.error)}</p>
                   ) : (
                     <p>Testing server…</p>
                   )}

@@ -1,0 +1,9 @@
+[package]
+name = "orbit-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Pure, dependency-free domain logic and security invariants shared between Orbit's production backend and Kani formal verification suite."
+publish = false
+
+[dependencies]

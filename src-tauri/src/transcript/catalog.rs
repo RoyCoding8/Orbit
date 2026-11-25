@@ -1,4 +1,7 @@
-use super::{antigravity, codex, ingest, kiro, opencode, pi, SessionSummary, TranscriptError};
+use super::{
+    antigravity, codex, extract_text, ingest, kiro, modified_epoch_ms, opencode, pi,
+    SessionSummary, TranscriptError,
+};
 use crate::harness::{atomic, selected::SelectedHarness, Harness};
 use rusqlite::{params, Connection};
 use serde::Serialize;
@@ -102,23 +105,37 @@ pub fn refresh(
             rows.collect::<Result<Vec<_>, _>>()
                 .map_err(|e| e.to_string())?
         };
-        for id in previous {
-            transaction
-                .execute("DELETE FROM messages_fts WHERE session_id = ?1", [&id])
+        if !previous.is_empty() {
+            let mut del_fts = transaction
+                .prepare_cached("DELETE FROM messages_fts WHERE session_id = ?1")
                 .map_err(|e| e.to_string())?;
-            transaction
-                .execute("DELETE FROM sessions WHERE session_id = ?1", [&id])
+            let mut del_session = transaction
+                .prepare_cached("DELETE FROM sessions WHERE session_id = ?1")
                 .map_err(|e| e.to_string())?;
+            for id in previous {
+                del_fts.execute([&id]).map_err(|e| e.to_string())?;
+                del_session.execute([&id]).map_err(|e| e.to_string())?;
+            }
         }
-        transaction.execute(
-            "INSERT INTO sessions(session_id, project, source_path, title, updated_at, catalog_fingerprint, indexed)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)
-             ON CONFLICT(session_id) DO UPDATE SET project = excluded.project, source_path = excluded.source_path,
-             title = COALESCE(excluded.title, sessions.title), updated_at = COALESCE(excluded.updated_at, sessions.updated_at),
-             catalog_fingerprint = excluded.catalog_fingerprint,
-             indexed = COALESCE(sessions.indexed AND sessions.source_path = excluded.source_path AND sessions.fingerprint = excluded.catalog_fingerprint, 0)",
-            params![entry.id, entry.project, source, entry.title, entry.updated_at, entry.fingerprint],
-        ).map_err(|e| e.to_string())?;
+        transaction
+            .prepare_cached(
+                "INSERT INTO sessions(session_id, project, source_path, title, updated_at, catalog_fingerprint, indexed)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)
+                 ON CONFLICT(session_id) DO UPDATE SET project = excluded.project, source_path = excluded.source_path,
+                 title = COALESCE(excluded.title, sessions.title), updated_at = COALESCE(excluded.updated_at, sessions.updated_at),
+                 catalog_fingerprint = excluded.catalog_fingerprint,
+                 indexed = COALESCE(sessions.indexed AND sessions.source_path = excluded.source_path AND sessions.fingerprint = excluded.catalog_fingerprint, 0)",
+            )
+            .map_err(|e| e.to_string())?
+            .execute(params![
+                entry.id,
+                entry.project,
+                source,
+                entry.title,
+                entry.updated_at,
+                entry.fingerprint
+            ])
+            .map_err(|e| e.to_string())?;
     }
     transaction.commit().map_err(|e| e.to_string())?;
     ingest::prune_vanished_sessions(&mut connection, &seen).map_err(|e| e.to_string())?;
@@ -137,11 +154,12 @@ fn cached_metadata(connection: &Connection) -> Result<HashMap<PathBuf, Metadata>
             fingerprint: row.get(5)?,
         })
     })?;
-    Ok(rows
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .map(|entry| (entry.path.clone(), entry))
-        .collect())
+    let mut map = HashMap::new();
+    for entry in rows {
+        let entry = entry?;
+        map.insert(entry.path.clone(), entry);
+    }
+    Ok(map)
 }
 
 fn source_files(
@@ -162,13 +180,14 @@ fn source_files(
                     }
                     for file in fs::read_dir(directory.path()).map_err(|e| e.to_string())? {
                         let file = file.map_err(|e| e.to_string())?;
-                        if file.file_type().map_err(|e| e.to_string())?.is_file()
-                            && file
-                                .path()
+                        if file.file_type().map_err(|e| e.to_string())?.is_file() {
+                            let path = file.path();
+                            if path
                                 .extension()
                                 .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
-                        {
-                            files.push(file.path());
+                            {
+                                files.push(path);
+                            }
                         }
                     }
                 }
@@ -199,11 +218,11 @@ fn source_files(
                         .file_name()
                         .and_then(|name| name.to_str())
                         .unwrap_or("");
-                    if name.ends_with(".json")
-                        && !name.ends_with(".history.json")
-                        && path.with_extension("jsonl").is_file()
-                    {
-                        files.push(path.with_extension("jsonl"));
+                    if name.ends_with(".json") && !name.ends_with(".history.json") {
+                        let jsonl = path.with_extension("jsonl");
+                        if jsonl.is_file() {
+                            files.push(jsonl);
+                        }
                     }
                 }
             }
@@ -287,7 +306,7 @@ fn read_metadata(
         let text = if record["type"] == "event_msg" && record["payload"]["type"] == "user_message" {
             record["payload"]["message"].as_str().map(str::to_owned)
         } else if record["message"]["role"] == "user" || record["type"] == "user" {
-            Some(text_content(&record["message"]["content"]))
+            Some(extract_text(&record["message"]["content"]))
         } else {
             None
         };
@@ -359,8 +378,7 @@ fn read_metadata(
     let updated_at = metadata
         .modified()
         .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|time| time.as_millis().to_string())
+        .and_then(modified_epoch_ms)
         .or(timestamp);
     Ok(Metadata {
         id,
@@ -369,18 +387,6 @@ fn read_metadata(
         updated_at,
         path: path.to_owned(),
         fingerprint,
-    })
-}
-
-fn text_content(value: &Value) -> String {
-    value.as_str().map(str::to_owned).unwrap_or_else(|| {
-        value
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|block| block["text"].as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
     })
 }
 

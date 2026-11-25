@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { useHarness } from "../HarnessContext";
-import { parseMemorySections, type MemorySection } from "./memorySections";
+import { useHarness } from "../lib/HarnessContext";
+import { parseMemorySections, type MemorySection } from "../lib/memorySections";
+import { displayPath } from "../lib/pathDisplay";
+import { useSequencedLoad } from "../lib/useSequencedLoad";
 import { MarkdownEditor } from "../components/MarkdownEditor";
-import { displayPath } from "../pathDisplay";
-import "./Memories.css";
+import { SearchField } from "../components/SearchField";
+import "../styles/Memories.css";
 
 export type MemorySource = "projectAutoMemory" | "globalAutoMemory" | "projectInstructions" | "userInstructions";
 export type MemoryRole = "index" | "topic" | "instruction" | "rule" | "summary" | "raw" | "evidence";
@@ -55,36 +57,61 @@ export function Memories() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [memorySearch, setMemorySearch] = useState("");
+  const { start: startLoad } = useSequencedLoad();
   const normalizedSearch = memorySearch.trim().toLocaleLowerCase();
-  const selected = catalog?.files.find((file) => file.id === selectedId) ?? null;
-  const groups = [...(catalog?.groups ?? [])].sort((a, b) =>
-    Number(b.role === "userInstructions") - Number(a.role === "userInstructions"),
+  const fileById = useMemo(() => new Map((catalog?.files ?? []).map((file) => [file.id, file])), [catalog]);
+  const groupById = useMemo(() => new Map((catalog?.groups ?? []).map((group) => [group.id, group])), [catalog]);
+  const selected = (selectedId ? fileById.get(selectedId) : null) ?? null;
+  const groups = useMemo(
+    () => [...(catalog?.groups ?? [])].sort((a, b) => Number(b.role === "userInstructions") - Number(a.role === "userInstructions")),
+    [catalog],
   );
   const dirty = !!selected && draft !== selected.content;
   const sections = useMemo(() => selected?.source === "globalAutoMemory" ? parseMemorySections(draft) : [], [selected?.source, draft]);
   const sectionGroups = useMemo(() => {
-    const groups = new Map<string, MemorySection[]>();
+    const byProject = new Map<string, MemorySection[]>();
     for (const section of sections) {
       const group = section.projects.length === 1 ? section.projects[0] : section.projects.length > 1 ? "Multiple projects" : "Project not stated";
-      const entries = groups.get(group) ?? [];
-      entries.push(section);
-      groups.set(group, entries);
+      const entries = byProject.get(group);
+      if (entries) entries.push(section);
+      else byProject.set(group, [section]);
     }
-    return [...groups];
+    return [...byProject];
   }, [sections]);
-  const matchesSearch = (values: string[]) => !normalizedSearch || values.some((value) =>
-    value.toLocaleLowerCase().includes(normalizedSearch) || displayPath(value).toLocaleLowerCase().includes(normalizedSearch),
-  );
-  const filteredFiles = catalog?.files.filter((file) => {
-    const group = catalog.groups.find((entry) => entry.id === file.groupId);
-    const content = file.id === selectedId ? `${file.content}\n${draft}` : file.content;
-    return matchesSearch([file.name, file.path, content, group?.label ?? "", roleLabel(file.role)]);
-  }) ?? [];
-  const filteredSectionGroups = sectionGroups.map(([group, entries]) => [group, entries.filter((entry) =>
-    matchesSearch([group, entry.title, ...entry.projects, draft.slice(entry.start, entry.end)]),
-  )] as const).filter(([, entries]) => entries.length > 0);
-  const selectedFileIsVisible = filteredFiles.some((file) => file.id === selectedId);
-  const selectedSectionIsVisible = filteredSectionGroups.some(([, entries]) => entries.some((entry) => view.kind === "section" && entry.start === view.start));
+  const filteredFiles = useMemo(() => {
+    const files = catalog?.files ?? [];
+    if (!normalizedSearch) return files;
+    const matches = (values: string[]) => values.some((value) =>
+      value.toLocaleLowerCase().includes(normalizedSearch) || displayPath(value).toLocaleLowerCase().includes(normalizedSearch),
+    );
+    return files.filter((file) => {
+      const group = groupById.get(file.groupId);
+      const content = file.id === selectedId ? `${file.content}\n${draft}` : file.content;
+      return matches([file.name, file.path, content, group?.label ?? "", roleLabel(file.role)]);
+    });
+  }, [catalog, groupById, normalizedSearch, selectedId, draft]);
+  const filteredSectionGroups = useMemo(() => {
+    if (!normalizedSearch) return sectionGroups;
+    const matches = (values: string[]) => values.some((value) =>
+      value.toLocaleLowerCase().includes(normalizedSearch) || displayPath(value).toLocaleLowerCase().includes(normalizedSearch),
+    );
+    return sectionGroups
+      .map(([group, entries]) => [group, entries.filter((entry) => matches([group, entry.title, ...entry.projects, draft.slice(entry.start, entry.end)]))] as const)
+      .filter(([, entries]) => entries.length > 0);
+  }, [sectionGroups, normalizedSearch, draft]);
+  const { filteredFilesByGroup, firstVisibleGroup, selectedFileIsVisible } = useMemo(() => {
+    const byGroup = new Map<string, MemoryFile[]>();
+    let selectedVisible = false;
+    for (const file of filteredFiles) {
+      if (file.id === selectedId) selectedVisible = true;
+      const list = byGroup.get(file.groupId);
+      if (list) list.push(file);
+      else byGroup.set(file.groupId, [file]);
+    }
+    const firstVisible = groups.find((candidate) => (byGroup.get(candidate.id)?.length ?? 0) > 0)?.id;
+    return { filteredFilesByGroup: byGroup, firstVisibleGroup: firstVisible, selectedFileIsVisible: selectedVisible };
+  }, [filteredFiles, groups, selectedId]);
+  const selectedSectionIsVisible = view.kind === "section" && filteredSectionGroups.some(([, entries]) => entries.some((entry) => entry.start === view.start));
   const editorStart = view.kind === "section" ? view.start : 0;
   const editorEnd = view.kind === "section" ? draft.length - view.trailingLength : draft.length;
   const showSections = sections.length > 1 || view.kind === "section";
@@ -97,9 +124,11 @@ export function Memories() {
 
   const load = async (projectRoot: string | null = catalog?.projectRoot ?? null, confirmed = false) => {
     if (!confirmed && !confirmDiscard()) return;
+    const request = startLoad();
     setLoadState({ kind: "loading" });
     try {
       const next = await invoke<MemoryCatalog>("memory_catalog", { projectRoot });
+      if (!request.isCurrent()) return;
       setCatalog(next);
       const active = next.files.find((file) => file.id === selectedId) ?? next.files[0] ?? null;
       setSelectedId(active?.id ?? null);
@@ -109,6 +138,7 @@ export function Memories() {
       setLoadState({ kind: "ready" });
       return active;
     } catch (reason) {
+      if (!request.isCurrent()) return;
       setLoadState({ kind: "error", message: String(reason) });
     }
   };
@@ -119,9 +149,13 @@ export function Memories() {
     file.references.filter((reference) => reference.status === "known" && reference.fileId === selected?.id)
       .map((reference) => ({ file, reference })),
   ) ?? [], [catalog, selected?.id]);
-  const unlinkedTopics = useMemo(() => catalog?.files.filter((file) =>
-    file.groupId === selected?.groupId && file.role === "topic" && !selected.references.some((reference) => reference.status === "known" && reference.fileId === file.id),
-  ) ?? [], [catalog, selected]);
+  const unlinkedTopics = useMemo(() => {
+    if (!catalog || !selected) return [];
+    const linked = new Set(
+      selected.references.filter((r) => r.status === "known" && r.fileId).map((r) => r.fileId),
+    );
+    return catalog.files.filter((file) => file.groupId === selected.groupId && file.role === "topic" && !linked.has(file.id));
+  }, [catalog, selected]);
 
   const chooseProject = async () => {
     if (!confirmDiscard()) return;
@@ -166,7 +200,7 @@ export function Memories() {
   };
   const openReference = (reference: MemoryReference) => {
     if (reference.status !== "known" || !reference.fileId) return;
-    const file = catalog?.files.find((entry) => entry.id === reference.fileId);
+    const file = fileById.get(reference.fileId);
     if (file) selectFile(file);
   };
 
@@ -193,20 +227,23 @@ export function Memories() {
             {catalog.excludedCustomMemoryDirectory && <p className="memory-boundary-note" role="note">Custom auto-memory directory is outside this authorized project and was excluded: <code>{displayPath(catalog.excludedCustomMemoryDirectory)}</code></p>}
           <div className="memory-browser">
             <nav className="memory-groups" aria-label="Memory files by source">
-              <div className="memory-search">
-                <label htmlFor="memory-search">Search memories</label>
-                <div className="memory-search-controls">
-                  <input id="memory-search" type="search" value={memorySearch} onChange={(event) => setMemorySearch(event.target.value)} placeholder="Name, path, project, or content" />
-                  <button className="text-button" type="button" onClick={() => setMemorySearch("")} disabled={!memorySearch} aria-label="Clear memory search">Clear</button>
-                </div>
-              </div>
+              <SearchField
+                id="memory-search"
+                label="Search memories"
+                value={memorySearch}
+                onChange={setMemorySearch}
+                placeholder="Name, path, project, or content"
+                className="memory-search"
+                controlsClassName="memory-search-controls"
+                clearLabel="Clear"
+                clearAriaLabel="Clear memory search"
+                alwaysShowClear
+              />
               {normalizedSearch && <p className="memory-search-count">{filteredFiles.length} matching files</p>}
               {groups.map((group, index) => {
-                const allFiles = catalog.files.filter((file) => file.groupId === group.id);
-                const files = filteredFiles.filter((file) => file.groupId === group.id);
+                const files = filteredFilesByGroup.get(group.id) ?? [];
                 if (normalizedSearch && files.length === 0) return null;
-                const selectedGroup = allFiles.some((file) => file.id === selectedId);
-                const firstVisibleGroup = groups.find((candidate) => filteredFiles.some((file) => file.groupId === candidate.id))?.id;
+                const selectedGroup = selected?.groupId === group.id;
                 return <details className="memory-group" key={group.id} open={selectedGroup || (!selectedFileIsVisible && group.id === firstVisibleGroup) || (!selectedId && index === 0)}>
                   <summary className="memory-group-heading">
                     <div className="memory-group-title">

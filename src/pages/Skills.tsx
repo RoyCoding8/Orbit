@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useHarness } from "../HarnessContext";
-import { displayPath } from "../pathDisplay";
 import { open } from "@tauri-apps/plugin-dialog";
+import { useHarness } from "../lib/HarnessContext";
+import type { SkillState } from "../lib/harnesses";
+import { displayPath } from "../lib/pathDisplay";
+import { useSequencedLoad } from "../lib/useSequencedLoad";
+import { useModalDialog } from "../lib/useModalDialog";
 import { MarkdownEditor } from "../components/MarkdownEditor";
-import "./ListControls.css";
+import { SearchField } from "../components/SearchField";
+import "../styles/ListControls.css";
 
-type SkillState = "on" | "name-only" | "user-invocable-only" | "off";
 type Skill = {
   id: string;
   name: string;
@@ -43,42 +46,33 @@ export function Skills() {
   const [error, setError] = useState("");
   const [editError, setEditError] = useState("");
   const [busy, setBusy] = useState(false);
-  const editDialog = useRef<HTMLDialogElement>(null);
   const draftInput = useRef<HTMLTextAreaElement>(null);
   const isEditing = editing !== null;
-  const loadSequence = useRef(0);
+  const editDialog = useModalDialog(isEditing, draftInput);
+  const { start: startLoad } = useSequencedLoad();
 
   const load = useCallback(async () => {
-    const sequence = ++loadSequence.current;
+    const req = startLoad();
     setLoadState({ kind: "loading" });
     try {
       const [inventory, rows] = await Promise.all([
         invoke<Skill[]>("skills_inventory"),
         invoke<LedgerRow[]>("skills_ledger"),
       ]);
-      if (sequence !== loadSequence.current) return;
+      if (!req.isCurrent()) return;
       setSkills(inventory);
       setLedger(rows);
       setError("");
       setLoadState({ kind: "ready" });
     } catch (err) {
-      if (sequence !== loadSequence.current) return;
+      if (!req.isCurrent()) return;
       setLoadState({ kind: "error", message: String(err) });
     }
-  }, [invoke]);
+  }, [invoke, startLoad]);
+
   useEffect(() => {
     void load();
-    return () => { loadSequence.current++; };
   }, [load]);
-  useEffect(() => {
-    const dialog = editDialog.current;
-    if (!isEditing || !dialog) return;
-    dialog.showModal();
-    draftInput.current?.focus();
-    return () => {
-      if (dialog.open) dialog.close();
-    };
-  }, [isEditing]);
 
   const restorable = useMemo(() => {
     const restored = new Set(
@@ -114,13 +108,17 @@ export function Skills() {
     }
   };
   const install = async () => {
-    const source = await open({
-      directory: true,
-      multiple: false,
-      title: "Choose a skill folder",
-    });
-    if (typeof source === "string")
-      await update(() => invoke("skill_install", { source }));
+    try {
+      const source = await open({
+        directory: true,
+        multiple: false,
+        title: "Choose a skill folder",
+      });
+      if (typeof source === "string")
+        await update(() => invoke("skill_install", { source }));
+    } catch (err) {
+      setError(String(err));
+    }
   };
   const saveEdit = async () => {
     if (!editing) return;
@@ -217,14 +215,13 @@ export function Skills() {
             </div>
           ) : (
             <>
-              <div className="collection-search">
-                <label htmlFor="skills-search">Search skills</label>
-                <div>
-                  <input id="skills-search" type="search" value={skillSearch} onChange={(event) => setSkillSearch(event.target.value)} />
-                  {skillSearch && <button type="button" className="text-button" onClick={() => setSkillSearch("")}>Clear search</button>}
-                </div>
-                <p role="status">Showing {visibleSkills.length} of {skills.length} skills</p>
-              </div>
+              <SearchField
+                id="skills-search"
+                label="Search skills"
+                value={skillSearch}
+                onChange={setSkillSearch}
+                status={`Showing ${visibleSkills.length} of ${skills.length} skills`}
+              />
               {visibleSkills.length === 0 ? (
                 <p className="empty-copy">No skills match "{skillSearch.trim()}".</p>
               ) : (
@@ -250,7 +247,7 @@ export function Skills() {
                       type="checkbox"
                       aria-label={`Enable ${skill.id}`}
                       checked={skill.state !== "off"}
-                      disabled={!canMutate || profile.skillModes.length === 0}
+                      disabled={!canMutate}
                       onChange={(event) =>
                         void update(() =>
                           invoke("skill_set_override", {
@@ -267,7 +264,7 @@ export function Skills() {
                     <select
                       aria-label={`Visibility for ${skill.id}`}
                       value={skill.state}
-                      disabled={!canMutate || profile.skillModes.length === 0}
+                      disabled={!canMutate}
                       onChange={(event) =>
                         void update(() =>
                           invoke("skill_set_override", {

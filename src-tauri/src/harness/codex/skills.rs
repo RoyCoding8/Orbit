@@ -223,47 +223,8 @@ pub fn install(harness: &CodexHarness, source: &Path) -> Result<String, String> 
     crate::harness::claude::skills::ensure_plain_directory(&root)?;
     let root = canonical_directory(&root)?;
     let destination = root.join(name);
-    crate::harness::claude::skills::ensure_plain_parent(&destination)?;
-    if crate::harness::claude::skills::path_exists_no_follow(&destination)? {
-        return Err(format!("skill already exists: {name}"));
-    }
-
     let id = skill_id(&identity_path(&destination.join("SKILL.md"))?);
-    let guard = atomic::lock_mutations(&destination).map_err(|error| error.to_string())?;
-    if crate::harness::claude::skills::path_exists_no_follow(&destination)? {
-        return Err(format!("skill already exists: {name}"));
-    }
-    let checksum = crate::harness::claude::skills::safe_directory_checksum(source)?;
-    let plan = atomic::MutationPlan {
-        target: destination.clone(),
-        backup: None,
-        before_checksum: None,
-        after_checksum: Some(checksum.clone()),
-    };
-    let op = ledger::reserve_mutation(
-        harness.config_root(),
-        ResourceKind::Skill,
-        &id,
-        "install",
-        &plan,
-        &guard,
-    )
-    .map_err(|error| error.to_string())?;
-    if let Err(error) = crate::harness::claude::skills::copy_dir(source, &destination) {
-        return Err(format!(
-            "reserved install {op} failed; inspect the partial destination at {}: {error}",
-            destination.display()
-        ));
-    }
-    let installed = crate::harness::claude::skills::safe_directory_checksum(&destination)?;
-    if installed != checksum {
-        return Err(format!(
-            "reserved install {op} checksum differs from source; inspect the destination at {}",
-            destination.display()
-        ));
-    }
-    ledger::complete_mutation(harness.config_root(), &op, &guard)
-        .map_err(|error| error.to_string())?;
+    crate::harness::skill_store::install_tree(harness, &id, "install", source, &destination)?;
     Ok(id)
 }
 
@@ -285,39 +246,7 @@ pub fn uninstall(harness: &CodexHarness, project: &Path, id: &str) -> Result<(),
 
 fn uninstall_target(harness: &CodexHarness, id: &str, source: &Path) -> Result<(), String> {
     crate::harness::claude::skills::validate_plain_tree(source)?;
-    let backup = ledger::backup_path(harness.config_root(), id, "uninstall");
-    crate::harness::claude::skills::ensure_plain_parent(&backup)?;
-    if crate::harness::claude::skills::path_exists_no_follow(&backup)? {
-        return Err("skill uninstall backup already exists".into());
-    }
-    std::fs::create_dir_all(backup.parent().ok_or("backup path has no parent")?)
-        .map_err(|error| error.to_string())?;
-    let guard = atomic::lock_mutations(source).map_err(|error| error.to_string())?;
-    let checksum = crate::harness::claude::skills::safe_directory_checksum(source)?;
-    let plan = atomic::MutationPlan {
-        target: source.to_path_buf(),
-        backup: Some(backup.clone()),
-        before_checksum: Some(checksum.clone()),
-        after_checksum: None,
-    };
-    let op = ledger::reserve_mutation(
-        harness.config_root(),
-        ResourceKind::Skill,
-        id,
-        "uninstall",
-        &plan,
-        &guard,
-    )
-    .map_err(|error| error.to_string())?;
-    std::fs::rename(source, &backup)
-        .map_err(|error| format!("reserved uninstall {op} did not complete: {error}"))?;
-    let moved = crate::harness::claude::skills::safe_directory_checksum(&backup)?;
-    if moved != checksum {
-        return Err(format!(
-            "reserved uninstall {op} backup checksum differs from source"
-        ));
-    }
-    ledger::complete_mutation(harness.config_root(), &op, &guard).map_err(|error| error.to_string())
+    crate::harness::skill_store::uninstall_tree(harness, id, "uninstall", source)
 }
 
 pub fn restore(
@@ -360,39 +289,14 @@ pub fn restore(
         .before_checksum
         .as_deref()
         .ok_or("uninstall has no checksum")?;
-    let actual = crate::harness::claude::skills::safe_directory_checksum(backup)?;
-    ledger::verify_directory_checksum(&actual, expected)
-        .map_err(|error| format!("cannot restore skill {id}: {error}"))?;
-    crate::harness::claude::skills::ensure_plain_parent(&target)?;
-    if crate::harness::claude::skills::path_exists_no_follow(&target)? {
-        return Err("skill already exists at its original path".into());
-    }
-    let guard = atomic::lock_mutations(&target).map_err(|error| error.to_string())?;
-    if crate::harness::claude::skills::path_exists_no_follow(&target)? {
-        return Err("skill already exists at its original path".into());
-    }
-    let plan = atomic::MutationPlan {
-        target: target.clone(),
-        backup: Some(recorded_backup.clone()),
-        before_checksum: None,
-        after_checksum: Some(expected.to_owned()),
-    };
-    let op = ledger::reserve_mutation(
-        harness.config_root(),
-        ResourceKind::Skill,
+    crate::harness::skill_store::restore_tree(
+        harness,
         id,
         "restore",
-        &plan,
-        &guard,
+        &recorded_backup,
+        &target,
+        expected,
     )
-    .map_err(|error| error.to_string())?;
-    crate::harness::claude::skills::copy_dir(backup, &target).map_err(|error| {
-        format!("reserved restore {op} failed; inspect the partial destination: {error}")
-    })?;
-    let restored = crate::harness::claude::skills::safe_directory_checksum(&target)?;
-    ledger::verify_directory_checksum(&restored, expected)
-        .map_err(|error| format!("reserved restore {op} failed verification: {error}"))?;
-    ledger::complete_mutation(harness.config_root(), &op, &guard).map_err(|error| error.to_string())
 }
 
 fn set_config_enabled(
@@ -493,11 +397,8 @@ fn validate_codex_metadata(content: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn skill_id(skill_file: &Path) -> String {
-    format!(
-        "skill-{}",
-        atomic::hex(&Sha256::digest(skill_file.to_string_lossy().as_bytes()))
-    )
+fn skill_id(path: &Path) -> String {
+    crate::harness::skill_store::hashed_skill_id(path)
 }
 
 fn identity_path(path: &Path) -> Result<PathBuf, String> {
@@ -570,9 +471,7 @@ fn canonical_directory(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn path_is_within(path: &Path, root: &Path) -> bool {
-    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    path.starts_with(root)
+    crate::harness::fs_guard::path_is_within(path, root)
 }
 
 #[cfg(test)]

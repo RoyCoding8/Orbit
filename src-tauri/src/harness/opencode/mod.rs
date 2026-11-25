@@ -90,9 +90,9 @@ impl Harness for OpenCodeHarness {
                     .collect()
             }),
         };
-        result.map_err(|message| super::HarnessError::Mutation {
+        result.map_err(|message| super::HarnessError::Read {
             path: self.config_root.clone(),
-            message,
+            source: std::io::Error::other(message),
         })
     }
 }

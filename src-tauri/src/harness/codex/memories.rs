@@ -9,17 +9,14 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use super::CodexHarness;
-use crate::{
-    harness::{
-        atomic,
-        claude::memories::{
-            MemoryCatalog, MemoryFile, MemoryGroup, MemoryReference, MemoryRole, MemorySource,
-            ReferenceStatus,
-        },
-        memory_links::{parse_references, resolve_reference, without_references},
-        Harness, ResourceKind,
+use crate::harness::{
+    atomic,
+    claude::memories::{
+        MemoryCatalog, MemoryFile, MemoryGroup, MemoryReference, MemoryRole, MemorySource,
+        ReferenceStatus,
     },
-    ledger,
+    memory_links::{parse_references, resolve_reference},
+    Harness,
 };
 
 #[derive(Clone)]
@@ -183,7 +180,7 @@ pub fn edit(
         .iter()
         .find(|file| file.id == id && file.editable)
         .ok_or("memory or instruction file is no longer available for editing")?;
-    edit_file(harness, file, expected_content, content)
+    crate::harness::instruction_store::edit(harness, file, expected_content, content, "edit")
 }
 
 pub fn delete(
@@ -193,77 +190,14 @@ pub fn delete(
     expected_content: &str,
 ) -> Result<(), String> {
     let catalog = catalog(harness, project)?;
-    let file = catalog
-        .files
-        .iter()
-        .find(|file| file.id == id && file.editable)
-        .ok_or("memory or instruction file is no longer available for deletion")?;
-    if file.content != expected_content {
-        return Err(
-            "Memory or instruction file changed since this editor opened. Refresh the catalog and try again."
-                .into(),
-        );
-    }
-    let target = PathBuf::from(&file.path);
-    for source in catalog
-        .files
-        .iter()
-        .filter(|source| source.id != id && source.editable)
-    {
-        let content = without_references(source, &target, false);
-        if content != source.content {
-            edit_file(harness, source, &source.content, &content).map_err(|error| {
-                format!(
-                    "Could not remove references from {}. The file was not deleted. {error}",
-                    source.name
-                )
-            })?;
-        }
-    }
-    ensure_plain_file(&target)?;
-    ledger::remove_file(
-        harness.config_root(),
-        resource_kind(file.source),
+    crate::harness::instruction_store::delete(
+        harness,
+        &catalog,
         id,
-        "delete",
-        &target,
-        Sha256::digest(expected_content.as_bytes()).into(),
-        &ledger::backup_path(harness.config_root(), id, "delete"),
-    )
-    .map_err(|error| error.to_string())
-}
-
-fn edit_file(
-    harness: &CodexHarness,
-    file: &MemoryFile,
-    expected_content: &str,
-    content: &str,
-) -> Result<(), String> {
-    let path = Path::new(&file.path);
-    ensure_plain_file(path)?;
-    let backup = ledger::backup_path(harness.config_root(), &file.id, "edit");
-    ledger::write(
-        harness.config_root(),
-        resource_kind(file.source),
-        &file.id,
+        expected_content,
         "edit",
-        path,
-        atomic::RecordedWrite::Restore(
-            Sha256::digest(expected_content.as_bytes()).into(),
-            content.as_bytes(),
-        ),
-        Some(&backup),
+        "delete",
     )
-    .map(|_| ())
-    .map_err(|error| {
-        let message = error.to_string();
-        if message.contains("did not hold the expected state") {
-            "Memory or instruction file changed since this editor opened. Refresh the catalog and try again."
-                .to_owned()
-        } else {
-            message
-        }
-    })
 }
 
 fn add_instruction_files(
@@ -418,26 +352,13 @@ pub(crate) fn fallback_filenames(harness: &CodexHarness) -> Result<Vec<String>, 
         .filter(|name| {
             !name.is_empty()
                 && Path::new(name).components().count() == 1
-                && !matches!(
+                && matches!(
                     Path::new(name).components().next(),
-                    Some(
-                        std::path::Component::ParentDir
-                            | std::path::Component::RootDir
-                            | std::path::Component::Prefix(_)
-                    )
+                    Some(std::path::Component::Normal(_))
                 )
         })
         .map(str::to_owned)
         .collect())
-}
-
-fn resource_kind(source: MemorySource) -> ResourceKind {
-    match source {
-        MemorySource::GlobalAutoMemory => ResourceKind::Memory,
-        MemorySource::ProjectInstructions => ResourceKind::ProjectInstructions,
-        MemorySource::UserInstructions => ResourceKind::GlobalInstructions,
-        MemorySource::ProjectAutoMemory => ResourceKind::Memory,
-    }
 }
 
 fn file_id(path: &Path) -> String {
@@ -720,5 +641,19 @@ mod tests {
             .unwrap();
         assert!(override_file.load_behavior.starts_with("Empty instruction"));
         assert!(agents_file.load_behavior.starts_with("Loaded"));
+    }
+
+    #[test]
+    fn fallback_filenames_filters_dot_and_parent_dir() {
+        let temp = crate::test_support::tempdir().unwrap();
+        let codex_home = temp.path().join(".codex");
+        std::fs::create_dir_all(&codex_home).unwrap();
+        std::fs::write(
+            codex_home.join("config.toml"),
+            "project_doc_fallback_filenames = [\".\", \"..\", \"nested/file.md\", \"CUSTOM.md\"]\n",
+        )
+        .unwrap();
+        let harness = CodexHarness::new(codex_home, temp.path().to_path_buf());
+        assert_eq!(fallback_filenames(&harness).unwrap(), vec!["CUSTOM.md"]);
     }
 }
