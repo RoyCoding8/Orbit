@@ -1,6 +1,6 @@
 [package]
 name = "orbit"
-version = "0.4.0"
+version = "0.5.1"
 description = "Desktop app for AI coding agent settings, skills, memories, and chats"
 edition = "2021"
 rust-version = "1.82"
