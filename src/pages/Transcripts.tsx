@@ -558,7 +558,7 @@ export function Transcripts() {
             </h3>
             {selectedSession && (
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <button type="button" className="secondary-action" disabled={busy}
+                <button type="button" className="secondary-action" disabled={busy || profile.transcripts.archive === "none"}
                   onClick={() => setConverting(selectedSession)}>Convert chat</button>
                 <button type="button" className="secondary-action" disabled={busy || indexing.kind === "running" || profile.transcripts.archive !== "migration"}
                   title={profile.transcripts.archive === "migration" ? undefined : "Deletion requires a chat archive that Orbit can restore."}
@@ -567,8 +567,8 @@ export function Transcripts() {
                   type="button"
                   className="secondary-action"
                   onClick={() => void exportArchive()}
-                  disabled={busy}
-                  title={profile.transcripts.archive === "backup" ? profile.transcripts.note : undefined}
+                  disabled={busy || profile.transcripts.archive === "none"}
+                  title={profile.transcripts.archive !== "migration" ? profile.transcripts.note : undefined}
                 >
                   Export {profile.archiveLabel} {profile.transcripts.archive === "backup" ? "source backup" : "archive"}
                 </button>

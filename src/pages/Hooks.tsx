@@ -246,13 +246,13 @@ function CommandHooks({ policy }: { policy: HookPolicy }) {
           <select
             id="hook-layer"
             value={effectiveLayer}
-            disabled={busy || client === "kiro"}
+            disabled={busy || client === "kiro" || policy.projectPath === null}
             onChange={(e) =>
               setLayer(e.target.value === "project" ? "project" : "user")
             }
           >
             <option value="user">User</option>
-            <option value="project">Project</option>
+            {policy.projectPath !== null && <option value="project">Project</option>}
           </select>
           <p className="layer-path">
             {displayPath(source?.label ?? (effectiveLayer === "user" ? policy.userPath : projectRoot ? `${projectRoot}/${policy.projectPath}` : `Choose a project to edit ${policy.projectPath}`))}

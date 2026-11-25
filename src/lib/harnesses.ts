@@ -1,4 +1,4 @@
-export const clients = ["claude-code", "codex", "kiro", "opencode", "pi", "antigravity"] as const;
+export const clients = ["claude-code", "codex", "kiro", "opencode", "pi", "antigravity", "muse", "junie", "cursor"] as const;
 export type Client = typeof clients[number];
 export type SkillState = "on" | "off" | "name-only" | "user-invocable-only";
 
@@ -13,8 +13,8 @@ type HarnessProfile = {
   connectionsNote: string;
   configNote: string;
   modelExample: string;
-  transcripts: { archive: "migration" | "backup"; scope: "all" | "project"; note: string };
-  hooks: { kind: "commands"; events: readonly string[]; canToggle: boolean; note: string; userPath: string; projectPath: string }
+  transcripts: { archive: "migration" | "backup" | "none"; scope: "all" | "project"; note: string };
+  hooks: { kind: "commands"; events: readonly string[]; canToggle: boolean; note: string; userPath: string; projectPath: string | null }
     | { kind: "plugins"; reason: string };
 };
 
@@ -79,6 +79,42 @@ export const harnesses: Record<Client, HarnessProfile> = {
     modelExample: '"gpt-5"',
     transcripts: { archive: "migration", scope: "project", note: "Discover Pi version 3 JSONL chats across its default session folders. Choose a project to also include its custom session directory. Archives preserve native records and inline images. External files referenced by a chat are not bundled." },
     hooks: { kind: "plugins", reason: "Pi lifecycle hooks are TypeScript or JavaScript extensions. Orbit's command-hook builder cannot edit or test extension code. Manage the native extensions list on the Settings page." },
+  },
+  muse: {
+    label: "Muse Code", archiveLabel: "Muse Code", settingsLayers: ["user"], projectSkills: true,
+    skillModes: [], skillsNote: "Muse Code discovers user skills under its config directory, read-only shared ~/.agents/skills, and project .agents/skills. Uninstall saves a restorable copy.",
+    memoriesNote: "Edit project AGENTS.md, CLAUDE.md, and .agents/memory Markdown files used by Muse Code.",
+    connectionsNote: "Muse Code reads project instruction files and .agents/memory topics. Ordinary Markdown links remain navigation links.",
+    configNote: "Muse Code settings are user-scoped in settings.json and always preserve schema_version: 1.",
+    modelExample: '"claude-sonnet-4"',
+    transcripts: { archive: "none", scope: "all", note: "Muse Code does not have a supported local transcript format in Orbit yet." },
+    hooks: { kind: "commands", events: ["SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "PostToolUseFailure", "PostToolBatch", "PreLLMCall", "PostLLMCall", "PreCompact", "PostCompact", "SubagentStart", "SubagentStop", "Notification", "Stop", "StopFailure", "SessionEnd"], canToggle: false,
+      note: "User hooks live in settings.json (preserving schema_version: 1) and project hooks live in .muse/hooks.json.",
+      userPath: "~/.config/muse/settings.json", projectPath: ".muse/hooks.json" },
+  },
+  junie: {
+    label: "Junie CLI", archiveLabel: "Junie CLI", settingsLayers: ["user", "project"], projectSkills: true,
+    skillModes: [], skillsNote: "Junie CLI discovers user skills under ~/.junie/skills and project skills under .junie/skills. Uninstall saves a restorable copy.",
+    memoriesNote: "Edit user ~/.junie/AGENTS.md and project AGENTS.md, .junie/guidelines.md, and .junie/rules Markdown files.",
+    connectionsNote: "Junie CLI loads user and project AGENTS.md plus .junie rules and guidelines. Ordinary Markdown links remain navigation links.",
+    configNote: "Preview of user ~/.junie/config.json and project .junie/config.json. Project settings override user settings.",
+    modelExample: '"claude-sonnet-4"',
+    transcripts: { archive: "none", scope: "all", note: "Junie CLI does not have a supported local transcript format in Orbit yet." },
+    hooks: { kind: "commands", events: ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop", "PreCompact", "Notification", "Stop", "SessionEnd"], canToggle: false,
+      note: "Junie CLI loads user hooks from ~/.junie/config.json and ignores project hooks for safety.",
+      userPath: "~/.junie/config.json", projectPath: null },
+  },
+  cursor: {
+    label: "Cursor CLI", archiveLabel: "Cursor CLI", settingsLayers: ["user", "project"], projectSkills: true,
+    skillModes: [], skillsNote: "Cursor CLI discovers user skills under ~/.cursor/skills, read-only built-in skills-cursor, and project .cursor/skills. Uninstall saves a restorable copy.",
+    memoriesNote: "Edit project .cursor/rules (.md and .mdc), AGENTS.md, and CLAUDE.md files.",
+    connectionsNote: "Cursor CLI loads project rules and instruction files. Ordinary Markdown links remain navigation links.",
+    configNote: "User cli-config.json preserves version: 1. Project .cursor/cli.json supports permissions only.",
+    modelExample: '"claude-4-sonnet"',
+    transcripts: { archive: "none", scope: "all", note: "Cursor CLI does not have a supported local transcript format in Orbit yet." },
+    hooks: { kind: "commands", events: ["sessionStart", "sessionEnd", "preToolUse", "postToolUse", "postToolUseFailure", "subagentStart", "subagentStop", "beforeShellExecution", "afterShellExecution", "beforeMCPExecution", "afterMCPExecution", "beforeReadFile", "afterFileEdit", "beforeSubmitPrompt", "preCompact", "stop", "afterAgentResponse", "afterAgentThought", "beforeTabFileRead", "afterTabFileEdit", "workspaceOpen"], canToggle: false,
+      note: "Cursor CLI hooks live in user ~/.cursor/hooks.json and project .cursor/hooks.json and preserve version: 1.",
+      userPath: "~/.cursor/hooks.json", projectPath: ".cursor/hooks.json" },
   },
 };
 

@@ -6,7 +6,10 @@ use super::{
     antigravity::{self, AntigravityHarness},
     claude::{self, config::SettingsLayer, ClaudeCodeHarness, SkillOverride},
     codex::{self, CodexHarness},
+    cursor::{self, CursorHarness},
+    junie::{self, JunieHarness},
     kiro::{self, KiroHarness},
+    muse::{self, MuseHarness},
     opencode::{self, OpenCodeHarness},
     pi::{self, PiHarness},
     Client, Harness, HarnessId, HookDraft, InventoryKind, ResourceRef,
@@ -20,6 +23,9 @@ pub enum SelectedHarness {
     Opencode(OpenCodeHarness),
     Pi(PiHarness),
     Antigravity(AntigravityHarness),
+    Muse(MuseHarness),
+    Junie(JunieHarness),
+    Cursor(CursorHarness),
 }
 
 macro_rules! dispatch_harness {
@@ -31,6 +37,9 @@ macro_rules! dispatch_harness {
             Self::Pi($h) => $body,
             Self::Antigravity($h) => $body,
             Self::Opencode($h) => $body,
+            Self::Muse($h) => $body,
+            Self::Junie($h) => $body,
+            Self::Cursor($h) => $body,
         }
     };
     (
@@ -58,6 +67,18 @@ macro_rules! dispatch_harness {
             }
             Self::Opencode($oh) => {
                 use opencode as $module;
+                $other
+            }
+            Self::Muse($oh) => {
+                use muse as $module;
+                $other
+            }
+            Self::Junie($oh) => {
+                use junie as $module;
+                $other
+            }
+            Self::Cursor($oh) => {
+                use cursor as $module;
                 $other
             }
         }
@@ -91,6 +112,18 @@ macro_rules! dispatch_harness {
                 use opencode as $module;
                 $body
             }
+            Self::Muse($h) => {
+                use muse as $module;
+                $body
+            }
+            Self::Junie($h) => {
+                use junie as $module;
+                $body
+            }
+            Self::Cursor($h) => {
+                use cursor as $module;
+                $body
+            }
         }
     };
     (
@@ -112,6 +145,18 @@ macro_rules! dispatch_harness {
                 use antigravity as $module;
                 $supported
             }
+            Self::Muse($oh) => {
+                use muse as $module;
+                $supported
+            }
+            Self::Junie($oh) => {
+                use junie as $module;
+                $supported
+            }
+            Self::Cursor($oh) => {
+                use cursor as $module;
+                $supported
+            }
             Self::Opencode(_) => Err(opencode::hooks::UNSUPPORTED.into()),
             Self::Pi(_) => Err(pi::HOOKS_UNSUPPORTED.into()),
         }
@@ -127,6 +172,9 @@ impl SelectedHarness {
             Client::Pi => Self::Pi(PiHarness::from_env()),
             Client::Antigravity => Self::Antigravity(AntigravityHarness::from_env()),
             Client::Opencode => Self::Opencode(OpenCodeHarness::from_env()),
+            Client::Muse => Self::Muse(MuseHarness::from_env()),
+            Client::Junie => Self::Junie(JunieHarness::from_env()),
+            Client::Cursor => Self::Cursor(CursorHarness::from_env()),
         }
     }
 
@@ -259,6 +307,9 @@ impl SelectedHarness {
             ),
             Self::Kiro(h) => kiro::hooks::save(h, project, draft),
             Self::Antigravity(h) => antigravity::hooks::save(h, project, draft),
+            Self::Muse(h) => muse::hooks::save(h, project, draft),
+            Self::Junie(h) => junie::hooks::save(h, project, draft),
+            Self::Cursor(h) => cursor::hooks::save(h, project, draft),
             Self::Opencode(_) => Err(opencode::hooks::UNSUPPORTED.into()),
             Self::Pi(_) => Err(pi::HOOKS_UNSUPPORTED.into()),
         }
@@ -391,6 +442,9 @@ impl SelectedHarness {
             Self::Pi(_) => app.join("pi"),
             Self::Antigravity(_) => app.join("antigravity"),
             Self::Opencode(_) => app.join("opencode"),
+            Self::Muse(_) => app.join("muse"),
+            Self::Junie(_) => app.join("junie"),
+            Self::Cursor(_) => app.join("cursor"),
         }
     }
 
@@ -437,6 +491,9 @@ impl SelectedHarness {
                 session,
                 destination,
             ),
+            Self::Muse(_) | Self::Junie(_) | Self::Cursor(_) => {
+                Err("Local transcripts are not supported for this agent yet.".into())
+            }
         }
     }
 
@@ -458,6 +515,9 @@ impl SelectedHarness {
             Self::Pi(h) => transcript::pi::import_archive(h.config_root(), source, project),
             Self::Opencode(h) => {
                 transcript::opencode::import_archive(h.config_root(), source, project)
+            }
+            Self::Muse(_) | Self::Junie(_) | Self::Cursor(_) => {
+                Err("Local transcripts are not supported for this agent yet.".into())
             }
         }?;
         transcript::catalog::refresh(self, app, project)

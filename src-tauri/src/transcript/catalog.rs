@@ -37,6 +37,12 @@ pub fn refresh(
     app: &Path,
     project: &Path,
 ) -> Result<Vec<String>, String> {
+    if matches!(
+        harness,
+        SelectedHarness::Muse(_) | SelectedHarness::Junie(_) | SelectedHarness::Cursor(_)
+    ) {
+        return Ok(Vec::new());
+    }
     let cache = harness.transcript_cache(app);
     let mut connection = ingest::open_database(&cache).map_err(|e| e.to_string())?;
     let cached = cached_metadata(&connection).map_err(|e| e.to_string())?;
@@ -227,7 +233,11 @@ fn source_files(
                 }
             }
         }
-        SelectedHarness::Opencode(_) | SelectedHarness::Antigravity(_) => unreachable!(),
+        SelectedHarness::Opencode(_)
+        | SelectedHarness::Antigravity(_)
+        | SelectedHarness::Muse(_)
+        | SelectedHarness::Junie(_)
+        | SelectedHarness::Cursor(_) => unreachable!(),
     }
     files.sort();
     files.dedup();
@@ -248,7 +258,10 @@ pub(super) fn source_fingerprint(harness: &SelectedHarness, path: &Path) -> Opti
             ingest::file_fingerprint(&path.with_extension("json"), None)?
         )),
         SelectedHarness::Pi(_) => ingest::file_fingerprint(path, None),
-        SelectedHarness::Opencode(_) => None,
+        SelectedHarness::Opencode(_)
+        | SelectedHarness::Muse(_)
+        | SelectedHarness::Junie(_)
+        | SelectedHarness::Cursor(_) => None,
         SelectedHarness::Antigravity(_) => antigravity::fingerprint(path),
     }
 }
@@ -363,7 +376,10 @@ fn read_metadata(
         }
         SelectedHarness::Kiro(_)
         | SelectedHarness::Opencode(_)
-        | SelectedHarness::Antigravity(_) => unreachable!(),
+        | SelectedHarness::Antigravity(_)
+        | SelectedHarness::Muse(_)
+        | SelectedHarness::Junie(_)
+        | SelectedHarness::Cursor(_) => unreachable!(),
     };
     let title = title
         .finish()
@@ -491,6 +507,9 @@ pub fn ensure_loaded(
         SelectedHarness::Opencode(_) => {
             report = opencode::index_session(&mut connection, id, &project)?;
         }
+        SelectedHarness::Muse(_) | SelectedHarness::Junie(_) | SelectedHarness::Cursor(_) => {
+            return Err("Local transcripts are not supported for this agent yet.".into());
+        }
     }
     Ok(report)
 }
@@ -561,7 +580,11 @@ mod tests {
             Client::Codex => SelectedHarness::Codex(CodexHarness::new(root.into(), root.into())),
             Client::Pi => SelectedHarness::Pi(PiHarness::new(root.into(), root.into())),
             Client::Kiro => SelectedHarness::Kiro(KiroHarness::new(root.into())),
-            Client::Opencode | Client::Antigravity => unreachable!(),
+            Client::Opencode
+            | Client::Antigravity
+            | Client::Muse
+            | Client::Junie
+            | Client::Cursor => unreachable!(),
         }
     }
 
@@ -603,7 +626,11 @@ mod tests {
                     ],
                 )
             }
-            SelectedHarness::Opencode(_) | SelectedHarness::Antigravity(_) => unreachable!(),
+            SelectedHarness::Opencode(_)
+            | SelectedHarness::Antigravity(_)
+            | SelectedHarness::Muse(_)
+            | SelectedHarness::Junie(_)
+            | SelectedHarness::Cursor(_) => unreachable!(),
         };
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let data = records

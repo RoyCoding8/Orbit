@@ -24,6 +24,7 @@ fn harness(client: Client, root: &Path) -> SelectedHarness {
         Client::Antigravity => SelectedHarness::Antigravity(
             crate::harness::antigravity::AntigravityHarness::new(root.into()),
         ),
+        Client::Muse | Client::Junie | Client::Cursor => unreachable!(),
     }
 }
 

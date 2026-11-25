@@ -22,6 +22,12 @@ pub fn delete(
     if matches!(harness, SelectedHarness::Kiro(_)) {
         return Err("Kiro deletion is unavailable because Orbit cannot yet restore native Kiro V2 session archives.".into());
     }
+    if matches!(
+        harness,
+        SelectedHarness::Muse(_) | SelectedHarness::Junie(_) | SelectedHarness::Cursor(_)
+    ) {
+        return Err("Local transcripts are not supported for this agent yet.".into());
+    }
     let cache = harness.transcript_cache(app);
     let (source, project) = indexed_source(&cache, session_id)?;
     if let SelectedHarness::Antigravity(h) = harness {
@@ -80,7 +86,12 @@ pub fn delete(
                 Path::new(&project),
                 &Default::default(),
             ),
-            SelectedHarness::Kiro(_) => unreachable!("Kiro rejected before archival"),
+            SelectedHarness::Kiro(_)
+            | SelectedHarness::Muse(_)
+            | SelectedHarness::Junie(_)
+            | SelectedHarness::Cursor(_) => {
+                unreachable!("Unsupported harness rejected before archival")
+            }
             SelectedHarness::Antigravity(_) => {
                 unreachable!("Antigravity owns its native backup/deletion lifecycle")
             }

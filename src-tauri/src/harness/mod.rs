@@ -5,16 +5,20 @@ pub mod atomic;
 pub mod claude;
 pub mod codex;
 pub(crate) mod credentials;
+pub mod cursor;
 pub(crate) mod fs_guard;
 pub(crate) mod instruction_store;
 pub(crate) mod json_mcp;
 pub(crate) mod json_store;
+pub mod junie;
 pub mod kiro;
 pub(crate) mod memory_links;
+pub mod muse;
 pub mod opencode;
 pub mod pi;
 pub(crate) mod process_lifetime;
 pub mod selected;
+pub(crate) mod simple;
 pub(crate) mod skill_store;
 
 use std::path::PathBuf;
@@ -47,6 +51,9 @@ pub const KIRO: HarnessId = HarnessId("kiro");
 pub const OPENCODE: HarnessId = HarnessId("opencode");
 pub const PI: HarnessId = HarnessId("pi");
 pub const ANTIGRAVITY: HarnessId = HarnessId("antigravity");
+pub const MUSE: HarnessId = HarnessId("muse");
+pub const JUNIE: HarnessId = HarnessId("junie");
+pub const CURSOR: HarnessId = HarnessId("cursor");
 
 #[derive(Debug, Default, Clone, Copy, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -58,6 +65,9 @@ pub enum Client {
     Opencode,
     Pi,
     Antigravity,
+    Muse,
+    Junie,
+    Cursor,
 }
 
 #[derive(serde::Deserialize)]

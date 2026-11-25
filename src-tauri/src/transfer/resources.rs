@@ -103,13 +103,34 @@ fn harness_spec(harness: &str) -> HarnessSpec {
             managed_keys: &["hooks", "mcpServers"],
             hook_folder: "hooks",
         },
+        "muse" => HarnessSpec {
+            project_dir: ".muse",
+            mcp_pointer: "/mcp_servers",
+            extensions_key: "plugins",
+            managed_keys: &["hooks", "mcp_servers"],
+            hook_folder: "hooks",
+        },
+        "junie" => HarnessSpec {
+            project_dir: ".junie",
+            mcp_pointer: "/mcpServers",
+            extensions_key: "plugins",
+            managed_keys: &["hooks", "mcpServers"],
+            hook_folder: "hooks",
+        },
+        "cursor" => HarnessSpec {
+            project_dir: ".cursor",
+            mcp_pointer: "/mcpServers",
+            extensions_key: "plugins",
+            managed_keys: &["hooks", "mcpServers"],
+            hook_folder: "hooks",
+        },
         _ => unreachable!(),
     }
 }
 
 /// Pure allowlist check for primary instruction archive paths per harness.
 pub fn is_primary_instruction_path(harness: &str, path: &str) -> bool {
-    if !path.ends_with(".md") {
+    if !(path.ends_with(".md") || (harness == "cursor" && path.ends_with(".mdc"))) {
         return false;
     }
     match harness {
@@ -131,6 +152,15 @@ pub fn is_primary_instruction_path(harness: &str, path: &str) -> bool {
             ) || path.ends_with("/AGENTS.md")
                 || path.ends_with("/CLAUDE.md")
         }
+        "muse" => matches!(
+            path,
+            "AGENTS.md" | "CLAUDE.md" | ".agents/AGENTS.md" | ".claude/CLAUDE.md"
+        ),
+        "junie" => {
+            matches!(path, "AGENTS.md" | ".junie/guidelines.md")
+                || path.starts_with(".junie/rules/")
+        }
+        "cursor" => matches!(path, "AGENTS.md" | "CLAUDE.md") || path.starts_with(".cursor/rules/"),
         _ => false,
     }
 }
@@ -258,7 +288,7 @@ fn project_config(harness: &impl Harness, project: &Path) -> PathBuf {
 
 fn skill_root(harness: &impl Harness, project: &Path, scope: Scope) -> PathBuf {
     if scope != Scope::User {
-        if harness.id().0 == "codex" {
+        if matches!(harness.id().0, "codex" | "muse") {
             project.join(".agents/skills")
         } else {
             project_config(harness, project).join("skills")
@@ -292,6 +322,7 @@ fn memory_root(harness: &impl Harness, project: &Path) -> Result<PathBuf, String
                 .join("memory"))
         }
         "codex" => Ok(harness.config_root().join("memories")),
+        "muse" => Ok(project.join(".agents/memory")),
         _ => Err("This harness has no local generated-memory directory".into()),
     }
 }
@@ -316,37 +347,45 @@ fn config_path(
         project_config(harness, project)
     };
     match slot {
-        Slot::Settings => Ok(if scope == Scope::User || harness.id().0 == "antigravity" {
-            harness.settings_path()
-        } else {
-            match harness.id().0 {
-                "claude-code" => root.join(if scope == Scope::Local {
-                    "settings.local.json"
-                } else {
-                    "settings.json"
-                }),
-                "codex" => root.join("config.toml"),
-                "kiro" => root.join("settings/cli.json"),
-                "opencode" => opencode::config::project_config_path(project),
-                "pi" => root.join("settings.json"),
-                _ => unreachable!(),
-            }
-        }),
+        Slot::Settings => Ok(
+            if scope == Scope::User || matches!(harness.id().0, "antigravity" | "muse") {
+                harness.settings_path()
+            } else {
+                match harness.id().0 {
+                    "claude-code" => root.join(if scope == Scope::Local {
+                        "settings.local.json"
+                    } else {
+                        "settings.json"
+                    }),
+                    "codex" => root.join("config.toml"),
+                    "kiro" => root.join("settings/cli.json"),
+                    "opencode" => opencode::config::project_config_path(project),
+                    "pi" => root.join("settings.json"),
+                    "junie" => root.join("config.json"),
+                    "cursor" => root.join("cli.json"),
+                    _ => unreachable!(),
+                }
+            },
+        ),
         Slot::Mcp => Ok(if scope == Scope::User {
             harness.mcp_path()
         } else {
             match harness.id().0 {
                 "claude-code" => project.join(".mcp.json"),
-                "codex" | "opencode" => {
+                "codex" | "opencode" | "muse" => {
                     return config_path(harness, project, scope, &Slot::Settings)
                 }
                 "kiro" => root.join("settings/mcp.json"),
-                "pi" => root.join("mcp.json"),
+                "pi" | "cursor" => root.join("mcp.json"),
+                "junie" => root.join("mcp/mcp.json"),
                 "antigravity" => root.join("mcp_config.json"),
                 _ => unreachable!(),
             }
         }),
-        Slot::Hooks if matches!(harness.id().0, "codex" | "antigravity") => {
+        Slot::Hooks
+            if matches!(harness.id().0, "codex" | "antigravity" | "cursor")
+                || (harness.id().0 == "muse" && scope == Scope::Project) =>
+        {
             Ok(root.join("hooks.json"))
         }
         Slot::Agent { name } if harness.id().0 == "kiro" => {
@@ -979,7 +1018,7 @@ fn collect_config(
     if selected.contains(&Category::Hooks) {
         if matches!(
             harness.id().0,
-            "claude-code" | "codex" | "kiro" | "antigravity"
+            "claude-code" | "codex" | "kiro" | "antigravity" | "muse" | "junie" | "cursor"
         ) && doc.get("hooks").is_some()
         {
             parts.push((Category::Hooks, Section::Hooks, "Hooks".into()));
@@ -1043,7 +1082,7 @@ pub(super) fn collect(
                 add_tree(&mut bundle, harness.id().0, &root, scope, Area::Skills, "")?;
             }
         }
-        if harness.id().0 != "antigravity" || scope == Scope::User {
+        if !matches!(harness.id().0, "antigravity" | "muse") || scope == Scope::User {
             collect_config(
                 &mut bundle,
                 harness,
@@ -1055,13 +1094,15 @@ pub(super) fn collect(
         }
         if matches!(
             harness.id().0,
-            "claude-code" | "kiro" | "pi" | "antigravity"
+            "claude-code" | "kiro" | "pi" | "antigravity" | "junie" | "cursor"
         ) && selected.contains(&Category::Mcps)
         {
             collect_config(&mut bundle, harness, project, scope, Slot::Mcp, selected)?;
         }
         if selected.contains(&Category::Hooks) {
-            if matches!(harness.id().0, "codex" | "antigravity") {
+            if matches!(harness.id().0, "codex" | "antigravity" | "cursor")
+                || (harness.id().0 == "muse" && scope == Scope::Project)
+            {
                 collect_config(
                     &mut bundle,
                     harness,
@@ -1077,7 +1118,10 @@ pub(super) fn collect(
                 project_config(harness, project)
             };
             let folder = harness_spec(harness.id().0).hook_folder;
-            if !matches!(harness.id().0, "codex" | "antigravity") {
+            if !matches!(
+                harness.id().0,
+                "codex" | "antigravity" | "muse" | "junie" | "cursor"
+            ) {
                 add_tree(
                     &mut bundle,
                     harness.id().0,
@@ -1123,7 +1167,7 @@ pub(super) fn collect(
     }
     if selected.contains(&Category::Memories) {
         let catalog = harness.memory_catalog(project)?;
-        let auto = if matches!(harness.id().0, "claude-code" | "codex") {
+        let auto = if matches!(harness.id().0, "claude-code" | "codex" | "muse") {
             match memory_root(harness, project) {
                 Ok(root) => Some(root.canonicalize().unwrap_or(root)),
                 Err(error) => {

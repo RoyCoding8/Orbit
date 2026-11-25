@@ -92,6 +92,15 @@ pub fn convert(
     if matches!(target, SelectedHarness::Kiro(_)) {
         return Err("Kiro does not expose a verified transcript import API. Kiro v2 chats can be converted to other agents, but Kiro cannot be a conversion destination.".into());
     }
+    if matches!(
+        source,
+        SelectedHarness::Muse(_) | SelectedHarness::Junie(_) | SelectedHarness::Cursor(_)
+    ) || matches!(
+        target,
+        SelectedHarness::Muse(_) | SelectedHarness::Junie(_) | SelectedHarness::Cursor(_)
+    ) {
+        return Err("Local transcripts are not supported for this agent yet.".into());
+    }
     let (stage, mut chat) = snapshot(source, app, session)?;
     if project.is_none() && chat.cwd.trim().is_empty() {
         return Err(
@@ -208,6 +217,9 @@ fn decode(source: &SelectedHarness, root: &Path) -> Result<Conversation, String>
         }
         SelectedHarness::Pi(_) => decode_pi(&read_lines(&root.join("session.jsonl"))?),
         SelectedHarness::Opencode(_) => decode_opencode(&read_json(&root.join("session.json"))?),
+        SelectedHarness::Muse(_) | SelectedHarness::Junie(_) | SelectedHarness::Cursor(_) => {
+            Err("Local transcripts are not supported for this agent yet.".into())
+        }
         SelectedHarness::Kiro(_) => {
             let raw_id = required(&manifest, "sourceSessionId")?;
             let id = raw_id.strip_prefix("kiro-v2:").unwrap_or(raw_id);
@@ -935,6 +947,9 @@ fn encode(target: &SelectedHarness, chat: &Conversation, root: &Path) -> Result<
             )
         }
         SelectedHarness::Kiro(_) => Err("Kiro transcript import is unavailable.".into()),
+        SelectedHarness::Muse(_) | SelectedHarness::Junie(_) | SelectedHarness::Cursor(_) => {
+            Err("Local transcripts are not supported for this agent yet.".into())
+        }
         SelectedHarness::Antigravity(_) => {
             let turns: Vec<_> = chat.turns.iter().map(|turn| json!({"role":turn.role.name(),"content":turn.content.iter().map(|block| match block {
                 Content::Text(text) => json!({"type":"text","text":text}),

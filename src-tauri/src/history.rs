@@ -719,6 +719,9 @@ fn target_scope(
             | crate::harness::OPENCODE
             | crate::harness::PI
             | crate::harness::ANTIGRAVITY
+            | crate::harness::MUSE
+            | crate::harness::JUNIE
+            | crate::harness::CURSOR
     ) {
         return native_target_scope(harness, config_root, project, row, target);
     }
@@ -933,9 +936,10 @@ fn native_target_scope(
 ) -> Option<TargetScope> {
     let resource = row.resource_kind.as_str();
     let project = canonical_location(project)?;
-    let is_kiro = harness.id() == crate::harness::KIRO;
-    let is_pi = harness.id() == crate::harness::PI;
-    let antigravity = if harness.id() == crate::harness::ANTIGRAVITY {
+    let id = harness.id();
+    let is_kiro = id == crate::harness::KIRO;
+    let is_pi = id == crate::harness::PI;
+    let antigravity = if id == crate::harness::ANTIGRAVITY {
         Some(crate::harness::antigravity::AntigravityHarness::new(
             canonical_location(harness.user_home()?)?,
         ))
@@ -965,6 +969,18 @@ fn native_target_scope(
             [config, &project.join(".pi")]
                 .into_iter()
                 .any(|root| target == root.join("settings.json") || target == root.join("mcp.json"))
+        } else if id == crate::harness::MUSE {
+            target == config.join("settings.json") || target == project.join(".muse/hooks.json")
+        } else if id == crate::harness::JUNIE {
+            [config, &project.join(".junie")].into_iter().any(|root| {
+                target == root.join("config.json") || target == root.join("mcp/mcp.json")
+            })
+        } else if id == crate::harness::CURSOR {
+            target == config.join("cli-config.json")
+                || target == project.join(".cursor/cli.json")
+                || [config, &project.join(".cursor")].into_iter().any(|root| {
+                    target == root.join("mcp.json") || target == root.join("hooks.json")
+                })
         } else {
             [config, &project, &project.join(".opencode")]
                 .into_iter()
@@ -974,7 +990,10 @@ fn native_target_scope(
         };
         return owned.then(|| scope(VersionKind::File));
     }
-    if matches!(resource, "globalinstructions" | "projectinstructions") {
+    if matches!(
+        resource,
+        "globalinstructions" | "projectinstructions" | "memory"
+    ) {
         let owned = if let Some(h) = &antigravity {
             crate::harness::antigravity::memories::allowed_instruction_path(h, &project, target)
         } else if is_kiro {
@@ -988,6 +1007,27 @@ fn native_target_scope(
             let home = canonical_location(harness.user_home()?)?;
             crate::harness::pi::memories::allowed_instruction_path(
                 &crate::harness::pi::PiHarness::new(config.to_path_buf(), home),
+                &project,
+                target,
+            )
+        } else if id == crate::harness::MUSE {
+            let home = canonical_location(harness.user_home()?)?;
+            crate::harness::muse::memories::allowed_instruction_path(
+                &crate::harness::muse::MuseHarness::new(config.to_path_buf(), home),
+                &project,
+                target,
+            )
+        } else if id == crate::harness::JUNIE {
+            let home = canonical_location(harness.user_home()?)?;
+            crate::harness::junie::memories::allowed_instruction_path(
+                &crate::harness::junie::JunieHarness::new(config.to_path_buf(), home),
+                &project,
+                target,
+            )
+        } else if id == crate::harness::CURSOR {
+            let home = canonical_location(harness.user_home()?)?;
+            crate::harness::cursor::memories::allowed_instruction_path(
+                &crate::harness::cursor::CursorHarness::new(config.to_path_buf(), home),
                 &project,
                 target,
             )
@@ -1023,6 +1063,27 @@ fn native_target_scope(
             let home = canonical_location(harness.user_home()?)?;
             crate::harness::pi::skills::allowed_skill_path(
                 &crate::harness::pi::PiHarness::new(config.to_path_buf(), home),
+                &project,
+                target,
+            )
+        } else if id == crate::harness::MUSE {
+            let home = canonical_location(harness.user_home()?)?;
+            crate::harness::muse::skills::owned(
+                &crate::harness::muse::MuseHarness::new(config.to_path_buf(), home),
+                &project,
+                target,
+            )
+        } else if id == crate::harness::JUNIE {
+            let home = canonical_location(harness.user_home()?)?;
+            crate::harness::junie::skills::owned(
+                &crate::harness::junie::JunieHarness::new(config.to_path_buf(), home),
+                &project,
+                target,
+            )
+        } else if id == crate::harness::CURSOR {
+            let home = canonical_location(harness.user_home()?)?;
+            crate::harness::cursor::skills::owned(
+                &crate::harness::cursor::CursorHarness::new(config.to_path_buf(), home),
                 &project,
                 target,
             )
