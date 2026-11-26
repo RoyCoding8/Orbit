@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.6.0
+
+### Added
+
+- In-app automatic updates powered by `tauri-plugin-updater` and `tauri-plugin-process`, with a topbar **Check for updates** control, silent startup checks, and Ed25519 signature verification against GitHub Releases (`latest.json`).
+- Release workflow support for signed updater artifacts (`.sig`, `latest.json`), `SHA256SUMS.txt` checksums, architecture-disambiguated macOS updater archives, and a `prerelease` workflow toggle.
+- Expanded offline test coverage across all 9 harnesses, including Pi and Codex chat deletion, `simple.rs` negative paths, Muse MCP credential preservation, and end-to-end History and Setup Transfer round-trips for Muse Code, Junie CLI, and Cursor CLI.
+
+### Changed
+
+- Updated `README.md`, `docs/reference.md`, `CONTRIBUTING.md`, and `formal/README.md` for all 9 native agents and the in-app updater, with a Table of Contents and collapsible per-agent sections in `docs/reference.md`.
+
+### Fixed
+
+- Fixed a trailing-slash bug in `history::canonical_location` that caused `ENOTDIR` on existing files and made Muse Code, Junie CLI, and Cursor CLI memory and skill history entries non-restorable.
+- Fixed setup transfer validation to accept Muse Code `.agents/memory/*.md` bundles, Cursor `.cursor/rules/*.mdc` files, and hook exports for Muse Code, Junie CLI, and Cursor CLI.
+- Fixed setup transfer imports into fresh Muse Code `settings.json` and Cursor `hooks.json` files to preserve `schema_version: 1` and `version: 1`.
+
 ## 0.5.1
 
 ### Added

@@ -15,11 +15,11 @@ The development server runs at `http://127.0.0.1:1420`. For release packages, se
 
 ## Repository layout
 
-- `src/` — Frontend source organized into `components/`, `lib/`, `pages/`, and `styles/`
-- `tests/frontend/` — Vitest + Testing Library suites and `test-setup.ts`
-- `src-tauri/` — Tauri v2 backend (`src/harness/`, `src/transcript/`, `src/transfer/`, `schemas/`)
-- `orbit-core/` — Dependency-free pure-Rust invariants shared by `src-tauri/` and `formal/`
-- `formal/` — Kani 0.68.0 proof harnesses (`formal/run.sh`, `formal/README.md`)
+- `src/`: Frontend source organized into `components/`, `lib/`, `pages/`, and `styles/`
+- `tests/frontend/`: Vitest + Testing Library suites and `test-setup.ts`
+- `src-tauri/`: Tauri v2 backend (`src/harness/`, `src/transcript/`, `src/transfer/`, `schemas/`)
+- `orbit-core/`: Dependency-free pure-Rust invariants shared by `src-tauri/` and `formal/`
+- `formal/`: Kani 0.68.0 proof harnesses (`formal/run.sh`, `formal/README.md`)
 
 ## Platform setup
 
@@ -73,7 +73,9 @@ cargo clippy --manifest-path formal/Cargo.toml -- -D warnings
 ./formal/run.sh
 ```
 
-GitHub Actions runs the frontend and Rust checks on Ubuntu, macOS, and Windows for pushes and pull requests. The manually dispatched Release workflow builds platform packages and creates a draft prerelease using the version in `src-tauri/tauri.conf.json`.
+GitHub Actions (`.github/workflows/ci.yml`) runs the frontend and Rust checks on Ubuntu, macOS, and Windows for pushes and pull requests.
+
+The manually dispatched Release workflow (`.github/workflows/release.yml`) builds packages for Windows (x64, arm64), Linux (x64, arm64), and macOS (arm64, x64) and creates a draft GitHub Release using the version in `src-tauri/tauri.conf.json`, with an optional `prerelease` input (defaults to `false`). When `TAURI_SIGNING_PRIVATE_KEY` (and optional `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) repository secrets are configured, it signs updater artifacts and generates `latest.json` for in-app updates alongside `SHA256SUMS.txt`.
 
 ## Native integration tests
 

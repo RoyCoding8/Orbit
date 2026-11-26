@@ -1,89 +1,207 @@
-# Orbit reference
+# Orbit Reference
 
 [Back to Orbit](../README.md)
+
+## Contents
+
+- [Agent support](#agent-support)
+- [Configuration and memory files](#configuration-and-memory-files)
+- [Per-agent notes (expandable)](#per-agent-notes)
+- [Chats](#chats)
+- [Setup export and import](#setup-export-and-import)
+- [Stored data and command execution](#stored-data-and-command-execution)
 
 ## Agent support
 
 Orbit works with each agent's native files and installed CLI. Features vary by agent:
 
-| Area | Claude Code | Codex | Kiro | OpenCode v2 | Pi | Antigravity |
-|---|---|---|---|---|---|---|
-| Skills | User skills and visibility controls | User, project, and plugin discovery; enable/disable | User/project skills | Native and shared skills | Folders and standalone Markdown skills | Shared and CLI-only skills; discovery manifests |
-| Memories and instructions | Project auto-memory and Claude instructions | Shared memory Markdown and scoped AGENTS instructions | Steering and AGENTS instructions | AGENTS and configured local instructions | AGENTS/CLAUDE hierarchy and system prompts | AGENTS, GEMINI, and modular rules |
-| MCP | Local and HTTP servers | Local and HTTP servers | Local and HTTP servers | Native v2 `mcp.servers` | Local and streamable HTTP servers | Shared local and streamable HTTP servers |
-| Hooks | Command editing, toggles, tests | Command editing and tests; native approval | V2 agent profiles and V3 profiles plus standalone `.kiro/hooks/*.json` files | Plugin list in Settings | Extension list in Settings | Named command groups, toggles, tests |
-| Settings | User/project/local JSON | User/trusted project TOML | User/project CLI JSON | User/project JSON or JSONC | User/project JSON | User-wide CLI preferences |
-| Chat archives | Export/import | Export/import | V2 ACP source backup only | Export/import through native v2 CLI | Export/import of v3 JSONL sessions | App/CLI export/import through agy 1.5.0 |
-| Chat conversion | Source and destination | Source and destination | V2 ACP source only | Source and destination | Source and destination | Source and CLI destination |
-| Chat deletion | With backup | With backup | Unavailable | Chats without children | With backup | With backup; unlinked, inactive chats |
+| Area | Claude Code | Codex | Kiro | OpenCode v2 | Pi | Antigravity | Muse Code | Junie CLI | Cursor CLI |
+|---|---|---|---|---|---|---|---|---|---|
+| **Skills** | User + visibility toggles | User, project, plugin + toggles | User and project | Native and shared | Folders and standalone `.md` | Shared, CLI-only, manifests | User, shared (RO), project | User and project | User, built-in (RO), project |
+| **Memories & instructions** | Auto-memory + `CLAUDE.md` | Shared memory + `AGENTS.md` | Steering + `AGENTS.md` | `AGENTS.md` + configured local | `AGENTS`/`CLAUDE` + `SYSTEM.md` | `AGENTS`/`GEMINI` + rules | `AGENTS`/`CLAUDE` + `.agents/memory` | `AGENTS.md`, guidelines, `.junie/rules` | `AGENTS`/`CLAUDE` + `.cursor/rules/*.{md,mdc}` |
+| **MCP** | Local and HTTP | Local and HTTP | Local and HTTP | Native v2 `mcp.servers` | Local and streamable HTTP | Shared local and HTTP | `mcp_servers` in `settings.json` | `mcpServers` in `mcp/mcp.json` | `mcpServers` in `mcp.json` |
+| **Hooks** | Edit, toggle, test | Edit, test (native approval) | V2/V3 profiles + `.kiro/hooks/*.json` | Plugin list in Settings | Extension list in Settings | Named groups, toggle, test | 17 events (user and project) | 10 events (user only) | 21 events (user and project) |
+| **Settings** | User, project, local JSON | User and trusted project TOML | User and project JSON | User and project JSON/JSONC | User and project JSON | User CLI JSON | User JSON (`schema_version: 1`) | User and project JSON | User JSON (`version: 1`) + project `permissions` |
+| **Chat archives** | Export and import | Export and import | V2 ACP export only | Native v2 CLI | V3 JSONL sessions | App and CLI (`agy 1.5.0`) | Unavailable | Unavailable | Unavailable |
+| **Chat conversion** | Source and dest | Source and dest | V2 ACP source only | Source and dest | Source and dest | Source and CLI dest | Unavailable | Unavailable | Unavailable |
+| **Chat deletion** | With backup | With backup | Unavailable | Leaf chats only | With backup | Inactive, unlinked chats | Unavailable | Unavailable | Unavailable |
 
-History provides saved versions, restoration, backup deletion, and separate operation logs for supported local resources.
+<details>
+<summary><strong>General capability notes</strong></summary>
 
-Orbit does not offer individual skill availability controls for Kiro, OpenCode, Pi, or Antigravity; removal saves a restorable version. Inherited resources outside the selected project are read-only. MCP editing covers user configuration; project and runtime overrides can affect the running agent.
+- **History:** Provides saved versions, restoration, backup deletion, and separate operation logs for all supported local resources.
+- **Skill toggles:** Only Claude Code and Codex support individual skill enable/disable toggles; for all other agents, uninstalling saves a restorable version in History.
+- **Read-only items:** Inherited resources outside the selected project and built-in/shared skill folders are read-only.
+- **MCP scope:** MCP editing targets user configuration; project and runtime overrides can still affect the running agent.
+- **Generated memory:** Kiro's learned memory lives in a local DB under `KIRO_HOME` that Orbit does not edit. OpenCode, Pi, Junie CLI, and Cursor CLI have no built-in generated-memory file catalog. OpenCode plugins and Pi extensions are managed in Settings rather than the command-hook editor.
 
-Kiro's learned memories live in a local memory database under `KIRO_HOME` managed by Kiro, which Orbit does not read or edit; steering and AGENTS instructions remain covered by Orbit. OpenCode and Pi have no built-in generated-memory file catalog. OpenCode plugins and Pi extensions are configured in Settings; their code is managed outside the command-hook editor.
+</details>
+
+## Configuration and memory files
+
+Select a project folder to inspect its instructions, skills, and settings (Orbit starts in its launch directory). Skills copied into native folders are discovered automatically.
+
+| Agent | User configuration | Project configuration |
+|---|---|---|
+| **Claude Code** | Native Claude dir (`CLAUDE_CONFIG_DIR`) | `CLAUDE.md` and `.claude/` files |
+| **Codex** | `CODEX_HOME` (default `~/.codex`) | `AGENTS.md` and `.codex/` settings |
+| **Kiro** | `KIRO_HOME` (default `~/.kiro`) | `.kiro/` and `AGENTS.md` files |
+| **OpenCode v2** | `XDG_CONFIG_HOME/opencode` (default `~/.config/opencode`) | `opencode.json[c]` and `.opencode/opencode.json[c]` |
+| **Pi** | `PI_CODING_AGENT_DIR` (default `~/.pi/agent`) | `.pi/` settings and instruction files |
+| **Antigravity** | `~/.gemini/config` (shared) and `~/.gemini/antigravity-cli` (CLI) | `.agents/` customizations and native aliases |
+| **Muse Code** | `MUSE_CONFIG_DIR` or `XDG_CONFIG_HOME/muse` (default `~/.config/muse`), shared RO `~/.agents/skills` | `AGENTS.md`, `CLAUDE.md`, `.agents/AGENTS.md`, `.claude/CLAUDE.md`, `.agents/skills`, `.agents/memory/*.md`, `.muse/hooks.json` |
+| **Junie CLI** | `JUNIE_HOME` (default `~/.junie`: `config.json`, `mcp/mcp.json`, `skills/`, `AGENTS.md`) | `.junie/config.json`, `.junie/skills/`, `AGENTS.md`, `.junie/guidelines.md`, `.junie/rules/*.md` |
+| **Cursor CLI** | `CURSOR_CONFIG_DIR` or `XDG_CONFIG_HOME/cursor` on Linux/BSD (default `~/.cursor`), built-in RO `skills-cursor/` | `.cursor/cli.json`, `.cursor/hooks.json`, `.cursor/skills/`, `.cursor/rules/*.{md,mdc}`, `AGENTS.md`, `CLAUDE.md` |
+
+## Per-agent notes
+
+Expand any agent below for native format rules, limits, and edge cases.
+
+<details>
+<summary><strong>Claude Code</strong></summary>
+
+- Auto-memory is project-scoped, including files stored under the user configuration directory.
+- Linked files and `@` instruction imports appear alongside their source files.
+- Disabled MCP servers and disabled hook records are stored in Orbit's app-data directory so native settings stay clean.
+
+</details>
+
+<details>
+<summary><strong>OpenAI Codex</strong></summary>
+
+- Instructions follow `AGENTS.override.md`, `AGENTS.md`, and configured fallback precedence through the repository hierarchy.
+- Orbit edits Markdown under `CODEX_HOME/memories` (indexes, summaries, raw inputs, and supporting notes). Section edits share one draft with the whole-file editor, and saved edits have restorable versions in History. Git metadata and linked paths are excluded. Codex can regenerate memory files and replace manual edits; Orbit does not reset memory generation state.
+- Settings preserve TOML keys and comments; previews include user and trusted project sources. Plugin and system skills remain read-only. Approve Codex hook changes through its native `/hooks` flow.
+
+</details>
+
+<details>
+<summary><strong>Kiro</strong></summary>
+
+- Steering and `AGENTS.md` instructions are editable; Kiro's local learned memory database under `KIRO_HOME` is managed by Kiro and not edited by Orbit.
+- Hooks support both legacy V2 agent profiles and V3 profiles plus standalone `.kiro/hooks/*.json` files. Markdown agent hook profiles are listed read-only.
+- Chat support covers local V2 ACP sessions under `KIRO_HOME/sessions/cli` (export only; V3, terminal, and cloud sessions use separate stores with no documented client layout).
+
+</details>
+
+<details>
+<summary><strong>OpenCode v2</strong></summary>
+
+- Settings preserve JSONC comments. Remote configuration, instruction URLs, globs, and runtime plugin configuration are not expanded by Orbit's file editor.
+- Plugins are configured in Settings rather than the command-hook editor.
+- Chat listing discovers projects known to the native v2 CLI, including child sessions.
+
+</details>
+
+<details>
+<summary><strong>Pi</strong></summary>
+
+- Follows one instruction file per directory through the ancestor hierarchy. Project `SYSTEM.md` replaces the global system prompt; `APPEND_SYSTEM.md` adds instructions.
+- Local skill folders and standalone Markdown skills are editable. Package expansion, glob filters, project trust, and authentication remain managed by Pi.
+- Settings previews merge nested settings and combine resource lists; CLI flags, environment variables, profiles, and native policy can still override runtime behavior.
+- MCP supports local stdio and streamable HTTP servers (SSE is rejected).
+
+</details>
+
+<details id="antigravity">
+<summary><strong>Antigravity</strong></summary>
+
+- **Customizations:** Shared files under `~/.gemini/config/` serve the App and CLI. Orbit also discovers CLI-only skill folders and project `.agents/`, `.agent/`, `_agents/`, and `_agent/` locations following native manifests and inclusion/exclusion lists. Duplicate skill names stay visible; Antigravity decides which version loads.
+- **Instructions & rules:** Includes user `AGENTS.md` and `GEMINI.md`, shared-config equivalents, and project ancestors. Modular rules show their native trigger. Built-in resources, plugins, repository personal folders, and internal generated knowledge remain managed by Antigravity.
+- **Settings & MCP:** Settings edit `~/.gemini/antigravity-cli/settings.json` (App preferences stay in Antigravity). User MCP edits `~/.gemini/config/mcp_config.json` (project MCP files can be included in setup backups). Remote servers accept `serverUrl` or `url`. OAuth and runtime-dependent authentication are handled in Antigravity.
+- **Hooks:** Uses named groups in `hooks.json` without a top-level `hooks` wrapper. Toggling one command changes its whole group; commands sharing a matcher also share matcher edits. Native hook payloads use camelCase fields.
+- **Chats (`agy 1.5.0`):** Chat import, restoration, deletion, and incoming conversion require **agy 1.5.0** with App and CLI sessions closed (browsing and export work for compatible local formats on other versions). Archives bundle a consistent `session.db` snapshot (including WAL), checksummed `manifest.json` + annotations, and chat-owned files under `brain/<id>`. Restoration preserves the original App/CLI store and internal ID; deletion refuses changed, active, parent/child, or battle-linked chats.
+- **Upstream docs:** [customization discovery](https://antigravity.google/docs/customization-discovery), [rules](https://antigravity.google/docs/rules), [hooks](https://antigravity.google/docs/hooks), [MCP](https://antigravity.google/docs/mcp), [CLI reference](https://antigravity.google/docs/cli/reference).
+
+</details>
+
+<details>
+<summary><strong>Muse Code</strong></summary>
+
+- **Settings:** User-scoped in `settings.json` (under `MUSE_CONFIG_DIR`, `XDG_CONFIG_HOME/muse`, or `~/.config/muse`). Orbit always preserves `schema_version: 1`.
+- **MCP:** Stored under `mcp_servers` in `settings.json` (`stdio` or `streamable_http`), with per-server `enabled` toggles and optional `mode` (`required` or `optional`).
+- **Skills:** Discovered from `<config_root>/skills` (editable), `~/.agents/skills` (read-only), and project `.agents/skills` (editable).
+- **Instructions & memory:** Covers `AGENTS.md`, `CLAUDE.md`, `.agents/AGENTS.md`, `.claude/CLAUDE.md`, and `.agents/memory/*.md` (`MEMORY.md` as index, sibling `.md` files as topics).
+- **Hooks:** Matcher groups across 17 lifecycle events (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `PreLLMCall`, `PostLLMCall`, `PreCompact`, `PostCompact`, `SubagentStart`, `SubagentStop`, `Notification`, `Stop`, `StopFailure`, `SessionEnd`). User hooks live in `settings.json` (preserving `schema_version: 1`); project hooks live in `.muse/hooks.json`.
+
+</details>
+
+<details>
+<summary><strong>Junie CLI</strong></summary>
+
+- **Settings:** Resolves user dir from `JUNIE_HOME` (default `~/.junie`). Merges user `~/.junie/config.json` with project `.junie/config.json` (project overrides user).
+- **MCP:** Stored under `mcpServers` in `~/.junie/mcp/mcp.json` (`stdio` or `http`).
+- **Skills:** Discovered from `~/.junie/skills` and project `.junie/skills`.
+- **Instructions:** Covers user `~/.junie/AGENTS.md` plus project `AGENTS.md`, `.junie/guidelines.md`, and `.junie/rules/*.md`.
+- **Hooks:** Matcher groups across 10 events (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart`, `SubagentStop`, `PreCompact`, `Notification`, `Stop`, `SessionEnd`) in `~/.junie/config.json`. Junie CLI ignores project hooks for safety, so Orbit restricts hook edits to user scope.
+
+</details>
+
+<details>
+<summary><strong>Cursor CLI</strong></summary>
+
+- **Settings:** Resolves user dir from `CURSOR_CONFIG_DIR`, then `XDG_CONFIG_HOME/cursor` on Linux/BSD, defaulting to `~/.cursor`. User settings live in `cli-config.json` (preserving `version: 1`). Project `.cursor/cli.json` supports only the `permissions` key.
+- **MCP:** Stored under `mcpServers` in `~/.cursor/mcp.json` (`stdio` or `http`).
+- **Skills:** Discovered from `~/.cursor/skills` (editable), `~/.cursor/skills-cursor` (read-only built-in), and project `.cursor/skills` (editable).
+- **Instructions & rules:** Covers `AGENTS.md`, `CLAUDE.md`, and `.cursor/rules/*.{md,mdc}`.
+- **Hooks:** Flat command list across 21 camelCase events (`sessionStart`, `sessionEnd`, `preToolUse`, `postToolUse`, `postToolUseFailure`, `subagentStart`, `subagentStop`, `beforeShellExecution`, `afterShellExecution`, `beforeMCPExecution`, `afterMCPExecution`, `beforeReadFile`, `afterFileEdit`, `beforeSubmitPrompt`, `preCompact`, `stop`, `afterAgentResponse`, `afterAgentThought`, `beforeTabFileRead`, `afterTabFileEdit`, `workspaceOpen`) in user `~/.cursor/hooks.json` and project `.cursor/hooks.json`, preserving `version: 1`.
+
+</details>
 
 ## Chats
 
-### Browse and search
+Open **Chats** to browse sessions grouped by working directory. Orbit reads metadata first and lazy-loads each conversation on demand. Use **Index chats** to build SQLite FTS5 message search, **Search message text** to query indexed chats, and **Refresh chats** to discover new sessions.
 
-Open **Chats** to list sessions grouped by their recorded working directory. Orbit reads chat metadata first and loads a conversation when opened. Project groups collapse within the chat list.
+*(Muse Code, Junie CLI, and Cursor CLI do not have a supported local transcript format in Orbit yet.)*
 
-Choose **Index chats** to build message search across the catalog. A progress bar shows indexing progress, and indexed chats are marked in the list. Opening a conversation also makes its messages searchable. **Search message text** searches indexed content. Choose **Refresh chats** to discover newly created sessions.
+<details>
+<summary><strong>Browse, index, and agent-specific discovery rules</strong></summary>
 
-OpenCode v2 lists projects known to its native CLI, including child sessions. Pi lists its default session folders and the selected project's configured session directory. Select a project and refresh to include its custom directory; previously indexed custom projects remain visible. Unknown custom directories and explicit CLI session-directory overrides are not discovered automatically.
+- Project groups collapse inside the chat list. Opening a conversation also indexes its messages for search.
+- **OpenCode v2** lists projects known to its native CLI, including child sessions.
+- **Pi** lists its default session folders plus the selected project's configured session directory. Select a project and refresh to include its custom directory; previously indexed custom projects stay visible.
+- **Kiro** reads local V2 ACP sessions from `KIRO_HOME/sessions/cli`. Kiro CLI 3.x defaults to V3, whose sessions live in a separate undocumented store, so V3, terminal, and cloud sessions are excluded.
 
-Orbit reads local V2 ACP sessions from `KIRO_HOME/sessions/cli`. Kiro CLI 3.x defaults to V3, whose sessions live in a separate store with no documented client layout (upstream points clients to session APIs and `/chat save` zip archives), so V3, terminal, and cloud sessions are not included.
+</details>
 
-### Export and import
+<details>
+<summary><strong>Export and import chat archives</strong></summary>
 
-A **chat archive is a folder** containing the native session files and migration metadata. It differs from a [setup backup](#setup-export-and-import), which is a ZIP of configuration resources.
+A **chat archive is a folder** containing native session files and migration metadata (distinct from a [setup backup](#setup-export-and-import), which is a ZIP).
 
-1. Open a chat and choose **Export [agent] archive**, then choose where to save it.
-2. To import, select the matching agent and choose **Import [agent] archive**.
-3. Choose the archive folder and the destination project.
+1. Open a chat and choose **Export [agent] archive**, then pick a destination folder.
+2. To import, select the matching agent, choose **Import [agent] archive**, and pick the archive folder and destination project.
 
-Duplicate chat titles receive numeric suffixes. External files referenced by a chat are not bundled. Native archives preserve the source agent's session structure; **Export Markdown** produces a separate readable copy.
+Duplicate chat titles receive numeric suffixes. External files referenced by a chat are not bundled. **Export Markdown** writes a separate readable copy. Kiro offers source backup export only (use Kiro's `/chat save` and `/chat load` for native archives). Antigravity import preserves the original App or CLI store and internal ID and refuses duplicate IDs.
 
-Kiro offers source backup export only. Use its interactive `/chat save` and `/chat load` commands for its native archive workflow. Antigravity import preserves the source App or CLI store and internal ID; an existing ID cannot be imported again.
+</details>
 
-### Convert between agents
+<details>
+<summary><strong>Convert chats between agents</strong></summary>
 
-Open a chat and choose **Convert chat**. Select the destination agent and optionally change the working directory. By default, conversion uses the source chat's recorded directory. A source without a working directory requires an explicit destination. The new chat is separate from the source, which stays unchanged.
+Open a chat, choose **Convert chat**, pick the destination agent, and optionally change the working directory (defaults to the source chat's directory; required if the source has none). The original chat stays unchanged.
 
-Conversion transfers conversation text and supported inline images from the latest active branch. Other branches remain in the source. Historical tool activity is represented as text where supported; Antigravity tool steps are omitted. Signed reasoning, source system/developer instructions, and runtime state do not transfer. Conversion creates conversation history, not an executable copy of the source agent's tool state.
+- Transfers conversation text and supported inline images from the latest active branch (other branches stay in the source).
+- Historical tool activity is represented as text where supported (omitted for Antigravity). Signed reasoning, system/developer instructions, and runtime state do not transfer.
+- External attachments stay as references; available Codex image archive assets can be embedded.
+- Resolve partial OpenCode revert boundaries in OpenCode before converting. Kiro can be a source but not a destination.
 
-External attachments remain references; available Codex image archive assets can be embedded. The conversion dialog describes the content being transferred. Resolve partial OpenCode revert boundaries in OpenCode before converting. Kiro can be a source but not a destination.
+</details>
 
-### Delete and restore
+<details>
+<summary><strong>Delete and restore chats</strong></summary>
 
-Deleting a supported chat first saves a native archive in a folder you choose. Restore it using **Import [agent] archive**. Close the native chat before deleting it.
+Deleting a supported chat saves a native archive backup first in a folder you choose. Restore it later with **Import [agent] archive**. Close the native chat before deleting.
 
-Kiro deletion is unavailable because its backups cannot be imported through Orbit. OpenCode chats with children cannot be deleted individually: native deletion would also remove the children. Antigravity requires the App and CLI sessions to be closed and refuses active or linked chats.
+- **Kiro:** Deletion is unavailable (its backups cannot be imported through Orbit).
+- **OpenCode:** Chats with children cannot be deleted individually.
+- **Antigravity:** Requires App and CLI sessions to be closed and refuses changed, active, parent/child, or battle-linked chats.
 
-### Antigravity
-
-Antigravity chat import, restoration, deletion, and incoming conversion require **agy 1.5.0**, with the App and CLI sessions closed. Other CLI versions can still use browsing and export for compatible local formats.
-
-Orbit lists App and CLI chats from their local catalogs and reads conversation content on demand. Legacy IDE and cloud stores are excluded. An archive contains:
-
-- A consistent `session.db` snapshot, including committed SQLite WAL changes.
-- A checksummed `manifest.json` and native annotations.
-- Files owned by the chat under its `brain/<id>` folder.
-
-External files and installation-wide runtime state are excluded. Older database-only archives can be imported, but cannot restore artifacts they never contained.
-
-Restoration preserves the original App or CLI store and internal chat ID. An already-present ID is refused; different chats with the same title receive numeric suffixes. Incoming conversion creates a new CLI chat and transfers user/assistant text and supported inline images. Tool steps, private reasoning, and external artifacts are omitted. Deletion requires a complete backup and refuses changed, active, parent/child, or battle-linked chats.
+</details>
 
 ## Setup export and import
 
-Choose **Export setup** in the header, select a project, and check the categories to save: skills, hooks, MCP servers, memories, or settings. **Select all** includes every available category. Choose **Save backup** to create a ZIP.
-
-To import a setup:
-
-1. Select the same agent the backup came from, choose **Import setup**, and open the ZIP. Cross-agent setup imports are not supported.
-2. Choose **Current project** or **User-wide**, where available. **Change project** selects another folder; **Import destination** can keep user-wide and project items separate.
-3. Expand the categories, check individual items, review their destinations, and choose **Import selected**.
+Choose **Export setup** in the header, select a project, pick categories (skills, hooks, MCP servers, memories, settings), and save a checksummed ZIP backup. To import, select the **same agent**, choose **Import setup**, pick **Current project** or **User-wide**, review conflicts, and click **Import selected**.
 
 | Item | Import behavior |
 |---|---|
@@ -93,66 +211,21 @@ To import a setup:
 | Hooks and extension lists | Missing entries are added without duplicates. |
 | Settings | Preferences are replaced. Current hooks and MCP servers stay unless selected too. |
 
-Claude auto-memory stays attached to the destination project; Codex generated memory stays user-wide. Antigravity CLI preferences always remain user-wide, and shared and user-root instructions keep their native locations.
-
-Replaced resources have restorable versions in **History**. Unsaved editor drafts remain open after import; refresh the page to load the imported files when ready. Import does not install packages or run scripts. Saved paths and commands are unchanged, so paths from another computer may need updating.
+Replaced resources are saved as restorable versions in **History**. Import does not install packages or run scripts; paths saved on another computer may need updating.
 
 <details>
-<summary>Archive contents and limits</summary>
+<summary><strong>Archive contents, scope rules, and limits</strong></summary>
 
-The ZIP contains `metadata.json` identifying the agent and archive version, plus checksummed resource files. Login files, chats, caches, previous Orbit backups, and installed plugin packages are excluded.
-
-Settings and hooks include user and selected-project sources, excluding inherited parent-project configuration. Shared skills are copied into the destination agent's native skills folder. Codex skill exports cover native user/project folders, including the older user skill directory. Kiro Markdown agent hook profiles are excluded. Memory exports include referenced local Markdown within the same memory or instruction root, excluding external links and non-Markdown attachments. Antigravity App preferences and internal knowledge are excluded. Agent trust and hook approvals remain unchanged.
-
-Unrelated JSONC and TOML values and comments remain in place. Items targeting the same file or setting cannot be imported together. Each applied file is recorded in History; an interrupted import may have already applied earlier items.
-
-Backups are limited to 10,000 items, 16 MiB per file, and 128 MiB overall. Unsafe paths, links, missing files, and checksum mismatches are rejected.
+- **Scope rules:** Claude auto-memory and Muse Code `.agents/memory` files stay attached to the destination project; Codex generated memory stays user-wide. Antigravity CLI preferences and Muse Code settings remain user-wide; shared and user-root instructions keep their native locations.
+- **Included vs. excluded:** The ZIP holds `metadata.json` and checksummed resource files. Login files, chats, caches, previous Orbit backups, installed plugin packages, Kiro Markdown hook profiles, and Antigravity App preferences / internal knowledge are excluded. Memory exports include local Markdown links within the same root (plus Cursor `.cursor/rules/*.mdc` files).
+- **Preservation:** Unrelated JSONC and TOML values and comments stay intact. Items targeting the same file or setting cannot be imported together. Unsaved editor drafts stay open until you refresh.
+- **Limits:** Maximum 10,000 items, 16 MiB per file, and 128 MiB overall. Unsafe paths, symlinks, missing files, and checksum mismatches are rejected.
 
 </details>
 
-## Configuration and memory files
-
-Select a project folder to inspect its instructions, skills, and settings. Orbit initially selects its launch directory. Skills copied into supported native folders are discovered without installation through Orbit.
-
-| Agent | User configuration | Project configuration |
-|---|---|---|
-| Claude Code | Native Claude directory; honors `CLAUDE_CONFIG_DIR` | Claude instruction and `.claude` files |
-| Codex | `CODEX_HOME`, default `~/.codex` | AGENTS instructions and `.codex` settings |
-| Kiro | `KIRO_HOME`, default `~/.kiro` | `.kiro` and AGENTS files |
-| OpenCode v2 | `XDG_CONFIG_HOME/opencode`, default `~/.config/opencode` | `opencode.json[c]` and `.opencode/opencode.json[c]` |
-| Pi | `PI_CODING_AGENT_DIR`, default `~/.pi/agent` | `.pi` settings and instruction files |
-| Antigravity | Shared `~/.gemini/config`; CLI preferences under `~/.gemini/antigravity-cli` | `.agents` customizations and native aliases |
-
-### Instructions and generated memories
-
-Claude auto-memory is project-scoped, including files stored under its user configuration directory. Linked files and instruction imports are shown alongside their source files.
-
-Codex instructions follow `AGENTS.override.md`, `AGENTS.md`, and configured fallback precedence through the repository hierarchy. Orbit edits Markdown under `CODEX_HOME/memories`, including indexes, summaries, raw inputs, and supporting notes. Explicit project details organize sections in the UI; the underlying memory remains shared. Section edits share one draft with the whole-file editor, and saved edits have restorable versions in History. Git metadata and linked paths are excluded. Codex can regenerate memory files and replace manual edits; Orbit does not reset memory generation state.
-
-Pi follows one instruction file per directory through the ancestor hierarchy. Project `SYSTEM.md` replaces the global system prompt; `APPEND_SYSTEM.md` adds instructions. Local skill folders and standalone Markdown skills are editable. Package expansion, glob filters, project trust, and authentication remain managed by Pi.
-
-### Settings and hooks
-
-Codex settings preserve TOML keys and comments; the preview includes user and trusted project sources. Plugin and system skills remain read-only. Approve Codex hook changes through its native `/hooks` flow.
-
-OpenCode settings preserve JSONC comments. Remote configuration, instruction URLs, globs, and runtime plugin configuration are not expanded by Orbit's file editor. Pi's preview merges nested settings and combines resource lists. Command-line options, environment settings, profiles, and native policy can change runtime behavior beyond these file previews.
-
-### Antigravity customizations
-
-Shared files under `~/.gemini/config/` serve the App and CLI. Orbit also discovers CLI-only skill folders and project `.agents/`, `.agent/`, `_agents/`, and `_agent/` locations. Skill and rule discovery follows native manifests and inclusion/exclusion lists. Duplicate skill names stay visible; Antigravity determines which version loads.
-
-Instructions include user `AGENTS.md` and `GEMINI.md`, shared-config equivalents, and project ancestors. Modular rules show their native trigger. Built-in resources, plugins, repository personal folders, and internal generated knowledge remain managed by Antigravity.
-
-Settings edits `~/.gemini/antigravity-cli/settings.json`; App preferences stay in Antigravity. User MCP editing uses `~/.gemini/config/mcp_config.json`; project MCP files can be included in setup backups. Remote servers accept `serverUrl` or `url`. OAuth and runtime-dependent authentication are handled in Antigravity.
-
-Hooks use named groups in `hooks.json`, without a top-level `hooks` wrapper. Toggling one command changes its whole group; commands sharing a matcher also share matcher edits. Tests run commands with the supplied JSON. Native hook payloads use camelCase fields.
-
-See Antigravity's [customization discovery](https://antigravity.google/docs/customization-discovery), [rules](https://antigravity.google/docs/rules), [hooks](https://antigravity.google/docs/hooks), [MCP](https://antigravity.google/docs/mcp), and [CLI reference](https://antigravity.google/docs/cli/reference).
-
 ## Stored data and command execution
 
-Orbit writes configuration changes directly to native files. Backups and change history live under `.orbit` in each agent's configuration directory. Claude's disabled MCP and hook records and transcript indexes use Orbit's app-data directory. Codex uses native enablement settings. Window preferences use the app-config directory. Orbit's bundle identifier is `com.roycoding8.orbit`.
-
-Credential masking conceals known values in the interface; it does not encrypt files. Configuration, backups, and transcripts can contain credentials or private conversation content.
-
-Hook tests execute shell commands with your account's permissions. MCP tests start configured processes or contact endpoints and may send configured credentials. These operations are not sandboxed. Pi tests exclude OAuth, dynamic command/environment references, and relative working directories that require Pi's runtime context.
+- **Native files & backups:** Orbit writes directly to each agent's native files. Backups and change history live under `.orbit` inside each agent's config directory. Claude disabled MCP/hook records and transcript indexes live in Orbit's app-data directory; window preferences live in app-config. Bundle ID: `com.roycoding8.orbit`.
+- **In-app updates:** Uses `tauri-plugin-updater` and `tauri-plugin-process`. On launch and via **Check for updates**, Orbit fetches `latest.json` from GitHub Releases and verifies each archive's Ed25519 signature against the public key in `src-tauri/tauri.conf.json` before downloading, installing, and relaunching.
+- **Credential masking:** Conceals known secret values in the UI only; files on disk are not encrypted.
+- **Unsandboxed tests:** Hook tests run shell commands with your user account's permissions, and MCP tests launch configured processes or contact endpoints (potentially sending configured credentials). Pi tests skip OAuth, dynamic command/env references, and relative working directories that require Pi's runtime context.
