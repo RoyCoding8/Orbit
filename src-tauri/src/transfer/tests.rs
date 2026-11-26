@@ -34,6 +34,13 @@ impl Fixture {
             "antigravity" => SelectedHarness::Antigravity(
                 crate::harness::antigravity::AntigravityHarness::new(home),
             ),
+            "muse" => SelectedHarness::Muse(crate::harness::muse::MuseHarness::new(config, home)),
+            "junie" => {
+                SelectedHarness::Junie(crate::harness::junie::JunieHarness::new(config, home))
+            }
+            "cursor" => {
+                SelectedHarness::Cursor(crate::harness::cursor::CursorHarness::new(config, home))
+            }
             _ => unreachable!(),
         };
         Self {
@@ -98,6 +105,9 @@ fn skills_round_trip_binary_assets_and_history_for_every_harness() {
         "opencode",
         "pi",
         "antigravity",
+        "muse",
+        "junie",
+        "cursor",
     ] {
         let f = Fixture::new(id);
         let root = if id == "codex" {
@@ -762,4 +772,140 @@ fn export_succeeds_when_config_root_does_not_exist_yet() {
     );
     let preview = inventory(&f.harness, &f.project).unwrap();
     assert!(!preview.entries.is_empty());
+}
+
+#[test]
+fn muse_junie_and_cursor_setup_round_trip_preserves_versions_and_resources() {
+    for id in ["muse", "junie", "cursor"] {
+        let source = Fixture::new(id);
+        let cfg = source.harness.config_root();
+        match id {
+            "muse" => {
+                source.settings(
+                    r#"{"schema_version":1,"model":"portable","mcp_servers":{"docs":{"transport":"stdio","command":"docs-srv","enabled":true}},"hooks":{"PreLLMCall":[{"hooks":[{"type":"command","command":"echo pre"}]}]}}"#,
+                );
+                source.write(
+                    &source.project.join(".muse/hooks.json"),
+                    r#"{"hooks":{"PostToolBatch":[{"hooks":[{"type":"command","command":"echo batch"}]}]}}"#,
+                );
+                source.write(&source.project.join("AGENTS.md"), "Muse instructions\n");
+                source.write(
+                    &source.project.join(".agents/memory/MEMORY.md"),
+                    "Muse memory\n",
+                );
+            }
+            "junie" => {
+                source.settings(
+                    r#"{"model":"portable","hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo j"}]}]}}"#,
+                );
+                source.write(
+                    &source.harness.mcp_path(),
+                    r#"{"mcpServers":{"docs":{"command":"docs-srv"}}}"#,
+                );
+                source.write(&cfg.join("AGENTS.md"), "Junie user\n");
+                source.write(
+                    &source.project.join(".junie/guidelines.md"),
+                    "Junie guide\n",
+                );
+                source.write(&source.project.join(".junie/rules/rust.md"), "Junie rule\n");
+            }
+            _ => {
+                source.settings(r#"{"version":1,"model":"portable"}"#);
+                source.write(
+                    &cfg.join("hooks.json"),
+                    r#"{"version":1,"hooks":{"beforeShellExecution":[{"command":"echo c"}]}}"#,
+                );
+                source.write(
+                    &source.harness.mcp_path(),
+                    r#"{"mcpServers":{"docs":{"command":"docs-srv"}}}"#,
+                );
+                source.write(&source.project.join("CLAUDE.md"), "Cursor claude\n");
+                source.write(
+                    &source.project.join(".cursor/rules/style.mdc"),
+                    "Cursor rule\n",
+                );
+            }
+        }
+        source.write(
+            &cfg.join("skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Demo\n---\nBody\n",
+        );
+        source.export(&[
+            Category::Settings,
+            Category::Hooks,
+            Category::Mcps,
+            Category::Memories,
+            Category::Skills,
+        ]);
+        let dst = Fixture::new(id);
+        fs::copy(&source.archive, &dst.archive).unwrap();
+        let p = dst.preview();
+        for cat in [
+            Category::Settings,
+            Category::Hooks,
+            Category::Mcps,
+            Category::Memories,
+            Category::Skills,
+        ] {
+            assert!(
+                p.entries.iter().any(|e| e.category == cat),
+                "{id} missing {cat:?}"
+            );
+        }
+        let ids = p.entries.iter().map(|e| e.id.clone()).collect::<Vec<_>>();
+        dst.apply(&p, &ids, false).unwrap();
+        let saved: Value =
+            serde_json::from_slice(&fs::read(dst.harness.settings_path()).unwrap()).unwrap();
+        assert_eq!(saved["model"], "portable", "{id}");
+        if id == "muse" {
+            assert_eq!(saved["schema_version"], 1);
+            assert!(dst.project.join(".agents/memory/MEMORY.md").is_file());
+            assert_eq!(
+                dst.harness
+                    .hooks_list(&dst.project, dst._dir.path())
+                    .unwrap()
+                    .len(),
+                2
+            );
+        } else if id == "cursor" {
+            assert_eq!(saved["version"], 1);
+            let hooks: Value = serde_json::from_slice(
+                &fs::read(dst.harness.config_root().join("hooks.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(hooks["version"], 1);
+            assert!(dst.project.join(".cursor/rules/style.mdc").is_file());
+        } else {
+            assert_eq!(
+                dst.harness
+                    .hooks_list(&dst.project, dst._dir.path())
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert!(dst.project.join(".junie/rules/rust.md").is_file());
+        }
+        assert_eq!(dst.harness.mcp_list(&dst.project).unwrap()[0].name, "docs");
+        assert_eq!(dst.harness.skills_inventory(&dst.project).unwrap().len(), 1);
+        assert!(dst
+            .preview()
+            .entries
+            .iter()
+            .all(|e| e.status == Status::Identical));
+    }
+
+    let hooks_only = Fixture::new("cursor");
+    hooks_only.write(
+        &hooks_only.harness.config_root().join("hooks.json"),
+        r#"{"version":1,"hooks":{"stop":[{"command":"echo done"}]}}"#,
+    );
+    hooks_only.export(&[Category::Hooks]);
+    let fresh = Fixture::new("cursor");
+    fs::copy(&hooks_only.archive, &fresh.archive).unwrap();
+    let p = fresh.preview();
+    fresh.apply(&p, &[p.entries[0].id.clone()], false).unwrap();
+    let raw: Value =
+        serde_json::from_slice(&fs::read(fresh.harness.config_root().join("hooks.json")).unwrap())
+            .unwrap();
+    assert_eq!(raw["version"], 1);
 }

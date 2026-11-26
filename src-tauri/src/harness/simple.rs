@@ -754,3 +754,226 @@ pub(crate) fn unsupported_skill_override(label: &str) -> std::result::Result<(),
         "{label} has no native per-skill enable switch. Uninstall an owned skill to keep a restorable copy in History."
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::harness::muse::MuseHarness;
+
+    fn hook_schema() -> HookSchema {
+        HookSchema {
+            action: "test-hooks",
+            events: &["PreToolUse", "Stop"],
+            format: HookFormat::FlatList,
+            version_field: Some(("version", 1)),
+        }
+    }
+
+    #[test]
+    fn malformed_json_mask_and_stale_preconditions_are_refused() {
+        let dir = crate::test_support::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = dir.path().join("repo");
+        fs::create_dir_all(&project).unwrap();
+        let harness = MuseHarness::new(home.join(".config/muse"), home);
+        let settings = harness.settings_path();
+        let hooks = project.join(".muse/hooks.json");
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::create_dir_all(hooks.parent().unwrap()).unwrap();
+
+        fs::write(&settings, "{broken").unwrap();
+        assert!(settings_layer("user", &settings).is_err());
+        assert!(apply_setting(&harness, "act", &settings, "model", json!("a"), None).is_err());
+        assert!(
+            apply_setting(&harness, "act", &settings, "  ", json!("a"), None)
+                .unwrap_err()
+                .contains("empty")
+        );
+
+        fs::write(&settings, "{}").unwrap();
+        assert!(apply_setting(
+            &harness,
+            "act",
+            &settings,
+            "env",
+            json!({"TOKEN": "••••••••"}),
+            None,
+        )
+        .unwrap_err()
+        .contains("masked placeholder"));
+        apply_setting(
+            &harness,
+            "act",
+            &settings,
+            "env",
+            json!({"TOKEN": "real-secret"}),
+            None,
+        )
+        .unwrap();
+        apply_setting(
+            &harness,
+            "act",
+            &settings,
+            "env",
+            json!({"TOKEN": "••••••••", "EXTRA": "ok"}),
+            None,
+        )
+        .unwrap();
+        let raw = json_store::read_value(&settings).unwrap();
+        assert_eq!(raw["env"]["TOKEN"], "real-secret");
+        assert_eq!(raw["env"]["EXTRA"], "ok");
+
+        fs::write(&hooks, "[not-an-object").unwrap();
+        assert!(list_hooks(&[(SettingsLayer::Project, hooks.clone())], hook_schema()).is_err());
+        assert!(save_hook(
+            &harness,
+            &hooks,
+            hook_schema(),
+            HookDraft {
+                layer: SettingsLayer::Project,
+                event: "Stop".into(),
+                matcher: None,
+                command: "echo hi".into(),
+                edit_id: None,
+                source_id: None,
+            },
+        )
+        .is_err());
+        fs::write(&hooks, "{}").unwrap();
+        assert!(save_hook(
+            &harness,
+            &hooks,
+            hook_schema(),
+            HookDraft {
+                layer: SettingsLayer::Project,
+                event: "Unknown".into(),
+                matcher: None,
+                command: "echo hi".into(),
+                edit_id: None,
+                source_id: None,
+            },
+        )
+        .unwrap_err()
+        .contains("Unsupported"));
+        assert!(save_hook(
+            &harness,
+            &hooks,
+            hook_schema(),
+            HookDraft {
+                layer: SettingsLayer::Project,
+                event: "Stop".into(),
+                matcher: None,
+                command: "  ".into(),
+                edit_id: None,
+                source_id: None,
+            },
+        )
+        .unwrap_err()
+        .contains("empty"));
+        assert!(save_hook(
+            &harness,
+            &hooks,
+            hook_schema(),
+            HookDraft {
+                layer: SettingsLayer::Project,
+                event: "Stop".into(),
+                matcher: None,
+                command: "echo hi".into(),
+                edit_id: Some("stale-id".into()),
+                source_id: None,
+            },
+        )
+        .unwrap_err()
+        .contains("Hook changed"));
+        assert!(delete_hook(
+            &harness,
+            &hooks,
+            SettingsLayer::Project,
+            hook_schema(),
+            "stale-id",
+        )
+        .unwrap_err()
+        .contains("Hook changed"));
+
+        let mem = project.join("AGENTS.md");
+        fs::write(&mem, "Original\n").unwrap();
+        let cat = build_memory_catalog(
+            "t",
+            &project,
+            Some(harness.home()),
+            harness.config_root(),
+            vec![MemoryCandidate {
+                path: mem.clone(),
+                group_id: "p",
+                source: MemorySource::ProjectInstructions,
+                role: MemoryRole::Instruction,
+                load_behavior: "always".into(),
+                editable: true,
+            }],
+            vec![MemoryGroup {
+                id: "p".into(),
+                label: "P".into(),
+                role: MemorySource::ProjectInstructions,
+            }],
+        )
+        .unwrap();
+        let id = cat.files[0].id.clone();
+        assert!(edit_memory(&harness, cat, &id, "stale", "new")
+            .unwrap_err()
+            .contains("changed since"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_settings_hooks_and_memories_are_refused() {
+        use std::os::unix::fs::symlink;
+        let dir = crate::test_support::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = dir.path().join("repo");
+        let outside = dir.path().join("outside.json");
+        fs::create_dir_all(home.join(".config/muse")).unwrap();
+        fs::create_dir_all(project.join(".muse")).unwrap();
+        fs::write(&outside, "{}").unwrap();
+        let harness = MuseHarness::new(home.join(".config/muse"), home);
+        let settings = harness.settings_path();
+        let hooks = project.join(".muse/hooks.json");
+        let mem = project.join("AGENTS.md");
+        symlink(&outside, &settings).unwrap();
+        symlink(&outside, &hooks).unwrap();
+        symlink(&outside, &mem).unwrap();
+
+        assert!(settings_layer("user", &settings).is_err());
+        assert!(apply_setting(&harness, "act", &settings, "model", json!("x"), None).is_err());
+        assert!(list_hooks(&[(SettingsLayer::Project, hooks.clone())], hook_schema()).is_err());
+        assert!(save_hook(
+            &harness,
+            &hooks,
+            hook_schema(),
+            HookDraft {
+                layer: SettingsLayer::Project,
+                event: "Stop".into(),
+                matcher: None,
+                command: "echo x".into(),
+                edit_id: None,
+                source_id: None,
+            },
+        )
+        .is_err());
+        assert!(build_memory_catalog(
+            "t",
+            &project,
+            Some(harness.home()),
+            harness.config_root(),
+            vec![MemoryCandidate {
+                path: mem,
+                group_id: "p",
+                source: MemorySource::ProjectInstructions,
+                role: MemoryRole::Instruction,
+                load_behavior: "always".into(),
+                editable: true,
+            }],
+            vec![],
+        )
+        .is_err());
+    }
+}

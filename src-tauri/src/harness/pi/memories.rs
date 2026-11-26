@@ -357,4 +357,38 @@ mod tests {
             "Read \nKeep this line.\n"
         );
     }
+
+    #[test]
+    fn edit_refuses_stale_content_and_readonly_ancestor_and_rejects_symlinks() {
+        let root = crate::test_support::tempdir().unwrap();
+        let harness = PiHarness::new(root.path().join(".pi/agent"), root.path().join("home"));
+        let project = root.path().join("project");
+        std::fs::create_dir_all(project.join(".pi")).unwrap();
+        std::fs::write(root.path().join("AGENTS.md"), "Ancestor\n").unwrap();
+        std::fs::write(project.join("AGENTS.md"), "Original\n").unwrap();
+
+        let cat = catalog(&harness, &project).unwrap();
+        let proj_file = cat.files.iter().find(|f| f.editable).unwrap();
+        let anc_file = cat.files.iter().find(|f| !f.editable).unwrap();
+        assert!(edit(&harness, &project, &proj_file.id, "stale", "next")
+            .unwrap_err()
+            .contains("changed since"));
+        assert!(edit(&harness, &project, &anc_file.id, "Ancestor\n", "next")
+            .unwrap_err()
+            .contains("no longer available"));
+        assert!(!allowed_instruction_path(
+            &harness,
+            &project,
+            Path::new("../AGENTS.md"),
+        ));
+        #[cfg(unix)]
+        {
+            let outside = root.path().join("secret.md");
+            std::fs::write(&outside, "secret").unwrap();
+            let linked = project.join(".pi/SYSTEM.md");
+            std::os::unix::fs::symlink(&outside, &linked).unwrap();
+            assert!(!allowed_instruction_path(&harness, &project, &linked));
+            assert!(catalog(&harness, &project).is_err());
+        }
+    }
 }

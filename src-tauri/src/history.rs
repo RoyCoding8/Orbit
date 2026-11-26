@@ -1131,7 +1131,11 @@ pub(crate) fn canonical_location(path: &Path) -> Option<PathBuf> {
                 .components()
                 .all(|part| matches!(part, Component::Normal(_)))
             {
-                return Some(root.join(relative));
+                return Some(if relative.as_os_str().is_empty() {
+                    root
+                } else {
+                    root.join(relative)
+                });
             }
             return None;
         }
@@ -2183,5 +2187,144 @@ mod tests {
             Some(&after_hex)
         )
         .is_err());
+    }
+
+    #[test]
+    fn new_harnesses_history_restores_settings_skills_memories_and_hooks() {
+        use crate::harness::{
+            claude::config::SettingsLayer, cursor::CursorHarness, junie::JunieHarness,
+            muse::MuseHarness, selected::SelectedHarness, HookDraft,
+        };
+        for client in ["muse", "junie", "cursor"] {
+            let dir = crate::test_support::tempdir().unwrap();
+            let home = dir.path().canonicalize().unwrap();
+            let project = home.join("project");
+            let config = match client {
+                "muse" => home.join(".config/muse"),
+                "junie" => home.join(".junie"),
+                _ => home.join(".cursor"),
+            };
+            let skill = config.join("skills/demo");
+            let mem = project.join("AGENTS.md");
+            std::fs::create_dir_all(&skill).unwrap();
+            std::fs::create_dir_all(&project).unwrap();
+            let skill_body = "---\nname: demo\ndescription: Demo\n---\nBody\n";
+            std::fs::write(skill.join("SKILL.md"), skill_body).unwrap();
+            std::fs::write(&mem, "Original instructions.\n").unwrap();
+            let harness = match client {
+                "muse" => SelectedHarness::Muse(MuseHarness::new(config, home)),
+                "junie" => SelectedHarness::Junie(JunieHarness::new(config, home)),
+                _ => SelectedHarness::Cursor(CursorHarness::new(config, home)),
+            };
+
+            for value in ["first", "second"] {
+                harness
+                    .config_apply(
+                        &project,
+                        SettingsLayer::User,
+                        "model",
+                        serde_json::json!(value),
+                    )
+                    .unwrap();
+            }
+            let snap = load(&harness, &project).unwrap();
+            let ver = snap
+                .versions
+                .iter()
+                .find(|v| v.resource_kind == "settings" && v.target == harness.settings_path())
+                .unwrap();
+            assert!(ver.restorable, "{client}");
+            restore(&harness, &project, &ver.id, ver.current_checksum.as_deref()).unwrap();
+            assert_eq!(
+                harness.config_load(&project).unwrap().effective["model"].value,
+                "first",
+                "{client}"
+            );
+
+            let cat = harness.memory_catalog(&project).unwrap();
+            let file = cat
+                .files
+                .iter()
+                .find(|f| Path::new(&f.path) == mem)
+                .unwrap();
+            harness
+                .memory_edit(&project, &file.id, &file.content, "Edited.\n")
+                .unwrap();
+            let snap = load(&harness, &project).unwrap();
+            let ver = snap.versions.iter().find(|v| v.target == mem).unwrap();
+            restore(&harness, &project, &ver.id, ver.current_checksum.as_deref()).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(&mem).unwrap(),
+                "Original instructions.\n"
+            );
+            harness
+                .memory_delete(&project, &file.id, "Original instructions.\n")
+                .unwrap();
+            assert!(!mem.exists());
+            let snap = load(&harness, &project).unwrap();
+            let ver = snap
+                .versions
+                .iter()
+                .find(|v| v.target == mem && v.action == "delete")
+                .unwrap();
+            restore(&harness, &project, &ver.id, None).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(&mem).unwrap(),
+                "Original instructions.\n"
+            );
+
+            let entry = harness
+                .skills_inventory(&project)
+                .unwrap()
+                .into_iter()
+                .find(|e| Path::new(&e.path) == skill.join("SKILL.md"))
+                .unwrap();
+            harness.skill_uninstall(&project, &entry.id).unwrap();
+            assert!(!skill.exists());
+            let snap = load(&harness, &project).unwrap();
+            let ver = snap.versions.iter().find(|v| v.target == skill).unwrap();
+            assert_eq!(ver.kind, VersionKind::Directory);
+            restore(&harness, &project, &ver.id, None).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(skill.join("SKILL.md")).unwrap(),
+                skill_body
+            );
+
+            let event = if client == "cursor" {
+                "beforeShellExecution"
+            } else {
+                "PreToolUse"
+            };
+            harness
+                .hooks_save(
+                    &project,
+                    HookDraft {
+                        layer: SettingsLayer::User,
+                        event: event.into(),
+                        matcher: None,
+                        command: "echo keep".into(),
+                        edit_id: None,
+                        source_id: None,
+                    },
+                )
+                .unwrap();
+            let hook = harness.hooks_list(&project, dir.path()).unwrap().remove(0);
+            harness
+                .hooks_delete(&project, dir.path(), SettingsLayer::User, &hook.id)
+                .unwrap();
+            assert!(harness.hooks_list(&project, dir.path()).unwrap().is_empty());
+            let snap = load(&harness, &project).unwrap();
+            let ver = snap
+                .versions
+                .iter()
+                .find(|v| v.resource_id == "hooks")
+                .unwrap();
+            restore(&harness, &project, &ver.id, ver.current_checksum.as_deref()).unwrap();
+            assert_eq!(
+                harness.hooks_list(&project, dir.path()).unwrap().len(),
+                1,
+                "{client}"
+            );
+        }
     }
 }

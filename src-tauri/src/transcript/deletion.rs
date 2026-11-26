@@ -193,4 +193,218 @@ mod tests {
             assert_eq!(fs::read(&other).unwrap(), b"unrelated");
         }
     }
+
+    #[test]
+    fn pi_delete_backs_up_removes_rejects_changed_source_and_restores() {
+        let temp = crate::test_support::tempdir().unwrap();
+        let app = temp.path().join("app");
+        let config = temp.path().join("pi");
+        let project = temp.path().join("project");
+        let backups = temp.path().join("backups");
+        for p in [&config, &project, &backups] {
+            fs::create_dir_all(p).unwrap();
+        }
+        let project = project.canonicalize().unwrap();
+        let harness = SelectedHarness::Pi(crate::harness::pi::PiHarness::new(
+            config.clone(),
+            temp.path().to_path_buf(),
+        ));
+        let uid = "10000000-0000-4000-8000-000000000009";
+        let id = format!("pi:{uid}");
+        let cwd = super::super::native_path(&project);
+        let dir = super::super::pi::session_roots(&config, &project)
+            .unwrap()
+            .remove(0);
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join(format!("{uid}.jsonl"));
+        let raw = format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"session","version":3,"id":uid,"cwd":cwd,"timestamp":"2026-10-23T12:00:00.000Z"}),
+            serde_json::json!({"type":"message","id":"u1","parentId":null,"timestamp":"2026-10-23T12:00:01Z","message":{"role":"user","content":"pi hello"}})
+        );
+        fs::write(&source, &raw).unwrap();
+        let cache = harness.transcript_cache(&app);
+        open_database(&cache)
+            .unwrap()
+            .execute(
+                "INSERT INTO sessions(session_id, project, source_path) VALUES (?1, ?2, ?3)",
+                rusqlite::params![id, cwd, source.to_string_lossy()],
+            )
+            .unwrap();
+        let exp = harness.transcript_export(&app, &id, &backups).unwrap();
+        fs::write(&source, format!("{raw}\n")).unwrap();
+        assert!(
+            super::super::pi::delete_exported_source(&source, &id, Path::new(&exp.path))
+                .unwrap_err()
+                .contains("changed after the backup")
+        );
+        assert!(source.is_file());
+        fs::write(&source, &raw).unwrap();
+        let report = delete(&harness, &app, &id, &backups).unwrap();
+        assert_eq!(report.deleted_sessions, [id]);
+        assert!(!source.exists());
+        let restored = harness
+            .transcript_import(&app, Path::new(&report.path), &project)
+            .unwrap();
+        assert!(fs::read_to_string(&restored.path)
+            .unwrap()
+            .contains("pi hello"));
+    }
+
+    #[test]
+    fn codex_delete_validates_id_verifies_backup_rejects_changed_source_and_restores() {
+        let temp = crate::test_support::tempdir().unwrap();
+        let app = temp.path().join("app");
+        let config = temp.path().join("codex");
+        let project = temp.path().join("project");
+        let backups = temp.path().join("backups");
+        let sessions = config.join("sessions/2026/10/23");
+        for p in [&sessions, &project, &backups] {
+            fs::create_dir_all(p).unwrap();
+        }
+        let harness = SelectedHarness::Codex(crate::harness::codex::CodexHarness::new(
+            config.clone(),
+            temp.path().to_path_buf(),
+        ));
+        let cache = harness.transcript_cache(&app);
+        let id = "11111111-2222-4333-8444-555555555556";
+        let rollout = sessions.join(format!("rollout-2026-10-23T12-00-00-{id}.jsonl"));
+        let raw = format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"session_meta","payload":{"id":id,"cwd":project}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex hello"}]}})
+        );
+        fs::write(&rollout, &raw).unwrap();
+        let db = open_database(&cache).unwrap();
+        db.execute(
+            "INSERT INTO sessions(session_id, project, source_path) VALUES (?1, ?2, ?3)",
+            rusqlite::params![id, project.to_string_lossy(), rollout.to_string_lossy()],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO sessions(session_id, project, source_path) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                "not-a-uuid",
+                project.to_string_lossy(),
+                rollout.to_string_lossy()
+            ],
+        )
+        .unwrap();
+        drop(db);
+        assert!(delete(&harness, &app, "not-a-uuid", &backups)
+            .unwrap_err()
+            .contains("invalid"));
+        let archive = harness.transcript_export(&app, id, &backups).unwrap();
+        super::super::archive::verify_codex_backup(&config, &cache, id, Path::new(&archive.path))
+            .unwrap();
+        fs::write(&rollout, format!("{raw}\n")).unwrap();
+        assert!(super::super::archive::verify_codex_backup(
+            &config,
+            &cache,
+            id,
+            Path::new(&archive.path),
+        )
+        .unwrap_err()
+        .contains("changed after the backup"));
+        fs::remove_file(&rollout).unwrap();
+        let restored = harness
+            .transcript_import(&app, Path::new(&archive.path), &project)
+            .unwrap();
+        assert!(fs::read_to_string(&restored.path)
+            .unwrap()
+            .contains("codex hello"));
+    }
+
+    #[test]
+    fn unsupported_and_pre_cli_validation_reject_kiro_new_harnesses_opencode_and_antigravity() {
+        let temp = crate::test_support::tempdir().unwrap();
+        let app = temp.path().join("app");
+        let backups = temp.path().join("backups");
+        let home = temp.path().join("home");
+        let project = temp.path().join("project");
+        for p in [&backups, &home, &project] {
+            fs::create_dir_all(p).unwrap();
+        }
+        let kiro =
+            SelectedHarness::Kiro(crate::harness::kiro::KiroHarness::new(home.join(".kiro")));
+        assert!(delete(&kiro, &app, "s1", &backups)
+            .unwrap_err()
+            .contains("Kiro deletion is unavailable"));
+        for h in [
+            SelectedHarness::Muse(crate::harness::muse::MuseHarness::new(
+                home.join(".config/muse"),
+                home.clone(),
+            )),
+            SelectedHarness::Junie(crate::harness::junie::JunieHarness::new(
+                home.join(".junie"),
+                home.clone(),
+            )),
+            SelectedHarness::Cursor(crate::harness::cursor::CursorHarness::new(
+                home.join(".cursor"),
+                home.clone(),
+            )),
+        ] {
+            assert!(delete(&h, &app, "s1", &backups)
+                .unwrap_err()
+                .contains("not supported"));
+        }
+        let opencode = SelectedHarness::Opencode(crate::harness::opencode::OpenCodeHarness::new(
+            home.join(".config/opencode"),
+            home.clone(),
+        ));
+        open_database(&opencode.transcript_cache(&app))
+            .unwrap()
+            .execute(
+                "INSERT INTO sessions(session_id, project, source_path) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["opencode:bad/id", project.to_string_lossy(), "opencode:bad"],
+            )
+            .unwrap();
+        assert!(delete(&opencode, &app, "opencode:bad/id", &backups)
+            .unwrap_err()
+            .contains("invalid"));
+
+        let agy = SelectedHarness::Antigravity(
+            crate::harness::antigravity::AntigravityHarness::new(home.clone()),
+        );
+        let agy_cache = agy.transcript_cache(&app);
+        let uid = "22222222-2222-4333-8444-555555555555";
+        let valid_id = format!("antigravity:cli:{uid}");
+        let conv = home.join(".gemini/antigravity-cli/conversations");
+        fs::create_dir_all(&conv).unwrap();
+        let db_path = conv.join(format!("{uid}.db"));
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute("CREATE TABLE trajectory_meta (cascade_id TEXT)", [])
+            .unwrap();
+        conn.execute("INSERT INTO trajectory_meta VALUES ('other-id')", [])
+            .unwrap();
+        drop(conn);
+        let outside = temp.path().join("outside.db");
+        fs::write(&outside, b"").unwrap();
+        let cdb = open_database(&agy_cache).unwrap();
+        for (sid, src) in [
+            ("antigravity:bad", outside.to_string_lossy().into_owned()),
+            (valid_id.as_str(), outside.to_string_lossy().into_owned()),
+        ] {
+            cdb.execute(
+                "INSERT OR REPLACE INTO sessions(session_id, project, source_path) VALUES (?1, ?2, ?3)",
+                rusqlite::params![sid, project.to_string_lossy(), src],
+            )
+            .unwrap();
+        }
+        assert!(delete(&agy, &app, "antigravity:bad", &backups)
+            .unwrap_err()
+            .contains("Invalid Antigravity chat identity"));
+        assert!(delete(&agy, &app, &valid_id, &backups)
+            .unwrap_err()
+            .contains("outside its native store"));
+        cdb.execute(
+            "UPDATE sessions SET source_path = ?1 WHERE session_id = ?2",
+            rusqlite::params![db_path.to_string_lossy(), valid_id],
+        )
+        .unwrap();
+        drop(cdb);
+        assert!(delete(&agy, &app, &valid_id, &backups)
+            .unwrap_err()
+            .contains("identity changed"));
+    }
 }

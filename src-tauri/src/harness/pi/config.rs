@@ -153,4 +153,45 @@ mod tests {
             json!(["global", "project"])
         );
     }
+
+    #[test]
+    fn malformed_json_local_layer_missing_project_and_empty_undo_are_refused() {
+        let root = crate::test_support::tempdir().unwrap();
+        let harness = PiHarness::new(root.path().join(".pi/agent"), root.path().to_path_buf());
+        let project = root.path().join("project");
+        std::fs::create_dir_all(harness.config_root()).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(harness.settings_path(), "{broken").unwrap();
+
+        assert!(load_config(&harness, &project).is_err());
+        assert!(apply_value(
+            &harness,
+            &project,
+            SettingsLayer::User,
+            "theme",
+            json!("dark")
+        )
+        .is_err());
+        assert!(apply_value(
+            &harness,
+            &project,
+            SettingsLayer::Local,
+            "theme",
+            json!("dark")
+        )
+        .unwrap_err()
+        .contains("user and project"));
+        assert!(apply_value(
+            &harness,
+            &root.path().join("missing"),
+            SettingsLayer::Project,
+            "theme",
+            json!("dark"),
+        )
+        .unwrap_err()
+        .contains("unavailable"));
+        assert!(undo(&harness, &project, SettingsLayer::User, "  ")
+            .unwrap_err()
+            .contains("empty"));
+    }
 }

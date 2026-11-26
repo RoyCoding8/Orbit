@@ -674,6 +674,20 @@ pub(super) fn updated(
                     .entry("name")
                     .or_insert_with(|| Value::String(name.trim_end_matches(".json").into()));
             }
+            if harness == "muse" && matches!(slot, Slot::Settings) {
+                value
+                    .as_object_mut()
+                    .ok_or("Invalid native config")?
+                    .entry("schema_version")
+                    .or_insert_with(|| Value::from(1));
+            }
+            if harness == "cursor" && matches!(slot, Slot::Hooks) {
+                value
+                    .as_object_mut()
+                    .ok_or("Invalid native config")?
+                    .entry("version")
+                    .or_insert_with(|| Value::from(1));
+            }
             if before.is_empty() {
                 return encode(&value, harness, slot);
             }
@@ -806,10 +820,12 @@ pub(super) fn validate(entry: &Entry, bytes: &[u8], harness: &str) -> Result<(),
                 | Area::Steering
                 | Area::Rules
                 | Area::SharedInstructions => {
-                    if !path.ends_with(".md") {
+                    if !(path.ends_with(".md") || (harness == "cursor" && path.ends_with(".mdc"))) {
                         return Err("Memory resources must be Markdown files".into());
                     }
-                    if *area == Area::AutoMemory && !matches!(harness, "codex" | "claude-code") {
+                    if *area == Area::AutoMemory
+                        && !matches!(harness, "codex" | "claude-code" | "muse")
+                    {
                         return Err("Unsupported generated-memory format".into());
                     }
                     if matches!(area, Area::Rules | Area::SharedInstructions)
@@ -838,8 +854,16 @@ pub(super) fn validate(entry: &Entry, bytes: &[u8], harness: &str) -> Result<(),
                     Category::Mcps
                 }
                 Section::Hooks
-                    if matches!(harness, "claude-code" | "codex" | "kiro" | "antigravity")
-                        && (value.is_array() || value.is_object()) =>
+                    if matches!(
+                        harness,
+                        "claude-code"
+                            | "codex"
+                            | "kiro"
+                            | "antigravity"
+                            | "muse"
+                            | "junie"
+                            | "cursor"
+                    ) && (value.is_array() || value.is_object()) =>
                 {
                     Category::Hooks
                 }

@@ -739,4 +739,43 @@ mod tests {
         hooks::delete(&harness, &project, SettingsLayer::User, &list[0].id).unwrap();
         assert_eq!(hooks::list(&harness, &project).unwrap().len(), 1);
     }
+
+    #[test]
+    fn mcp_save_preserves_masked_credentials_and_rejects_fresh_placeholders() {
+        let dir = crate::test_support::tempdir().unwrap();
+        let home = dir.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let harness = MuseHarness::new(home.join(".config/muse"), home);
+        let url = ["https:", "", "mcp.example.test"].join("/");
+        mcp::save(
+            &harness,
+            "remote",
+            json!({"type": "http", "url": url, "headers": {"Authorization": "Bearer real-token"}, "mode": "optional"}),
+        )
+        .unwrap();
+        mcp::save(
+            &harness,
+            "remote",
+            json!({"type": "http", "url": url, "headers": {"Authorization": "••••••••"}, "mode": "required"}),
+        )
+        .unwrap();
+        let raw = json_store::read_value(&harness.settings_path()).unwrap();
+        assert_eq!(
+            raw["mcp_servers"]["remote"]["headers"]["Authorization"],
+            "Bearer real-token"
+        );
+        assert_eq!(raw["mcp_servers"]["remote"]["mode"], "required");
+        assert!(mcp::save(
+            &harness,
+            "fresh",
+            json!({"type": "http", "url": url, "headers": {"Authorization": "••••••••"}}),
+        )
+        .unwrap_err()
+        .contains("masked placeholders"));
+        assert!(
+            json_store::read_value(&harness.settings_path()).unwrap()["mcp_servers"]
+                .get("fresh")
+                .is_none()
+        );
+    }
 }
