@@ -1,0 +1,5 @@
+.update-checker { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.update-status { font-size: .8rem; color: var(--md-sys-color-on-surface-variant); }
+.update-error { max-width: 240px; font-size: .8rem; color: var(--md-sys-color-error); }
+.edit-dialog.update-dialog { width: min(520px, calc(100vw - 32px)); }
+.update-notes { max-width: none; max-height: 40dvh; overflow-y: auto; white-space: pre-wrap; }

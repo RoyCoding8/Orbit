@@ -7,6 +7,7 @@ import { Hooks } from "./pages/Hooks";
 import { Memories } from "./pages/Memories";
 import { History } from "./pages/History";
 import { HarnessTransfer } from "./components/HarnessTransfer";
+import { UpdateChecker } from "./components/UpdateChecker";
 import { HarnessProvider, type Client } from "./lib/HarnessContext";
 import { clients, harnesses, isClient } from "./lib/harnesses";
 import "@m3e/web/theme";
@@ -69,6 +70,7 @@ export function App() {
               <h1>Orbit</h1>
             </div>
             <div className="workspace-controls">
+              <UpdateChecker />
               <HarnessTransfer />
               <label className="connection-state">
                 Agent

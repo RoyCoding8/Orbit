@@ -9,6 +9,8 @@ it("does not grant unused filesystem and opener commands to the webview", () => 
       "core:default",
       "dialog:default",
       "window-state:default",
+      "updater:default",
+      "process:allow-restart",
     ],
   });
 });
