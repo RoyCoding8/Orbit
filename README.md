@@ -159,3 +159,7 @@ bash formal/run.sh
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE).
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://signpath.io/), certificate by [SignPath Foundation](https://signpath.org/). See [CODE_SIGNING_POLICY.md](CODE_SIGNING_POLICY.md) for build provenance, roles, and privacy details.
