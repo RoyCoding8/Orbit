@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.1
+
+### Added
+
+- Added `CODE_SIGNING_POLICY.md` documenting build provenance, network behavior, and SignPath Foundation open-source code signing status.
+- Added a TLA+ / TLC journal crash-recovery model (`formal/tla/Ledger.tla`) and wired both Kani and TLC formal checks into GitHub Actions CI.
+
+### Changed
+
+- Rebuilt the Kani verification suite around 12 harnesses that directly check `orbit-core` production code and restored runtime coverage at filesystem and storage boundaries.
+- Shared the selected project directory (`projectRoot`) across navigation tabs and Setup Export/Import so switching pages preserves your active project.
+
+### Fixed
+
+- Fixed ledger recovery (`reconcile_pending_for_target`) so retrying a write with repeated file bytes reconciles only the latest pending row instead of crediting an older abandoned attempt.
+- Fixed Antigravity skills discovery so user manifests under `~/.gemini` accept sibling `~/.gemini/antigravity/skills` entries while still rejecting `..` traversal and outside-root paths.
+- Fixed Antigravity settings credential masking so top-level `apiKey` and flat dotted secret keys are masked on read and preserved on write.
+- Fixed Muse Code setup imports with destination set to **User-wide** so project hooks map cleanly to `~/.config/muse/settings.json` with `schema_version: 1` preserved.
+- Fixed History file restoration to safely recreate missing parent directories (resolving `os error 3` when restoring an edit version of a deleted skill) and verified Junie settings version snapshots.
+
 ## 0.6.0
 
 ### Added
