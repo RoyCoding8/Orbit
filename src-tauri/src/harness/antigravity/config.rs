@@ -1,19 +1,34 @@
 use super::AntigravityHarness;
 use crate::{
     harness::{
-        claude::config::{ConfigSnapshot, EffectiveSetting, SettingsLayer},
-        json_store, Harness, ResourceKind,
+        claude::config::{masked_value, ConfigSnapshot, EffectiveSetting, SettingsLayer},
+        credentials, json_store, Harness, ResourceKind,
     },
     ledger,
 };
 use serde_json::Value;
 use std::path::Path;
 
+fn mask_setting(key: &str, value: &Value) -> Value {
+    match value {
+        Value::String(text)
+            if !text.is_empty()
+                && (credentials::secret_name(key) || credentials::value_shape_secret(text)) =>
+        {
+            Value::String(credentials::MASK.into())
+        }
+        _ => masked_value(key, value, 0, false),
+    }
+}
+
 pub fn load_config(
     harness: &AntigravityHarness,
     _project: &Path,
 ) -> Result<ConfigSnapshot, String> {
-    let layer = json_store::settings_layer("user", &harness.settings_path())?;
+    let mut layer = json_store::settings_layer("user", &harness.settings_path())?;
+    for (key, value) in &mut layer.values {
+        *value = mask_setting(key, value);
+    }
     let effective = layer
         .values
         .iter()

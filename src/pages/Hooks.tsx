@@ -40,14 +40,13 @@ export function Hooks() {
 }
 
 function CommandHooks({ policy }: { policy: HookPolicy }) {
-  const { invoke, client, label } = useHarness();
+  const { invoke, client, label, projectRoot, setProjectRoot } = useHarness();
   const [hooks, setHooks] = useState<Hook[]>([]);
   const [hookSearch, setHookSearch] = useState("");
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">(
     "loading",
   );
   const [layer, setLayer] = useState<Layer>("user");
-  const [projectRoot, setProjectRoot] = useState<string | null>(null);
   const [event, setEvent] = useState(policy.events[0] ?? "");
   const [sources, setSources] = useState<HookSource[]>([]);
   const [sourceId, setSourceId] = useState("");

@@ -33,8 +33,7 @@ type LoadState =
   | { kind: "error"; message: string };
 
 export function Skills() {
-  const { invoke: request, label, profile } = useHarness();
-  const [projectRoot, setProjectRoot] = useState<string | null>(null);
+  const { invoke: request, label, profile, projectRoot, setProjectRoot } = useHarness();
   const invoke = useCallback(<T,>(command: string, args?: Record<string, unknown>) =>
     request<T>(command, profile.projectSkills ? { ...args, projectRoot } : args), [request, profile.projectSkills, projectRoot]);
   const [skills, setSkills] = useState<Skill[]>([]);

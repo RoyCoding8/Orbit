@@ -403,4 +403,45 @@ describe("App shell", () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("transcript_list_sessions", { client, refresh: true, projectRoot: client === "pi" ? "D:/chosen-project" : null }));
     expect(await screen.findByText(/Found 0 .* chats/)).toBeInTheDocument();
   });
+  it("persists chosen projectRoot across navigation tabs and setup export", async () => {
+    const chosen = "D:/workspace/shared-repo";
+    vi.mocked(invoke).mockImplementation(async command => {
+      if (command === "project_choose") return chosen;
+      if (command === "config_load") return {
+        layers: [{ name: "user", path: "C:/home/.junie/config.json", values: {} }],
+        effective: {},
+      };
+      if (command === "memory_catalog") return {
+        projectRoot: chosen,
+        groups: [],
+        files: [],
+        excludedCustomMemoryDirectory: null,
+      };
+      if (command === "history_load") return { versions: [], logs: [] };
+      if (command === "transcript_list_sessions") return { sessions: [], source: "", warnings: [] };
+      if (command === "harness_archive_inventory") return { checksum: "", projectRoot: chosen, entries: [], warnings: [] };
+      return [];
+    });
+    render(<App />);
+    fireEvent.change(screen.getByLabelText("Coding agent"), { target: { value: "junie" } });
+    fireEvent.click(screen.getByRole("button", { name: /Settings/ }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("config_load", { client: "junie", projectRoot: null }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose project" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("config_load", { client: "junie", projectRoot: chosen }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Skills" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("skills_inventory", { client: "junie", projectRoot: chosen }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Memories" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("memory_catalog", { client: "junie", projectRoot: chosen }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Hooks" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("hooks_list", { client: "junie", projectRoot: chosen }));
+
+    fireEvent.click(screen.getByRole("button", { name: "History" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("history_load", { client: "junie", projectRoot: chosen }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Export setup" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("harness_archive_inventory", { client: "junie", projectRoot: chosen }));
+  });
 });

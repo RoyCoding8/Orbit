@@ -72,9 +72,8 @@ export function HarnessTransfer() {
 }
 
 function TransferDialog({ mode, onClose }: { mode: Mode; onClose: () => void }) {
-  const { invoke, label, client } = useHarness();
+  const { invoke, label, client, projectRoot, setProjectRoot } = useHarness();
   const [loaded, setLoaded] = useState<Loaded>({ kind: "loading" });
-  const [projectRoot, setProjectRoot] = useState<string | null>(null);
   const [destination, setDestination] = useState<Destination | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [replacements, setReplacements] = useState<Set<string>>(new Set());

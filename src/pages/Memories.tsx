@@ -48,7 +48,7 @@ function initialView(file: MemoryFile | null): EditorView {
 }
 
 export function Memories() {
-  const { invoke, label, profile } = useHarness();
+  const { invoke, label, profile, projectRoot, setProjectRoot } = useHarness();
   const [catalog, setCatalog] = useState<MemoryCatalog | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -122,12 +122,12 @@ export function Memories() {
 
   const confirmDiscard = () => !dirty || window.confirm("Discard your unsaved memory changes?");
 
-  const load = async (projectRoot: string | null = catalog?.projectRoot ?? null, confirmed = false) => {
+  const load = async (targetProjectRoot: string | null = projectRoot ?? catalog?.projectRoot ?? null, confirmed = false) => {
     if (!confirmed && !confirmDiscard()) return;
     const request = startLoad();
     setLoadState({ kind: "loading" });
     try {
-      const next = await invoke<MemoryCatalog>("memory_catalog", { projectRoot });
+      const next = await invoke<MemoryCatalog>("memory_catalog", { projectRoot: targetProjectRoot });
       if (!request.isCurrent()) return;
       setCatalog(next);
       const active = next.files.find((file) => file.id === selectedId) ?? next.files[0] ?? null;
@@ -143,7 +143,7 @@ export function Memories() {
     }
   };
 
-  useEffect(() => { void load(null); }, []);
+  useEffect(() => { void load(projectRoot, true); }, [projectRoot]);
 
   const incoming = useMemo(() => catalog?.files.flatMap((file) =>
     file.references.filter((reference) => reference.status === "known" && reference.fileId === selected?.id)
@@ -161,8 +161,11 @@ export function Memories() {
     if (!confirmDiscard()) return;
     setBusy(true);
     try {
-      const projectRoot = await invoke<string | null>("project_choose");
-      if (projectRoot) await load(projectRoot, true);
+      const selected = await invoke<string | null>("project_choose");
+      if (selected) {
+        setProjectRoot(selected);
+        if (selected === projectRoot) await load(selected, true);
+      }
     } catch (reason) { setError(String(reason)); }
     finally { setBusy(false); }
   };

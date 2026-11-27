@@ -80,11 +80,10 @@ function groupSessions(sessions: Session[]) {
 }
 
 export function Transcripts() {
-  const { invoke, label, profile } = useHarness();
+  const { invoke, label, profile, projectRoot, setProjectRoot } = useHarness();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [source, setSource] = useState("");
   const [filter, setFilter] = useState("");
-  const [projectRoot, setProjectRoot] = useState<string | null>(null);
   const [sessionState, setSessionState] = useState<
     "loading" | "ready" | "error"
   >("loading");

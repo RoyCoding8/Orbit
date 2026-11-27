@@ -382,6 +382,9 @@ fn config_path(
                 _ => unreachable!(),
             }
         }),
+        Slot::Hooks if harness.id().0 == "muse" && scope == Scope::User => {
+            Ok(harness.settings_path())
+        }
         Slot::Hooks
             if matches!(harness.id().0, "codex" | "antigravity" | "cursor")
                 || (harness.id().0 == "muse" && scope == Scope::Project) =>
@@ -660,6 +663,7 @@ pub(super) fn updated(
     before: &[u8],
     bytes: &[u8],
     harness: &str,
+    is_user_settings: bool,
 ) -> Result<Vec<u8>, String> {
     match &entry.resource {
         Resource::File { .. } => Ok(bytes.to_vec()),
@@ -674,7 +678,7 @@ pub(super) fn updated(
                     .entry("name")
                     .or_insert_with(|| Value::String(name.trim_end_matches(".json").into()));
             }
-            if harness == "muse" && matches!(slot, Slot::Settings) {
+            if harness == "muse" && (matches!(slot, Slot::Settings) || is_user_settings) {
                 value
                     .as_object_mut()
                     .ok_or("Invalid native config")?

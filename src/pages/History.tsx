@@ -74,13 +74,12 @@ function matchesSearch(query: string, fields: readonly (string | null | undefine
 }
 
 export function History() {
-  const { invoke } = useHarness();
+  const { invoke, projectRoot, setProjectRoot } = useHarness();
   const [snapshot, setSnapshot] = useState<HistorySnapshot>(emptySnapshot);
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [tab, setTab] = useState<Tab>("versions");
   const [scopeFilter, setScopeFilter] = useState<ScopeFilter>("all");
   const [search, setSearch] = useState("");
-  const [projectRoot, setProjectRoot] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const { start: startLoad } = useSequencedLoad();

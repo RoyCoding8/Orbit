@@ -909,3 +909,47 @@ fn muse_junie_and_cursor_setup_round_trip_preserves_versions_and_resources() {
             .unwrap();
     assert_eq!(raw["version"], 1);
 }
+
+#[test]
+fn muse_user_wide_import_accepts_settings_mcp_and_project_hooks() {
+    let src = Fixture::new("muse");
+    src.write(
+        &src.harness.settings_path(),
+        r#"{"schema_version":1,"model":"portable","mcp_servers":{"docs":{"transport":"stdio","command":"echo","args":["ok"],"enabled":true}}}"#,
+    );
+    src.write(
+        &src.project.join(".muse/hooks.json"),
+        r#"{"hooks":{"PostToolUse":[{"hooks":[{"type":"command","command":"echo ok"}]}]}}"#,
+    );
+    src.export(&[Category::Settings, Category::Mcps, Category::Hooks]);
+
+    let dst = Fixture::new("muse");
+    fs::copy(&src.archive, &dst.archive).unwrap();
+    let user_preview =
+        preview(&dst.harness, &dst.project, &dst.archive, Destination::User).unwrap();
+    assert_eq!(user_preview.entries.len(), 3);
+    let choices: Vec<_> = user_preview
+        .entries
+        .iter()
+        .map(|entry| Choice {
+            id: entry.id.clone(),
+            replace: true,
+            expected: entry.expected.clone(),
+        })
+        .collect();
+    apply(
+        &dst.harness,
+        &dst.project,
+        &dst.archive,
+        &user_preview.checksum,
+        Destination::User,
+        &choices,
+    )
+    .unwrap();
+    let saved: Value =
+        serde_json::from_slice(&fs::read(dst.harness.settings_path()).unwrap()).unwrap();
+    assert_eq!(saved["schema_version"], 1);
+    assert_eq!(saved["model"], "portable");
+    assert!(saved["mcp_servers"]["docs"].is_object());
+    assert!(saved["hooks"]["PostToolUse"].is_array());
+}

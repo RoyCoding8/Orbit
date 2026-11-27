@@ -245,3 +245,100 @@ fn manifest_containment_owned_traversal_unclosed_frontmatter_and_read_error() {
         .unwrap();
     assert!(rule.load_behavior.contains("Missing rule frontmatter"));
 }
+
+#[test]
+fn user_manifest_accepts_gemini_antigravity_skills_and_rejects_outside_paths() {
+    let temp = crate::test_support::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let project = temp.path().join("project");
+    let outside = temp.path().join("outside");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    let skill = "---\nname: app-skill\ndescription: Antigravity app skill\n---\nBody";
+    let agy_skills = home.join(".gemini/antigravity/skills");
+    write(agy_skills.join("app-skill/SKILL.md"), skill);
+    write(outside.join("secret/SKILL.md"), skill);
+
+    let h = AntigravityHarness::new(home);
+    let agy_skills_slash = agy_skills.to_string_lossy().replace('\\', "/");
+    write(
+        h.config_root().join("skills.json"),
+        &json!({"entries": [{"path": agy_skills_slash}]}).to_string(),
+    );
+    let inventory = skills::inventory(&h, &project).unwrap();
+    assert!(inventory.iter().any(|entry| entry.name == "app-skill"));
+
+    write(
+        h.config_root().join("skills.json"),
+        &json!({"entries": [{"path": "../outside"}]}).to_string(),
+    );
+    let rel_err = skills::inventory(&h, &project).unwrap_err();
+    assert!(rel_err.contains("escapes"));
+
+    write(
+        h.config_root().join("skills.json"),
+        &json!({"entries": [{"path": outside.to_string_lossy()}]}).to_string(),
+    );
+    let abs_err = skills::inventory(&h, &project).unwrap_err();
+    assert!(abs_err.contains("escapes"));
+}
+
+#[test]
+fn config_masks_credentials_on_read_and_restores_or_rejects_placeholders_on_write() {
+    let temp = crate::test_support::tempdir().unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let h = AntigravityHarness::new(temp.path().to_owned());
+    write(
+        h.settings_path(),
+        r#"{"apiKey":"sk-top-secret","model_providers.smoke.apiKey":"sk-dotted-secret","model_providers":{"smoke":{"apiKey":"sk-nested-secret"}},"account.folders.smokeFolder":true,"theme":"dark"}"#,
+    );
+
+    let snap = config::load_config(&h, &project).unwrap();
+    assert_eq!(snap.layers[0].values["apiKey"], "••••••••");
+    assert_eq!(snap.effective["apiKey"].value, "••••••••");
+    assert_eq!(
+        snap.layers[0].values["model_providers.smoke.apiKey"],
+        "••••••••"
+    );
+    assert_eq!(
+        snap.effective["model_providers.smoke.apiKey"].value,
+        "••••••••"
+    );
+    assert_eq!(
+        snap.layers[0].values["model_providers"]["smoke"]["apiKey"],
+        "••••••••"
+    );
+    assert_eq!(snap.effective["account.folders.smokeFolder"].value, true);
+    assert_eq!(snap.effective["theme"].value, "dark");
+
+    config::apply_value(
+        &h,
+        &project,
+        SettingsLayer::User,
+        "apiKey",
+        json!("••••••••"),
+    )
+    .unwrap();
+    config::apply_value(
+        &h,
+        &project,
+        SettingsLayer::User,
+        "model_providers.smoke.apiKey",
+        json!("••••••••"),
+    )
+    .unwrap();
+    let saved = json_store::read_value(&h.settings_path()).unwrap();
+    assert_eq!(saved["apiKey"], "sk-top-secret");
+    assert_eq!(saved["model_providers.smoke.apiKey"], "sk-dotted-secret");
+
+    assert!(config::apply_value(
+        &h,
+        &project,
+        SettingsLayer::User,
+        "freshApiKey",
+        json!("••••••••"),
+    )
+    .is_err());
+}

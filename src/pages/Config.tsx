@@ -20,10 +20,9 @@ type Snapshot = {
 const emptySnapshot: Snapshot = { layers: [], effective: {} };
 
 export function Config() {
-  const { invoke, label, profile } = useHarness();
+  const { invoke, label, profile, projectRoot, setProjectRoot } = useHarness();
   const [snapshot, setSnapshot] = useState<Snapshot>(emptySnapshot);
   const [activeLayer, setActiveLayer] = useState<LayerName>("user");
-  const [projectRoot, setProjectRoot] = useState<string | null>(null);
   const [key, setKey] = useState("");
   const [valueText, setValueText] = useState("");
   const [effectiveSearch, setEffectiveSearch] = useState("");

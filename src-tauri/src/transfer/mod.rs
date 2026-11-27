@@ -464,7 +464,13 @@ pub fn apply(
         if !targets.insert((identity, key)) {
             return Err("Multiple selected resources have the same destination. Choose one source for each destination, or preserve original scopes.".into());
         }
-        *after = resources::updated(entry, after, bytes, harness.id().0)?;
+        *after = resources::updated(
+            entry,
+            after,
+            bytes,
+            harness.id().0,
+            path == harness.settings_path(),
+        )?;
     }
     let mut files = 0;
     for (path, (before, after)) in writes {

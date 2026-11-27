@@ -359,6 +359,7 @@ pub fn restore(
             } else {
                 None
             };
+            crate::harness::fs_guard::prepare_plain_parent(&target_path)?;
             ledger::write(
                 harness.config_root(),
                 resource_kind(&row.resource_kind)?,
@@ -2326,5 +2327,105 @@ mod tests {
                 "{client}"
             );
         }
+    }
+
+    #[test]
+    fn junie_restore_skill_edit_version_recreates_deleted_parent_dir() {
+        use crate::harness::{junie::JunieHarness, selected::SelectedHarness};
+        let dir = crate::test_support::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let project = home.join("project");
+        let config = home.join(".junie");
+        let skill_dir = config.join("skills/orbit-smoke");
+        let skill_file = skill_dir.join("SKILL.md");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        let original = "---\nname: orbit-smoke\ndescription: Smoke\n---\nOriginal\n";
+        let edited = "---\nname: orbit-smoke\ndescription: Smoke\n---\nEdited\n";
+        std::fs::write(&skill_file, original).unwrap();
+        let harness = SelectedHarness::Junie(JunieHarness::new(config, home));
+
+        let entry = harness
+            .skills_inventory(&project)
+            .unwrap()
+            .into_iter()
+            .find(|e| Path::new(&e.path) == skill_file)
+            .unwrap();
+        harness
+            .skill_edit(&project, &entry.id, original, edited)
+            .unwrap();
+        harness.skill_uninstall(&project, &entry.id).unwrap();
+        assert!(!skill_dir.exists());
+
+        let snap = load(&harness, &project).unwrap();
+        let edit_ver = snap
+            .versions
+            .iter()
+            .find(|v| v.target == skill_file && v.action == "edit" && v.kind == VersionKind::File)
+            .unwrap();
+        assert!(edit_ver.current_checksum.is_none());
+        assert!(edit_ver.restorable);
+        restore(&harness, &project, &edit_ver.id, None).unwrap();
+        assert_eq!(std::fs::read_to_string(&skill_file).unwrap(), original);
+    }
+
+    #[test]
+    fn junie_settings_writes_create_restorable_versions_for_user_and_project() {
+        use crate::harness::{
+            claude::config::SettingsLayer, junie::JunieHarness, selected::SelectedHarness,
+        };
+        let dir = crate::test_support::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let project = home.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let harness = SelectedHarness::Junie(JunieHarness::new(home.join(".junie"), home));
+
+        for layer in [SettingsLayer::User, SettingsLayer::Project] {
+            for value in ["first", "second"] {
+                harness
+                    .config_apply(&project, layer, "orbitLayerTest", serde_json::json!(value))
+                    .unwrap();
+            }
+        }
+
+        let snap = load(&harness, &project).unwrap();
+        let user_ver = snap
+            .versions
+            .iter()
+            .find(|v| {
+                v.resource_kind == "settings"
+                    && v.scope == HistoryScope::Global
+                    && v.target == harness.settings_path()
+            })
+            .unwrap();
+        let project_ver = snap
+            .versions
+            .iter()
+            .find(|v| {
+                v.resource_kind == "settings"
+                    && v.scope == HistoryScope::Project
+                    && v.target == project.join(".junie/config.json")
+            })
+            .unwrap();
+        assert!(user_ver.restorable);
+        assert!(project_ver.restorable);
+
+        restore(
+            &harness,
+            &project,
+            &project_ver.id,
+            project_ver.current_checksum.as_deref(),
+        )
+        .unwrap();
+        restore(
+            &harness,
+            &project,
+            &user_ver.id,
+            user_ver.current_checksum.as_deref(),
+        )
+        .unwrap();
+        let loaded = harness.config_load(&project).unwrap();
+        assert_eq!(loaded.layers[0].values["orbitLayerTest"], "first");
+        assert_eq!(loaded.layers[1].values["orbitLayerTest"], "first");
     }
 }

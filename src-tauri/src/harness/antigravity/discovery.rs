@@ -2,7 +2,7 @@ use super::AntigravityHarness;
 use crate::harness::{fs_guard, json_store, Harness};
 use std::{
     collections::{BTreeMap, HashSet},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 pub const PROJECT_DIRS: [&str; 4] = [".agents", ".agent", "_agents", "_agent"];
@@ -45,7 +45,15 @@ pub fn files(
             let doc = json_store::read_value(&path)?;
             excludes.extend(names(&doc, "exclude")?);
         }
-        manifest(&path, kind, &mut visited, &mut out, 0, &mut remaining)?;
+        manifest(
+            harness,
+            &path,
+            kind,
+            &mut visited,
+            &mut out,
+            0,
+            &mut remaining,
+        )?;
     }
     out.retain(|path, _| !matches_name(path, kind, &excludes));
     if kind == "skills" {
@@ -127,7 +135,29 @@ fn matches_name(path: &Path, kind: &str, names: &[String]) -> bool {
     })
 }
 
+fn entry_within_allowed_roots(
+    harness: &AntigravityHarness,
+    manifest_path: &Path,
+    base: &Path,
+    target: &Path,
+) -> bool {
+    if fs_guard::path_is_within(target, base) {
+        return true;
+    }
+    let gemini = harness.home().join(".gemini");
+    fs_guard::path_is_within(manifest_path, &gemini) && fs_guard::path_is_within(target, &gemini)
+}
+
+fn join_entry(base: &Path, value: &str) -> Option<PathBuf> {
+    let path = Path::new(value);
+    if path.components().any(|part| part == Component::ParentDir) {
+        return None;
+    }
+    Some(base.join(path))
+}
+
 fn manifest(
+    harness: &AntigravityHarness,
     path: &Path,
     kind: &str,
     seen: &mut HashSet<PathBuf>,
@@ -174,27 +204,37 @@ fn manifest(
                 .ok_or("Discovery entry requires a path")?;
             let only = names(entry, "include_only")?;
             let excluded = names(entry, "exclude")?;
-            let target = base.join(value);
             let mut found = BTreeMap::new();
             if key == "inherits" {
-                manifest(&target, kind, seen, &mut found, depth + 1, remaining)?;
+                manifest(
+                    harness,
+                    &base.join(value),
+                    kind,
+                    seen,
+                    &mut found,
+                    depth + 1,
+                    remaining,
+                )?;
             } else {
-                if !fs_guard::path_is_within(&target, base) {
+                let Some(target) = join_entry(base, value)
+                    .filter(|target| entry_within_allowed_roots(harness, path, base, target))
+                else {
                     return Err(format!(
                         "Discovery entry path `{value}` escapes its manifest root"
                     ));
-                }
+                };
                 if entry.get("include_only").is_some()
                     && target.is_dir()
                     && !(kind == "skills" && target.join("SKILL.md").is_file())
                 {
                     for name in &only {
-                        let candidate = target.join(name);
-                        if !fs_guard::path_is_within(&candidate, &target) {
+                        let Some(candidate) = join_entry(&target, name)
+                            .filter(|candidate| fs_guard::path_is_within(candidate, &target))
+                        else {
                             return Err(format!(
                                 "Discovery include_only entry `{name}` escapes its target directory"
                             ));
-                        }
+                        };
                         scan(&candidate, kind, &[], &mut found)?;
                     }
                 } else {

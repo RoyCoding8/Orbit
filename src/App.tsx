@@ -49,13 +49,14 @@ const views = {
 export function App() {
   const [page, setPage] = useState<Page>("overview");
   const [client, setClient] = useState<Client>("claude-code");
+  const [projectRoot, setProjectRoot] = useState<string | null>(null);
   const [theme, setTheme] = useState<Theme>(readTheme);
   const clientLabel = harnesses[client].label;
   const SelectedPage = page === "overview" ? null : views[page];
 
   return (
     <m3e-theme color="#2563eb" scheme={theme === "system" ? "auto" : theme} density={-1} strong-focus>
-      <HarnessProvider client={client} key={client}>
+      <HarnessProvider client={client} projectRoot={projectRoot} setProjectRoot={setProjectRoot} key={client}>
         <div className="application-shell" data-theme={theme}>
           <header className="topbar">
             <div className="brand-lockup">
