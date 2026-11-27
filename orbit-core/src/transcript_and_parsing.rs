@@ -215,6 +215,17 @@ mod tests {
     use std::io::{self, Cursor};
 
     #[test]
+    fn checksum_string_parser_handles_mixed_hex_and_rejects_non_ascii() {
+        let hex = "0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEF";
+        assert_eq!(parse_checksum(hex), parse_checksum_bytes(hex.as_bytes()));
+        assert!(parse_checksum(&format!("é{}", "0".repeat(62))).is_err());
+        assert!(parse_checksum(&"é".repeat(32)).is_err());
+        for len in 66..=68 {
+            assert!(parse_checksum(&"0".repeat(len)).is_err());
+        }
+    }
+
+    #[test]
     fn frontmatter_preserves_multiline_unicode() {
         assert_eq!(
             extract_frontmatter_body("\u{feff}---\r\nname: 雪\r\ndescription: café\r\n---\r\nbody"),

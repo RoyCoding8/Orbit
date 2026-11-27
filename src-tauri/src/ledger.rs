@@ -469,9 +469,11 @@ fn reconcile_pending_for_target(
     target: &str,
     guard: &atomic::MutationGuard,
 ) -> Result<(), String> {
-    for row in read(config_root)? {
-        if row.target.as_deref().map(Path::new) == Some(Path::new(target))
-            && row.status == Some(LedgerStatus::Pending)
+    let latest = read(config_root)?
+        .into_iter()
+        .rfind(|row| row.target.as_deref().map(Path::new) == Some(Path::new(target)));
+    if let Some(row) = latest {
+        if row.status == Some(LedgerStatus::Pending)
             && operation_state(&row)? == OperationState::Applied
         {
             complete_mutation(
@@ -873,6 +875,63 @@ mod tests {
         assert_eq!(rows[0].status, Some(LedgerStatus::Applied));
         assert_eq!(rows[1].status, Some(LedgerStatus::Applied));
         assert_eq!(read_applied(harness.config_root()).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn retry_does_not_credit_an_older_unpublished_write_for_matching_bytes() {
+        let (_dir, harness) = fixture();
+        let root = harness.config_root();
+        let target = harness.settings_path();
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"before").unwrap();
+        let abandoned_backup = backup_path(root, "resource", "edit");
+        {
+            let guard = atomic::lock_mutations(&target).unwrap();
+            let plan = atomic::MutationPlan {
+                target: target.clone(),
+                backup: Some(abandoned_backup.clone()),
+                before_checksum: Some(atomic::hex(&Sha256::digest(b"before"))),
+                after_checksum: Some(atomic::hex(&Sha256::digest(b"after"))),
+            };
+            let row = row_for_plan("settings", "resource", "edit", "abandoned", &plan);
+            reserve_row_locked(root, &row, &guard).unwrap();
+            std::fs::create_dir_all(abandoned_backup.parent().unwrap()).unwrap();
+            std::fs::write(&abandoned_backup, b"before").unwrap();
+        }
+
+        let retry_backup = backup_path(root, "resource", "edit");
+        let interrupted = atomic::write_recorded(
+            &target,
+            atomic::RecordedWrite::Bytes(b"after"),
+            Some(&retry_backup),
+            |plan, guard| {
+                let row = row_for_plan("settings", "resource", "edit", "published", plan);
+                reserve_row_locked(root, &row, guard)
+            },
+            |_, _| Err("simulated ledger finalization failure".to_owned()),
+        );
+        assert!(matches!(
+            interrupted,
+            Err(atomic::RecordedMutationError::Finalization(_))
+        ));
+        assert_eq!(std::fs::read(&target).unwrap(), b"after");
+
+        let next_backup = backup_path(root, "resource", "edit");
+        write(
+            root,
+            ResourceKind::Settings,
+            "resource",
+            "edit",
+            &target,
+            atomic::RecordedWrite::Bytes(b"next"),
+            Some(&next_backup),
+        )
+        .unwrap();
+
+        let applied = read_applied(root).unwrap();
+        assert_eq!(applied.len(), 2);
+        assert_eq!(applied[0].op.as_deref(), Some("published"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"next");
     }
 
     #[test]

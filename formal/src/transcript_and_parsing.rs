@@ -3,79 +3,34 @@
 #[cfg(kani)]
 mod verification {
     use orbit_core::transcript_and_parsing::{
-        extract_frontmatter_body_bytes, parse_checksum, parse_checksum_bytes, read_probe_limit,
+        extract_frontmatter_body_bytes, parse_checksum_bytes, read_probe_limit,
     };
 
-    fn nibble_to_hex(n: u8, uppercase: bool) -> u8 {
-        if n < 10 {
-            b'0' + n
-        } else if uppercase {
-            b'A' + (n - 10)
-        } else {
-            b'a' + (n - 10)
-        }
-    }
-
-    fn encode_hex_32(bytes: &[u8; 32], uppercase: bool) -> [u8; 64] {
-        let mut out = [0u8; 64];
-        for i in 0..32 {
-            out[i * 2] = nibble_to_hex(bytes[i] >> 4, uppercase);
-            out[i * 2 + 1] = nibble_to_hex(bytes[i] & 0x0f, uppercase);
-        }
-        out
-    }
-
     #[kani::proof]
+    #[kani::unwind(66)]
     fn proof_parse_checksum_panic_free_and_roundtrip() {
-        let mode: u8 = kani::any();
-        match mode % 5 {
-            0 => {
-                let mut digest = [0x5Au8; 32];
-                let idx: usize = kani::any();
-                kani::assume(idx < 32);
-                let sym_byte: u8 = kani::any();
-                digest[idx] = sym_byte;
-                let uppercase: bool = kani::any();
-                let hex = encode_hex_32(&digest, uppercase);
-                let decoded = parse_checksum_bytes(&hex).unwrap();
-                assert_eq!(decoded[idx], sym_byte);
+        if kani::any() {
+            let raw: [u8; 64] = kani::any();
+            let decoded = parse_checksum_bytes(&raw);
+            assert_eq!(decoded.is_ok(), raw.iter().all(u8::is_ascii_hexdigit));
+            if let Ok(digest) = decoded {
+                let hex = b"0123456789abcdef";
+                for i in 0..digest.len() {
+                    assert_eq!(
+                        hex[usize::from(digest[i] >> 4)],
+                        raw[i * 2].to_ascii_lowercase()
+                    );
+                    assert_eq!(
+                        hex[usize::from(digest[i] & 15)],
+                        raw[i * 2 + 1].to_ascii_lowercase()
+                    );
+                }
             }
-            1 => {
-                let mut corrupted = [b'a'; 64];
-                let pos: usize = kani::any();
-                kani::assume(pos < 64);
-                let bad_byte: u8 = kani::any();
-                kani::assume(!bad_byte.is_ascii_hexdigit());
-                corrupted[pos] = bad_byte;
-                assert!(parse_checksum_bytes(&corrupted).is_err());
-            }
-            2 => {
-                let buf = [b'0'; 64];
-                let short_len: usize = kani::any();
-                kani::assume(short_len < 64);
-                assert!(parse_checksum_bytes(&buf[..short_len]).is_err());
-            }
-            3 => {
-                let buf = [b'0'; 68];
-                let long_len: usize = kani::any();
-                kani::assume((65..=68).contains(&long_len));
-                assert!(parse_checksum_bytes(&buf[..long_len]).is_err());
-            }
-            _ => {
-                let mut multibyte = [0xC3u8; 64];
-                multibyte[1] = 0xA9;
-                assert!(parse_checksum_bytes(&multibyte).is_err());
-                // Valid UTF-8 `&str` boundary cases: 64 bytes (63 chars) and 64 bytes (32 chars).
-                assert!(parse_checksum(
-                    "é00000000000000000000000000000000000000000000000000000000000000"
-                )
-                .is_err());
-                assert!(parse_checksum("éééééééééééééééééééééééééééééééé").is_err());
-                assert!(parse_checksum(
-                    "0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEF"
-                )
-                .is_ok());
-            }
+        } else {
+            let raw: [u8; 65] = kani::any();
+            let len: usize = kani::any();
+            kani::assume(len <= raw.len() && len != 64);
+            assert!(parse_checksum_bytes(&raw[..len]).is_err());
         }
     }
 

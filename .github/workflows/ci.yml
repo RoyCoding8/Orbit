@@ -73,7 +73,7 @@ jobs:
           cargo fmt --manifest-path orbit-core/Cargo.toml --check
           cargo fmt --manifest-path formal/Cargo.toml --check
           cargo clippy --manifest-path formal/Cargo.toml -- -D warnings
-      - name: Check journal liveness
+      - name: Check journal safety and liveness
         run: |
           curl --fail --silent --show-error --location --retry 3 \
             https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar \
