@@ -161,15 +161,6 @@ pub(crate) fn canonical_or_missing_tail(path: &Path) -> Option<PathBuf> {
 /// components and symlinks along the path. Works even when `path` or `root`
 /// does not yet exist on disk.
 pub(crate) fn path_is_within(path: &Path, root: &Path) -> bool {
-    if path
-        .components()
-        .any(|component| matches!(component, Component::ParentDir))
-        || root
-            .components()
-            .any(|component| matches!(component, Component::ParentDir))
-    {
-        return false;
-    }
     let Some(resolved_path) = canonical_or_missing_tail(path) else {
         return false;
     };
@@ -178,8 +169,6 @@ pub(crate) fn path_is_within(path: &Path, root: &Path) -> bool {
     };
     resolved_path.starts_with(&resolved_root)
 }
-
-pub(crate) use orbit_core::path_safety::normalize_lexical;
 
 pub(crate) fn validate_plain_tree(path: &Path) -> Result<(), String> {
     let metadata = plain_metadata(path)?;
@@ -247,6 +236,19 @@ pub(crate) fn safe_directory_checksum(path: &Path) -> Result<String, String> {
 
 pub(crate) fn ensure_backup_path(config_root: &Path, backup: &Path) -> Result<(), String> {
     ensure_plain_directory(backup)?;
+    ensure_backup_parent(config_root, backup)
+}
+
+pub(crate) fn ensure_backup_file_path(config_root: &Path, backup: &Path) -> Result<(), String> {
+    ensure_plain_components(backup)?;
+    let metadata = fs::symlink_metadata(backup).map_err(|error| error.to_string())?;
+    if is_link_or_reparse(&metadata) || !metadata.is_file() {
+        return Err("skill backup is not a plain file".into());
+    }
+    ensure_backup_parent(config_root, backup)
+}
+
+fn ensure_backup_parent(config_root: &Path, backup: &Path) -> Result<(), String> {
     let backup_root = ledger::backup_root(config_root);
     ensure_plain_directory(&backup_root)?;
     let actual_parent = canonical_existing_dir(backup.parent().ok_or("backup has no parent")?)?;
@@ -257,18 +259,45 @@ pub(crate) fn ensure_backup_path(config_root: &Path, backup: &Path) -> Result<()
     Ok(())
 }
 
-pub(crate) fn ensure_backup_file_path(config_root: &Path, backup: &Path) -> Result<(), String> {
-    ensure_plain_components(backup)?;
-    let metadata = fs::symlink_metadata(backup).map_err(|error| error.to_string())?;
-    if is_link_or_reparse(&metadata) || !metadata.is_file() {
-        return Err("skill backup is not a plain file".into());
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn containment_rejects_parent_components_and_similar_prefixes() {
+        let temp = crate::test_support::tempdir().unwrap();
+        let root = temp.path().join("root");
+        assert!(path_is_within(&root.join("missing/file"), &root));
+        assert!(!path_is_within(&temp.path().join("root-other/file"), &root));
+        assert!(!path_is_within(&root.join("child/../file"), &root));
+        assert!(!path_is_within(&root.join("file"), &root.join("child/..")));
     }
-    let backup_root = ledger::backup_root(config_root);
-    ensure_plain_directory(&backup_root)?;
-    let actual_parent = canonical_existing_dir(backup.parent().ok_or("backup has no parent")?)?;
-    let expected_parent = canonical_existing_dir(&backup_root)?;
-    if actual_parent != expected_parent {
-        return Err("backup is outside the harness backup directory".into());
+
+    #[test]
+    fn backup_guards_require_the_direct_backup_parent() {
+        let temp = crate::test_support::tempdir().unwrap();
+        let root = ledger::backup_root(temp.path());
+        let directory = root.join("backup");
+        fs::create_dir_all(&directory).unwrap();
+        let file = root.join("file");
+        fs::write(&file, b"example").unwrap();
+        let nested = directory.join("file");
+        fs::write(&nested, b"example").unwrap();
+        assert!(ensure_backup_path(temp.path(), &directory).is_ok());
+        assert!(ensure_backup_path(temp.path(), &root).is_err());
+        assert!(ensure_backup_file_path(temp.path(), &file).is_ok());
+        assert!(ensure_backup_file_path(temp.path(), &nested).is_err());
     }
-    Ok(())
+
+    #[cfg(unix)]
+    #[test]
+    fn containment_rejects_links_even_to_an_inside_directory() {
+        let temp = crate::test_support::tempdir().unwrap();
+        let inside = temp.path().join("inside");
+        let link = temp.path().join("link");
+        fs::create_dir(&inside).unwrap();
+        std::os::unix::fs::symlink(&inside, &link).unwrap();
+        assert!(!path_is_within(&link.join("file"), temp.path()));
+        assert!(!path_is_within(&link.join("file"), &link));
+    }
 }

@@ -1,9 +1,6 @@
-//! Pure, dependency-free production domain logic shared between `src-tauri`
-//! and Orbit's Kani formal verification suite (`formal/`).
-//!
-//! This crate depends exclusively on the Rust standard library (`std`) — zero
-//! Tauri, SQLite, tokio, serde, or OS FFI dependencies — so `formal/` can prove
-//! the exact production functions executed by `src-tauri`.
+//! Deterministic production decisions for paths, credentials, journals, and
+//! transcript parsing. The desktop backend supplies filesystem observations,
+//! provider data, and persisted state at the boundary.
 
 pub mod credentials;
 pub mod path_safety;

@@ -26,15 +26,12 @@ pub enum HistoryOperationStatus {
     Unavailable,
 }
 
-/// Abstract checksum token (`u8` represents a distinct SHA-256 digest in bounded proofs).
-pub type DigestId = u8;
-
 /// Prefix marking version-2 tree-boundary-safe directory checksums.
 pub const DIRECTORY_CHECKSUM_PREFIX: &str = "tree-v2-sha256:";
 
 /// Pure state-machine transition resolver for a ledger row given observed
 /// target and backup checksums. Generic over checksum representation `T` so
-/// both `src-tauri` (`&str`) and `formal/` (`DigestId`) execute the exact same logic.
+/// both `src-tauri` (`&str`) and `formal/` (small integer tokens) execute the exact same logic.
 pub fn resolve_operation_state<T: PartialEq>(
     status: Option<LedgerStatus>,
     before_checksum: Option<T>,
@@ -67,13 +64,6 @@ pub fn resolve_operation_state<T: PartialEq>(
     OperationState::Drift
 }
 
-/// Minimal ledger row representation for bounded supersession proofs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RowSummary {
-    pub status: Option<LedgerStatus>,
-    pub target_id: Option<u8>,
-}
-
 /// Generic supersession check: returns true iff `row` is `Pending` with a target
 /// and some strictly later row (`rows[index + 1..]`) targets the same path/ID.
 pub fn pending_was_superseded_by<'a, R, T: PartialEq>(
@@ -89,11 +79,6 @@ pub fn pending_was_superseded_by<'a, R, T: PartialEq>(
                 .iter()
                 .any(|later| target_of(later).is_some_and(|later_target| later_target == target))
         })
-}
-
-/// Specialized supersession check over `RowSummary` slices.
-pub fn pending_was_superseded(rows: &[RowSummary], index: usize, row: &RowSummary) -> bool {
-    pending_was_superseded_by(rows, index, row, |r| r.status, |r| r.target_id)
 }
 
 /// Pure status classifier for a history log row given reservation completeness,
@@ -118,98 +103,14 @@ pub fn classify_history_status(
     }
 }
 
-fn push_bytes<const N: usize>(buf: &mut [u8; N], pos: &mut usize, src: &[u8]) {
-    let mut i = 0;
-    while i < src.len() && *pos < N {
-        buf[*pos] = src[i];
-        *pos += 1;
-        i += 1;
-    }
-}
-
-fn push_u64_dec<const N: usize>(buf: &mut [u8; N], pos: &mut usize, mut val: u64) {
-    let mut tmp = [0u8; 20];
-    let mut n = 0usize;
-    if val == 0 {
-        tmp[0] = b'0';
-        n = 1;
-    } else {
-        while val > 0 {
-            tmp[n] = b'0' + (val % 10) as u8;
-            val /= 10;
-            n += 1;
-        }
-    }
-    while n > 0 && *pos < N {
-        n -= 1;
-        buf[*pos] = tmp[n];
-        *pos += 1;
-    }
-}
-
-/// Stack-allocated formatter for backup filenames: `"{encoded_id}-{action}-{stamp}-{seq}"`.
-pub fn format_backup_filename_buf(
-    encoded_id: &[u8],
-    action: &[u8],
-    stamp: u64,
-    seq: u64,
-) -> ([u8; 24], usize) {
-    let mut buf = [0u8; 24];
-    let mut pos = 0;
-    push_bytes(&mut buf, &mut pos, encoded_id);
-    push_bytes(&mut buf, &mut pos, b"-");
-    push_bytes(&mut buf, &mut pos, action);
-    push_bytes(&mut buf, &mut pos, b"-");
-    push_u64_dec(&mut buf, &mut pos, stamp);
-    push_bytes(&mut buf, &mut pos, b"-");
-    push_u64_dec(&mut buf, &mut pos, seq);
-    (buf, pos)
-}
-
 /// Format a backup filename: `"{encoded_id}-{action}-{stamp}-{seq}"`.
 pub fn format_backup_filename(encoded_id: &str, action: &str, stamp: u128, seq: u64) -> String {
     format!("{encoded_id}-{action}-{stamp}-{seq}")
 }
 
-/// Stack-allocated formatter for operation IDs: `"{kind}:{id}:{action}:{stamp}:{seq}"`.
-pub fn format_op_id_buf(
-    kind: &[u8],
-    id: &[u8],
-    action: &[u8],
-    stamp: u64,
-    seq: u64,
-) -> ([u8; 24], usize) {
-    let mut buf = [0u8; 24];
-    let mut pos = 0;
-    push_bytes(&mut buf, &mut pos, kind);
-    push_bytes(&mut buf, &mut pos, b":");
-    push_bytes(&mut buf, &mut pos, id);
-    push_bytes(&mut buf, &mut pos, b":");
-    push_bytes(&mut buf, &mut pos, action);
-    push_bytes(&mut buf, &mut pos, b":");
-    push_u64_dec(&mut buf, &mut pos, stamp);
-    push_bytes(&mut buf, &mut pos, b":");
-    push_u64_dec(&mut buf, &mut pos, seq);
-    (buf, pos)
-}
-
 /// Format an operation ID: `"{kind}:{id}:{action}:{stamp}:{seq}"`.
 pub fn format_op_id(kind: &str, id: &str, action: &str, stamp: u128, seq: u64) -> String {
     format!("{kind}:{id}:{action}:{stamp}:{seq}")
-}
-
-pub fn slices_equal(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut i = 0;
-    while i < a.len() {
-        if a[i] != b[i] {
-            return false;
-        }
-        i += 1;
-    }
-    true
 }
 
 /// Verify a directory checksum against a recorded expected checksum, refusing
@@ -226,71 +127,35 @@ pub fn verify_directory_checksum(actual: &str, expected: &str) -> Result<(), &'s
     Ok(())
 }
 
-/// Pure single-use reservation state machine for restore/undo operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RestoreReservation {
-    Idle,
-    Reserved { op_seq: u64 },
-    Completed { op_seq: u64 },
-}
+#[cfg(test)]
+mod tests {
+    use super::{format_backup_filename, format_op_id};
 
-impl RestoreReservation {
-    pub fn reserve(&mut self, op_seq: u64) -> Result<(), &'static str> {
-        match *self {
-            RestoreReservation::Idle => {
-                *self = RestoreReservation::Reserved { op_seq };
-                Ok(())
-            }
-            RestoreReservation::Reserved { .. } | RestoreReservation::Completed { .. } => {
-                Err("restore reservation is single-use")
-            }
+    #[test]
+    fn formatter_preserves_delimiters_and_decimal_boundaries() {
+        let encoded = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        for (seq, decimal) in [
+            (0, "0"),
+            (9, "9"),
+            (10, "10"),
+            (u64::MAX - 1, "18446744073709551614"),
+            (u64::MAX, "18446744073709551615"),
+        ] {
+            let timestamp = "340282366920938463463374607431768211455";
+            assert_eq!(
+                format_backup_filename(encoded, "history-restore", u128::MAX, seq),
+                [encoded, "-history-restore-", timestamp, "-", decimal].concat()
+            );
+            assert_eq!(
+                format_op_id("skill", "\u{914d}\u{7f6e}:nightly", "edit", u128::MAX, seq),
+                [
+                    "skill:\u{914d}\u{7f6e}:nightly:edit:",
+                    timestamp,
+                    ":",
+                    decimal
+                ]
+                .concat()
+            );
         }
     }
-
-    pub fn complete(&mut self, op_seq: u64) -> Result<(), &'static str> {
-        match *self {
-            RestoreReservation::Reserved { op_seq: active } if active == op_seq => {
-                *self = RestoreReservation::Completed { op_seq };
-                Ok(())
-            }
-            _ => Err("cannot complete an unreserved or mismatched restore"),
-        }
-    }
-}
-
-/// Precondition gate for restore/undo operations.
-#[derive(Debug, Clone, Copy)]
-pub struct RestorePreconditions {
-    pub reservation_complete: bool,
-    pub superseded: bool,
-    pub op_state: OperationState,
-    pub is_directory: bool,
-    pub is_tree_v2_checksum: bool,
-    pub expected_current: Option<DigestId>,
-    pub observed_current: Option<DigestId>,
-    pub recorded_before: Option<DigestId>,
-    pub observed_backup: Option<DigestId>,
-}
-
-/// Validate all preconditions required before executing a restore or undo.
-pub fn check_restore_preconditions(p: &RestorePreconditions) -> Result<(), &'static str> {
-    if !p.reservation_complete {
-        return Err("incomplete ledger reservation");
-    }
-    if p.superseded || p.op_state != OperationState::Applied {
-        return Err("history entry did not complete and cannot be restored");
-    }
-    let Some(recorded_before) = p.recorded_before else {
-        return Err("history entry has no recorded before checksum");
-    };
-    if p.is_directory && !p.is_tree_v2_checksum {
-        return Err("legacy directory checksum refused");
-    }
-    if p.observed_backup != Some(recorded_before) {
-        return Err("backup checksum does not match recorded preimage");
-    }
-    if p.observed_current != p.expected_current {
-        return Err("stale target checksum; refresh before restoring");
-    }
-    Ok(())
 }

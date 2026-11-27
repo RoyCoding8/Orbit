@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use super::claude::memories::{
     MemoryFile, MemoryReference, MemoryRole, ReferenceKind, ReferenceStatus,
 };
-use super::fs_guard;
+pub(crate) use orbit_core::path_safety::resolve_memory_reference as resolve_reference_with_home;
 
 fn env_home() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE")
@@ -79,33 +79,6 @@ pub(crate) fn without_references(source: &MemoryFile, target: &Path, imports: bo
 pub(crate) fn resolve_reference(source: &Path, target: &str) -> Option<PathBuf> {
     let home = env_home();
     resolve_reference_with_home(source, target, home.as_deref())
-}
-
-pub(crate) fn resolve_reference_with_home(
-    source: &Path,
-    target: &str,
-    home: Option<&Path>,
-) -> Option<PathBuf> {
-    let raw = target
-        .trim()
-        .trim_matches('<')
-        .trim_matches('>')
-        .split('#')
-        .next()?
-        .split('?')
-        .next()?;
-    let candidate = match orbit_core::path_safety::classify_memory_target(raw) {
-        orbit_core::path_safety::MemoryTargetKind::Empty
-        | orbit_core::path_safety::MemoryTargetKind::ExternalScheme => return None,
-        orbit_core::path_safety::MemoryTargetKind::TildeOnly => home?.to_path_buf(),
-        orbit_core::path_safety::MemoryTargetKind::TildeSlash => {
-            let tail = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\"))?;
-            home?.join(tail)
-        }
-        orbit_core::path_safety::MemoryTargetKind::Absolute => PathBuf::from(raw),
-        orbit_core::path_safety::MemoryTargetKind::Relative => source.parent()?.join(raw),
-    };
-    Some(fs_guard::normalize_lexical(&candidate))
 }
 
 pub(crate) fn populate_references<'a>(

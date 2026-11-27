@@ -2,7 +2,7 @@
 name = "orbit-formal"
 version = "0.1.0"
 edition = "2021"
-description = "Kani formal verification proof harnesses directly verifying orbit-core's production security, state-machine, credential, and parsing invariants."
+description = "Bounded Kani safety checks for Orbit's production core."
 publish = false
 
 [dependencies]

@@ -1,100 +1,11 @@
-//! Pure path-safety, containment, lexical normalization, and archive-path
-//! validation logic shared between `src-tauri` and `formal/`.
+//! Deterministic path validation, collision keys, and memory-link resolution.
 
 use std::path::{Component, Path, PathBuf};
-
-/// Abstract lexical path component mirroring `std::path::Component`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PathSeg {
-    Root,
-    Cur,
-    Parent,
-    Normal(u8),
-}
-
-/// Fixed-capacity stack path buffer for allocation-free lexical operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SegPath<const N: usize> {
-    pub data: [PathSeg; N],
-    pub len: usize,
-}
-
-impl<const N: usize> SegPath<N> {
-    pub fn new() -> Self {
-        Self {
-            data: [PathSeg::Cur; N],
-            len: 0,
-        }
-    }
-
-    pub fn push(&mut self, seg: PathSeg) {
-        if self.len < N {
-            self.data[self.len] = seg;
-            self.len += 1;
-        }
-    }
-
-    pub fn pop(&mut self) -> Option<PathSeg> {
-        if self.len == 0 {
-            None
-        } else {
-            self.len -= 1;
-            Some(self.data[self.len])
-        }
-    }
-
-    pub fn last(&self) -> Option<PathSeg> {
-        if self.len == 0 {
-            None
-        } else {
-            Some(self.data[self.len - 1])
-        }
-    }
-
-    pub fn as_slice(&self) -> &[PathSeg] {
-        &self.data[..self.len]
-    }
-}
-
-impl<const N: usize> Default for SegPath<N> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Pure lexical normalizer over abstract path segments.
-///
-/// Resolves `.` and `..` without touching the filesystem. Preserves leading
-/// `..` components on relative paths instead of silently dropping them, and
-/// clamps `..` at `Root` on absolute paths.
-pub fn normalize_lexical_segments<const N: usize>(path: &[PathSeg]) -> SegPath<N> {
-    let mut normalized = SegPath::<N>::new();
-    let mut i = 0;
-    while i < path.len() {
-        let component = path[i];
-        match component {
-            PathSeg::Root => normalized.push(PathSeg::Root),
-            PathSeg::Normal(value) => normalized.push(PathSeg::Normal(value)),
-            PathSeg::Cur => {}
-            PathSeg::Parent => match normalized.last() {
-                Some(PathSeg::Normal(_)) => {
-                    normalized.pop();
-                }
-                Some(PathSeg::Root) => {}
-                None | Some(PathSeg::Parent | PathSeg::Cur) => {
-                    normalized.push(PathSeg::Parent);
-                }
-            },
-        }
-        i += 1;
-    }
-    normalized
-}
 
 /// Lexically normalize `.` and `..` components on a `std::path::Path` without
 /// touching the filesystem. Preserves leading `..` components on relative paths
 /// instead of silently dropping them.
-pub fn normalize_lexical(path: &Path) -> PathBuf {
+fn normalize_lexical(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
@@ -114,81 +25,6 @@ pub fn normalize_lexical(path: &Path) -> PathBuf {
         }
     }
     normalized
-}
-
-pub fn contains_seg(slice: &[PathSeg], target: PathSeg) -> bool {
-    let mut i = 0;
-    while i < slice.len() {
-        if slice[i] == target {
-            return true;
-        }
-        i += 1;
-    }
-    false
-}
-
-pub fn segs_start_with(path: &[PathSeg], prefix: &[PathSeg]) -> bool {
-    if path.len() < prefix.len() {
-        return false;
-    }
-    let mut i = 0;
-    while i < prefix.len() {
-        if path[i] != prefix[i] {
-            return false;
-        }
-        i += 1;
-    }
-    true
-}
-
-/// Pure containment check over lexical path segments.
-pub fn path_is_within_segments(
-    path: &[PathSeg],
-    path_has_link: bool,
-    root: &[PathSeg],
-    root_has_link: bool,
-) -> bool {
-    if contains_seg(path, PathSeg::Parent) || contains_seg(root, PathSeg::Parent) {
-        return false;
-    }
-    if path_has_link || root_has_link {
-        return false;
-    }
-    let resolved_path = normalize_lexical_segments::<4>(path);
-    let resolved_root = normalize_lexical_segments::<4>(root);
-    if resolved_root.len == 0 {
-        return false;
-    }
-    segs_start_with(resolved_path.as_slice(), resolved_root.as_slice())
-}
-
-/// Sentinel segment identifiers for `<config_root>/.orbit/backups`.
-pub const SEG_ORBIT: u8 = 250;
-pub const SEG_BACKUPS: u8 = 251;
-
-/// Pure backup-root containment check (`<config_root>/.orbit/backups/<entry>`).
-pub fn backup_path_is_contained(
-    config_root: &[PathSeg],
-    backup_path: &[PathSeg],
-    backup_has_link: bool,
-    root_has_link: bool,
-) -> bool {
-    if backup_has_link
-        || root_has_link
-        || contains_seg(config_root, PathSeg::Parent)
-        || contains_seg(backup_path, PathSeg::Parent)
-    {
-        return false;
-    }
-    let resolved_backup = normalize_lexical_segments::<6>(backup_path);
-    if resolved_backup.len == 0 {
-        return false;
-    }
-    let parent = &resolved_backup.as_slice()[..resolved_backup.len - 1];
-    let mut expected_root = normalize_lexical_segments::<6>(config_root);
-    expected_root.push(PathSeg::Normal(SEG_ORBIT));
-    expected_root.push(PathSeg::Normal(SEG_BACKUPS));
-    parent == expected_root.as_slice()
 }
 
 /// Return true if `value` is a safe single filename / path component
@@ -314,7 +150,8 @@ pub fn is_valid_relative_component(component: &[u8]) -> bool {
     !is_windows_reserved_device_stem(stem)
 }
 
-fn is_windows_reserved_device_stem(stem: &[u8]) -> bool {
+/// Test a Windows filename stem before its first extension.
+pub fn is_windows_reserved_device_stem(stem: &[u8]) -> bool {
     if eq_icase_3(stem, b"con")
         || eq_icase_3(stem, b"prn")
         || eq_icase_3(stem, b"aux")
@@ -442,25 +279,6 @@ pub fn validate_codex_archive_path(path: &str) -> Result<(), &'static str> {
     validate_codex_archive_path_bytes(path.as_bytes())
 }
 
-/// Allocation-free ASCII case-folding collision normalizer over fixed byte buffers.
-pub fn normalize_collision_bytes<const N: usize>(
-    input: &[u8],
-    case_insensitive: bool,
-) -> ([u8; N], usize) {
-    let mut out = [0u8; N];
-    let len = input.len().min(N);
-    let mut i = 0;
-    while i < len {
-        out[i] = if case_insensitive {
-            input[i].to_ascii_lowercase()
-        } else {
-            input[i]
-        };
-        i += 1;
-    }
-    (out, len)
-}
-
 /// Pure path normalizer for filesystem collision checks. On case-insensitive
 /// filesystems (Windows and macOS default APFS/HFS+), folds case so paths
 /// differing only by letter case are detected as collisions.
@@ -472,93 +290,77 @@ pub fn normalize_collision_path(path: &str, case_insensitive: bool) -> String {
     }
 }
 
-/// Parsed target kind for memory link resolution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemoryTargetKind {
-    Empty,
-    ExternalScheme,
-    TildeOnly,
-    TildeSlash,
-    Absolute,
-    Relative,
-}
-
-fn starts_with_ignore_ascii_case(text: &str, prefix: &str) -> bool {
-    text.as_bytes()
-        .get(..prefix.len())
-        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
-}
-
-/// Classify a cleaned memory-link target string (after trimming `<`/`>` and
-/// stripping `#fragment`/`?query`).
-pub fn classify_memory_target(raw: &str) -> MemoryTargetKind {
-    if raw.is_empty() {
-        MemoryTargetKind::Empty
-    } else if starts_with_ignore_ascii_case(raw, "http:")
-        || starts_with_ignore_ascii_case(raw, "https:")
-        || starts_with_ignore_ascii_case(raw, "mailto:")
-    {
-        MemoryTargetKind::ExternalScheme
+/// Resolve a local memory reference against its source directory or the supplied home.
+pub fn resolve_memory_reference(
+    source: &Path,
+    target: &str,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    let raw = target
+        .trim()
+        .trim_matches('<')
+        .trim_matches('>')
+        .split(['#', '?'])
+        .next()?;
+    let is_external = ["http:", "https:", "mailto:"].iter().any(|scheme| {
+        raw.as_bytes()
+            .get(..scheme.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme.as_bytes()))
+    });
+    let candidate = if raw.is_empty() || is_external {
+        return None;
     } else if raw == "~" {
-        MemoryTargetKind::TildeOnly
-    } else if raw.starts_with("~/") || raw.starts_with("~\\") {
-        MemoryTargetKind::TildeSlash
+        home?.to_path_buf()
+    } else if let Some(tail) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
+        home?.join(tail)
     } else if Path::new(raw).is_absolute() {
-        MemoryTargetKind::Absolute
+        PathBuf::from(raw)
     } else {
-        MemoryTargetKind::Relative
-    }
+        source.parent()?.join(raw)
+    };
+    Some(normalize_lexical(&candidate))
 }
 
-/// Resolve a memory link over abstract lexical path segments.
-pub fn resolve_memory_link_segments(
-    source_parent: Option<&[PathSeg]>,
-    kind: MemoryTargetKind,
-    tail: &[PathSeg],
-    home: Option<&[PathSeg]>,
-) -> Option<SegPath<5>> {
-    match kind {
-        MemoryTargetKind::Empty | MemoryTargetKind::ExternalScheme => None,
-        MemoryTargetKind::TildeOnly => Some(normalize_lexical_segments::<5>(home?)),
-        MemoryTargetKind::TildeSlash => {
-            let home_segs = home?;
-            let mut combined = SegPath::<5>::new();
-            let mut i = 0;
-            while i < home_segs.len() {
-                combined.push(home_segs[i]);
-                i += 1;
-            }
-            let mut j = 0;
-            while j < tail.len() {
-                combined.push(tail[j]);
-                j += 1;
-            }
-            Some(normalize_lexical_segments::<5>(combined.as_slice()))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relative_archive_paths_enforce_byte_and_component_limits() {
+        assert!(validate_relative_path(&"a".repeat(500)).is_ok());
+        assert!(validate_relative_path(&"a".repeat(501)).is_err());
+        assert!(validate_relative_path(&["a"; 24].join("/")).is_ok());
+        assert!(validate_relative_path(&["a"; 25].join("/")).is_err());
+        assert!(validate_relative_path("folder/é.md").is_ok());
+        assert!(validate_relative_path("folder/a\u{009f}.md").is_err());
+    }
+
+    #[test]
+    fn resolves_local_memory_references_in_the_supplied_context() {
+        let source = Path::new("memories/nested/README.md");
+        let home = Path::new("users/home");
+        for (reference, expected) in [
+            ("../Guide.md#heading", "memories/Guide.md"),
+            ("<~/journal/../Todo.md?view=full>", "users/home/Todo.md"),
+            ("~", "users/home"),
+            ("../../../Guide.md", "../Guide.md"),
+        ] {
+            assert_eq!(
+                resolve_memory_reference(source, reference, Some(home)).as_deref(),
+                Some(Path::new(expected))
+            );
         }
-        MemoryTargetKind::Absolute => {
-            let mut combined = SegPath::<5>::new();
-            combined.push(PathSeg::Root);
-            let mut j = 0;
-            while j < tail.len() {
-                combined.push(tail[j]);
-                j += 1;
-            }
-            Some(normalize_lexical_segments::<5>(combined.as_slice()))
+        for reference in ["", "~/Todo.md", "HtTpS://example.test", "MAILTO:someone"] {
+            assert!(resolve_memory_reference(source, reference, None).is_none());
         }
-        MemoryTargetKind::Relative => {
-            let parent = source_parent?;
-            let mut combined = SegPath::<5>::new();
-            let mut i = 0;
-            while i < parent.len() {
-                combined.push(parent[i]);
-                i += 1;
-            }
-            let mut j = 0;
-            while j < tail.len() {
-                combined.push(tail[j]);
-                j += 1;
-            }
-            Some(normalize_lexical_segments::<5>(combined.as_slice()))
-        }
+    }
+
+    #[test]
+    fn collision_keys_follow_the_requested_unicode_case_policy() {
+        let path = "Folder/É.md";
+        let folded = normalize_collision_path(path, true);
+        assert_eq!(folded, "folder/é.md");
+        assert_eq!(normalize_collision_path(&folded, true), folded);
+        assert_eq!(normalize_collision_path(path, false), path);
     }
 }

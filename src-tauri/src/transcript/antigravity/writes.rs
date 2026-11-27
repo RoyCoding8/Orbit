@@ -426,10 +426,10 @@ pub(crate) fn delete_chat(
     let _lock = WRITES
         .lock()
         .map_err(|_| "Antigravity chat lock is unavailable")?;
-    ensure_closed()?;
     let (store, native_id) = identity(id)?;
     drop(validate(harness, id, source)?);
     let root = store_root(harness, store)?;
+    ensure_closed()?;
     let native = native::Native::start(harness, store)?;
     native.call("LoadTrajectory", json!({"cascadeId":native_id}))?;
     let summaries = native.call("GetAllCascadeTrajectories", json!({}))?;

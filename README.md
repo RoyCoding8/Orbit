@@ -2,14 +2,13 @@
   <img src="assets/orbit-readme.svg" alt="Orbit" width="84" height="84" />
   <h1>Orbit</h1>
   <p><strong>A local-first desktop control plane for your AI coding agents.</strong></p>
-  <p>Manage configuration, skills, memories, MCP servers, hooks, setup backups, and chat archives across 9 native CLI agents, with atomic writes, full version history, signed in-app updates, and formally verified core invariants.</p>
+  <p>Manage configuration, skills, memories, MCP servers, hooks, setup backups, and chat archives across 9 native CLI agents, with atomic writes, full version history, and signed in-app updates.</p>
 
   <p>
     <a href="https://github.com/RoyCoding8/Orbit/actions/workflows/ci.yml"><img src="https://github.com/RoyCoding8/Orbit/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI Status" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-2563eb.svg" alt="Apache License 2.0" /></a>
     <a href="https://v2.tauri.app/"><img src="https://img.shields.io/badge/Tauri-v2-24c8db.svg?logo=tauri&logoColor=white" alt="Tauri v2" /></a>
     <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.82%2B-dea584.svg?logo=rust&logoColor=black" alt="Rust 1.82+" /></a>
-    <a href="formal/README.md"><img src="https://img.shields.io/badge/Kani-20%20Proofs%20Verified-16a34a.svg" alt="Kani Formal Verification" /></a>
   </p>
 
   <p>
@@ -58,7 +57,7 @@ See the full [Agent Support & Format Reference](docs/reference.md#agent-support)
 
 ## Architecture
 
-Orbit separates its pure security and state-machine invariants into a zero-FFI `orbit-core` crate shared by both the desktop backend and the Kani formal verification suite:
+The `orbit-core` crate makes deterministic decisions about paths, credentials, journal state, and transcript data. The desktop backend handles filesystem access, process coordination, SQLite, and provider formats.
 
 ```mermaid
 flowchart LR
@@ -71,23 +70,25 @@ flowchart LR
   subgraph Backend["Desktop Backend: src-tauri/ (Rust + Tauri v2)"]
     Commands["Tauri IPC Commands & Plugins\nupdater, process, dialog, window-state"]
     Harnesses["9 Harness Adapters\nClaude, Codex, Kiro, OpenCode, Pi\nAntigravity, Muse, Junie, Cursor"]
-    Engine["Core Engines\nAtomic Ledger & History\nSQLite FTS5 Transcripts, Transfer"]
+    Engine["Ledger & History\nSQLite FTS5 Transcripts, Transfer"]
     Commands --> Harnesses
     Commands --> Engine
   end
 
-  subgraph Core["Verified Pure Core: orbit-core/ (std-only)"]
-    Invariants["path_safety, state_machines\ncredentials, transcript_and_parsing"]
+  subgraph Core["Production rules: orbit-core/ (std-only)"]
+    Rules["Paths, journal, credentials, transcripts"]
   end
 
   subgraph Formal["Formal Verification: formal/"]
-    Kani["Kani 0.68.0 / CBMC\n20 Proof Harnesses"]
+    Kani["Kani bounded safety checks"]
+    TLC["TLC journal progress model"]
   end
 
   Lib -- "Tauri invoke()" --> Commands
-  Harnesses --> Invariants
-  Engine --> Invariants
-  Kani -. "proves directly" .-> Invariants
+  Harnesses --> Rules
+  Engine --> Rules
+  Kani -. "checks production functions" .-> Rules
+  TLC -. "models journal operations" .-> Engine
 ```
 
 ### Repository Layout
@@ -98,29 +99,16 @@ Orbit/
 ├── tests/frontend/       # Vitest + Testing Library frontend test suites
 ├── src-tauri/            # Tauri v2 Rust backend (harness/, transcript/, transfer/, schemas/)
 ├── orbit-core/           # Pure-std shared crate (zero Tauri/SQLite/OS FFI)
-├── formal/               # Standalone Kani 0.68.0 formal proof suite (20 proofs) + run.sh
+├── formal/               # Kani safety checks and the TLA+ journal model
 ├── docs/                 # Deep reference documentation
 └── assets/               # README icon artwork
 ```
 
 ## Formal Verification
 
-Core security, state-machine, credential-masking, and parsing invariants in `orbit-core/` are mathematically verified with [Kani](https://model-checking.github.io/kani/) 0.68.0 (CBMC 6.11.0), directly against the exact production functions linked by `src-tauri/`:
+[Kani](https://model-checking.github.io/kani/) checks safety properties of production Rust functions within the bounds of each harness. TLC checks conditional progress in a finite TLA+ model of the journal. Rust and frontend tests exercise the platform adapters, storage, provider formats, and UI.
 
-| Module | Harnesses | Verified Properties |
-|---|---:|---|
-| `path_safety.rs` | 6 | Lexical containment, `..`/Windows reserved device/ADS rejection, backup-root confinement, archive image allowlist, case-insensitive collision folding, `~/` & `..` link normalization |
-| `state_machines.rs` | 5 | Ledger operation state resolution, superseded-pending classification, monotonic `op_id`/backup uniqueness, stale-checksum & preimage restore preconditions |
-| `credentials.rs` | 4 | Dash-prefixed `credential_flag` precision, case-insensitive HTTPS/SSE checks, masked placeholder restoration & fresh-placeholder rejection, secret-key classification |
-| `transcript_and_parsing.rs` | 5 | Panic-free UTF-8 `parse_checksum` roundtrip, BOM/CRLF/unclosed frontmatter parsing, cycle-safe iterative spine ordering, collision-free `unique_title`, bounded stream caps |
-
-Run all 20 proofs locally:
-
-```sh
-./formal/run.sh
-```
-
-See [`formal/README.md`](formal/README.md) for the full invariant catalog, mutation-testing audit, and proof-to-test mapping.
+The [formal verification guide](formal/README.md) gives the commands, properties, and assumptions for each check.
 
 ## Quick Start
 
@@ -157,14 +145,14 @@ cargo clippy --manifest-path orbit-core/Cargo.toml -- -D warnings
 cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml
 
-# Formal verification (requires Kani 0.68.0)
-./formal/run.sh
+# Bounded core safety (requires Kani 0.68.0)
+bash formal/run.sh
 ```
 
 ## Documentation
 
 - **[Agent Support & Reference](docs/reference.md)**: per-agent configuration paths, chat archive/conversion rules, setup backup limits, and execution security model
-- **[Formal Verification Guide](formal/README.md)**: Kani proof harnesses, mutation-testing results, and proof-to-removed-test mapping
+- **[Formal Verification Guide](formal/README.md)**: Safety bounds, journal progress assumptions, and boundary tests
 - **[Contributing Guide](CONTRIBUTING.md)**: platform toolchains, CI checks, release workflow, and optional live-CLI integration tests
 - **[Changelog](CHANGELOG.md)**: release history
 

@@ -88,7 +88,6 @@ fn load_session_light(
 }
 
 use orbit_core::transcript_and_parsing::order_spine_indices;
-pub use orbit_core::transcript_and_parsing::{order_spine_nodes, SpineNode};
 
 fn order_spine(messages: Vec<StoredMessage>) -> Vec<TranscriptMessage> {
     let order = order_spine_indices(

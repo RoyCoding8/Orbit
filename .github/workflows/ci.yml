@@ -51,11 +51,43 @@ jobs:
       - name: Lint Rust
         run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
       - name: Test Rust
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        run: |
+          cargo test --manifest-path orbit-core/Cargo.toml
+          cargo test --manifest-path src-tauri/Cargo.toml
+
+  formal:
+    name: formal (Kani and TLC)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Check core and harness formatting
+        run: |
+          cargo fmt --manifest-path orbit-core/Cargo.toml --check
+          cargo fmt --manifest-path formal/Cargo.toml --check
+          cargo clippy --manifest-path formal/Cargo.toml -- -D warnings
+      - name: Check journal liveness
+        run: |
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar \
+            --output "$RUNNER_TEMP/tla2tools.jar"
+          bash formal/run-tlc.sh "$RUNNER_TEMP/tla2tools.jar"
+      - name: Check core safety
+        run: |
+          cargo install --locked kani-verifier --version 0.68.0
+          cargo kani setup
+          bash formal/run.sh
 
   release:
     if: github.event_name == 'workflow_dispatch'
-    needs: checks
+    needs: [checks, formal]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

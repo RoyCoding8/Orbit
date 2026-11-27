@@ -1,0 +1,4 @@
+formal/*.sh text eol=lf
+formal/kani-harnesses.txt text eol=lf
+formal/tla/*.cfg text eol=lf
+formal/tla/*.tla text eol=lf

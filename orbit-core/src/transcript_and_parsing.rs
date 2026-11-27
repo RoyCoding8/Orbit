@@ -1,5 +1,5 @@
 //! Pure checksum parsing, YAML frontmatter extraction, iterative spine ordering,
-//! title deduplication, and bounded stream/UTF-8 helpers shared between
+//! title deduplication, and bounded stream helpers shared between
 //! `src-tauri` and `formal/`.
 
 use std::collections::{HashMap, HashSet};
@@ -32,26 +32,6 @@ pub fn parse_checksum_bytes(raw: &[u8]) -> Result<[u8; 32], &'static str> {
 /// Decode a 64-character ASCII hex SHA-256 checksum into 32 raw bytes (`&str` wrapper).
 pub fn parse_checksum(value: &str) -> Result<[u8; 32], &'static str> {
     parse_checksum_bytes(value.as_bytes())
-}
-
-fn nibble_to_hex(n: u8, uppercase: bool) -> u8 {
-    if n < 10 {
-        b'0' + n
-    } else if uppercase {
-        b'A' + (n - 10)
-    } else {
-        b'a' + (n - 10)
-    }
-}
-
-/// Encode a 32-byte digest into a 64-byte ASCII hex array.
-pub fn encode_hex_32(bytes: &[u8; 32], uppercase: bool) -> [u8; 64] {
-    let mut out = [0u8; 64];
-    for i in 0..32 {
-        out[i * 2] = nibble_to_hex(bytes[i] >> 4, uppercase);
-        out[i * 2 + 1] = nibble_to_hex(bytes[i] & 0x0f, uppercase);
-    }
-    out
 }
 
 fn find_newline_from(content: &[u8], start: usize) -> Option<usize> {
@@ -125,120 +105,6 @@ pub fn extract_frontmatter_body(content: &str) -> Option<&str> {
         .and_then(|bytes| std::str::from_utf8(bytes).ok())
 }
 
-/// Pure fixed-index node representation for stack-allocated spine ordering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SpineNodeIdx {
-    pub id: usize,
-    pub parent: Option<usize>,
-    pub position: usize,
-}
-
-/// Loop-free sorting network for up to 3 node IDs by `position`.
-fn sort_up_to_3(ids: &mut [usize; 3], len: usize, nodes: &[SpineNodeIdx; 3]) {
-    if len >= 2 && nodes[ids[1]].position < nodes[ids[0]].position {
-        ids.swap(0, 1);
-    }
-    if len == 3 {
-        if nodes[ids[2]].position < nodes[ids[1]].position {
-            ids.swap(1, 2);
-        }
-        if nodes[ids[1]].position < nodes[ids[0]].position {
-            ids.swap(0, 1);
-        }
-    }
-}
-
-/// Fixed-capacity stack-allocated iterative DFS pre-order traversal for up to 3 nodes.
-#[allow(clippy::needless_range_loop)]
-pub fn order_spine_nodes_bounded(
-    nodes: &[SpineNodeIdx; 3],
-    n: usize,
-) -> ([(usize, usize, usize); 3], usize) {
-    let mut ordered = [(0usize, 0usize, 0usize); 3];
-    let mut ord_len = 0usize;
-    let mut seen = [false; 3];
-    let mut stack = [(0usize, 0usize, 0usize); 8];
-    let mut stack_len = 0usize;
-
-    let mut roots = [0usize; 3];
-    let mut roots_len = 0usize;
-    for i in 0..3 {
-        if i < n && nodes[i].parent.is_none() {
-            roots[roots_len] = nodes[i].id;
-            roots_len += 1;
-        }
-    }
-    sort_up_to_3(&mut roots, roots_len, nodes);
-    for rev in 0..3 {
-        if rev < roots_len {
-            let r = roots_len - 1 - rev;
-            stack[stack_len] = (roots[r], 0, r);
-            stack_len += 1;
-        }
-    }
-
-    let mut remaining = [0usize; 3];
-    for k in 0..3 {
-        if k < n {
-            remaining[k] = k;
-        }
-    }
-    sort_up_to_3(&mut remaining, n, nodes);
-    let mut rem_cursor = 0usize;
-
-    // Unified iterative loop: drains stack, then seeds next unseen remaining node (cycle/orphan).
-    // At most 6 total pops/seeds can occur in a 3-node graph (each node has <= 1 parent).
-    for _step in 0..6 {
-        if stack_len == 0 {
-            while rem_cursor < n && seen[remaining[rem_cursor]] {
-                rem_cursor += 1;
-            }
-            if rem_cursor >= n {
-                break;
-            }
-            stack[0] = (remaining[rem_cursor], 0, 0);
-            stack_len = 1;
-            rem_cursor += 1;
-        }
-        stack_len -= 1;
-        let (id, depth, branch_index) = stack[stack_len];
-        if seen[id] {
-            continue;
-        }
-        seen[id] = true;
-        ordered[ord_len] = (id, depth, branch_index);
-        ord_len += 1;
-
-        let mut kids = [0usize; 3];
-        let mut kids_len = 0usize;
-        for i in 0..3 {
-            if i < n && nodes[i].parent == Some(id) {
-                kids[kids_len] = nodes[i].id;
-                kids_len += 1;
-            }
-        }
-        sort_up_to_3(&mut kids, kids_len, nodes);
-        for rev in 0..3 {
-            if rev < kids_len {
-                let c = kids_len - 1 - rev;
-                if stack_len < stack.len() {
-                    stack[stack_len] = (kids[c], depth + 1, c);
-                    stack_len += 1;
-                }
-            }
-        }
-    }
-    (ordered, ord_len)
-}
-
-/// Minimal node representation for pure iterative spine ordering.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SpineNode {
-    pub uuid: String,
-    pub parent_uuid: Option<String>,
-    pub position: usize,
-}
-
 /// Pure iterative DFS pre-order traversal over `(uuid, parent_uuid, position)` items.
 /// Returns `(original_index, depth, branch_index)` tuples without recursion.
 pub fn order_spine_indices<'a>(
@@ -302,52 +168,6 @@ fn drain_spine_stack<'a>(
     }
 }
 
-/// Pure iterative DFS pre-order traversal of a parent-linked message graph.
-/// Returns `(uuid, depth, branch_index)` tuples without recursion, preventing
-/// stack overflow on deeply nested or adversarial chains and cycles.
-pub fn order_spine_nodes(nodes: &[SpineNode]) -> Vec<(String, usize, usize)> {
-    order_spine_indices(
-        nodes
-            .iter()
-            .map(|n| (n.uuid.as_str(), n.parent_uuid.as_deref(), n.position)),
-    )
-    .into_iter()
-    .map(|(idx, depth, branch)| (nodes[idx].uuid.clone(), depth, branch))
-    .collect()
-}
-
-/// Pure title collision resolver over a bitmask of occupied slots (`bit 0` = base title).
-pub fn unique_title_slot(existing_mask: u8) -> u8 {
-    if (existing_mask & 1) == 0 {
-        return 0;
-    }
-    let mut index = 1u8;
-    while index < 8 {
-        if (existing_mask & (1u8 << index)) == 0 {
-            return index;
-        }
-        index += 1;
-    }
-    8
-}
-
-/// Format `unique_title` into a fixed stack buffer (allocation-free).
-pub fn format_unique_title_buf(source: &[u8], slot: u8) -> ([u8; 16], usize) {
-    let mut out = [0u8; 16];
-    let mut len = source.len().min(14);
-    let mut i = 0;
-    while i < len {
-        out[i] = source[i];
-        i += 1;
-    }
-    if slot > 0 {
-        out[len] = b'-';
-        out[len + 1] = b'0' + slot;
-        len += 2;
-    }
-    (out, len)
-}
-
 /// Return a collision-free title by appending `-1`, `-2`, ... if `source` is already in `existing`.
 pub fn unique_title(source: &str, existing: &HashSet<String>) -> String {
     if !existing.contains(source) {
@@ -363,15 +183,9 @@ pub fn unique_title(source: &str, existing: &HashSet<String>) -> String {
     }
 }
 
-/// Pure bounded-stream decision rule: caps read to `max_bytes + 1` and accepts iff `stream_len <= max_bytes`.
-pub fn read_bounded_stream(stream_len: u64, max_bytes: u64) -> Result<(u64, u64), u64> {
-    let take_cap = max_bytes.saturating_add(1);
-    let read_bytes = stream_len.min(take_cap);
-    if read_bytes > max_bytes {
-        Err(read_bytes)
-    } else {
-        Ok((read_bytes, read_bytes))
-    }
+/// Probe for one byte past the read budget without overflowing.
+pub fn read_probe_limit(max_bytes: u64) -> u64 {
+    max_bytes.saturating_add(1)
 }
 
 /// Error returned by [`read_bounded_bytes`].
@@ -385,22 +199,115 @@ pub enum ReadBoundedError {
 pub fn read_bounded_bytes<R: Read>(reader: R, max_bytes: u64) -> Result<Vec<u8>, ReadBoundedError> {
     let mut buf = Vec::new();
     reader
-        .take(max_bytes.saturating_add(1))
+        .take(read_probe_limit(max_bytes))
         .read_to_end(&mut buf)
         .map_err(ReadBoundedError::Io)?;
-    read_bounded_stream(buf.len() as u64, max_bytes)
-        .map(|_| buf)
-        .map_err(|_| ReadBoundedError::TooLarge)
+    if buf.len() as u64 > max_bytes {
+        Err(ReadBoundedError::TooLarge)
+    } else {
+        Ok(buf)
+    }
 }
 
-/// UTF-8-safe bounded prefix truncation (never splits a multi-byte code point).
-pub fn truncate_utf8_bounded(text: &str, max_bytes: usize) -> &str {
-    if text.len() <= max_bytes {
-        return text;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{self, Cursor};
+
+    #[test]
+    fn frontmatter_preserves_multiline_unicode() {
+        assert_eq!(
+            extract_frontmatter_body("\u{feff}---\r\nname: 雪\r\ndescription: café\r\n---\r\nbody"),
+            Some("name: 雪\r\ndescription: café")
+        );
     }
-    let mut end = max_bytes;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
+
+    #[test]
+    fn frontmatter_distinguishes_an_empty_body_from_a_malformed_fence() {
+        assert_eq!(extract_frontmatter_body("---\n---"), Some(""));
+        assert_eq!(extract_frontmatter_body("---x\nk: v\n---\n"), None);
     }
-    &text[..end]
+
+    #[test]
+    fn every_small_spine_graph_visits_each_node_once() {
+        let ids = ["a", "b", "c", "d"];
+        let parents = [
+            None,
+            Some("a"),
+            Some("b"),
+            Some("c"),
+            Some("d"),
+            Some("missing"),
+        ];
+        for mut graph in 0..parents.len().pow(4) {
+            let nodes = std::array::from_fn::<_, 4, _>(|index| {
+                let parent = parents[graph % parents.len()];
+                graph /= parents.len();
+                (ids[index], parent, index)
+            });
+            let mut indices: Vec<_> = order_spine_indices(nodes.into_iter())
+                .into_iter()
+                .map(|(index, _, _)| index)
+                .collect();
+            indices.sort_unstable();
+            assert_eq!(indices, [0, 1, 2, 3], "{nodes:?}");
+        }
+    }
+
+    #[test]
+    fn spine_orders_parents_before_children_without_recursing() {
+        let ids: Vec<_> = (0..20_000).map(|i| i.to_string()).collect();
+        let count = ids.len();
+        let ordered = order_spine_indices((0..count).rev().map(|i| {
+            (
+                ids[i].as_str(),
+                i.checked_sub(1).map(|parent| ids[parent].as_str()),
+                count - i,
+            )
+        }));
+        assert_eq!(ordered.len(), count);
+        for (depth, entry) in ordered.into_iter().enumerate() {
+            assert_eq!(entry, (count - depth - 1, depth, 0));
+        }
+    }
+
+    #[test]
+    fn titles_choose_the_first_free_suffix() {
+        let title = "Chat-1 雪".repeat(20);
+        let mut existing: HashSet<_> = (1..=15).map(|suffix| format!("{title}-{suffix}")).collect();
+        assert_eq!(unique_title(&title, &existing), title);
+        existing.insert(title.clone());
+        assert_eq!(unique_title(&title, &existing), format!("{title}-16"));
+        existing.remove(&format!("{title}-2"));
+        assert_eq!(unique_title(&title, &existing), format!("{title}-2"));
+        assert_eq!(unique_title("", &HashSet::from([String::new()])), "-1");
+    }
+
+    #[test]
+    fn bounded_read_limits_consumption_and_preserves_errors() {
+        let data = [0x42; 100];
+        for (limit, consumed) in [(64, 65), (0, 1)] {
+            let mut reader = Cursor::new(data);
+            assert!(matches!(
+                read_bounded_bytes(&mut reader, limit),
+                Err(ReadBoundedError::TooLarge)
+            ));
+            assert_eq!(reader.position(), consumed);
+        }
+        assert_eq!(read_bounded_bytes(&data[..64], 64).unwrap(), &data[..64]);
+        assert_eq!(read_bounded_bytes(&data[..], u64::MAX).unwrap(), data);
+        assert!(read_bounded_bytes(&[][..], 0).unwrap().is_empty());
+        assert!(matches!(
+            read_bounded_bytes(BrokenReader, 64),
+            Err(ReadBoundedError::Io(error)) if error.to_string() == "test reader failure"
+        ));
+    }
+
+    struct BrokenReader;
+
+    impl Read for BrokenReader {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("test reader failure"))
+        }
+    }
 }

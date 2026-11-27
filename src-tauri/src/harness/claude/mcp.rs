@@ -775,9 +775,6 @@ fn is_loopback_http(url: &str) -> bool {
     let Ok(parsed) = url.parse::<reqwest::Url>() else {
         return false;
     };
-    if orbit_core::credentials::is_loopback_http_url(url) {
-        return true;
-    }
     if parsed.scheme() != "http" {
         return false;
     }
@@ -1309,6 +1306,28 @@ mod tests {
         .unwrap_err();
         assert!(error.starts_with("Could not start MCP server:"));
         assert!(!error.contains("token"));
+    }
+
+    #[test]
+    fn bench_classifies_the_parsed_http_host() {
+        for url in [
+            "http://localhost:3000/mcp",
+            "http://127.0.0.1:9/mcp",
+            "http://127.0.0.2/mcp",
+            "http://[::1]:9/mcp",
+        ] {
+            assert!(is_loopback_http(url));
+        }
+        for url in [
+            "https://localhost",
+            "http://localhost:invalid",
+            "http://localhost.example.test",
+            r"http://example.test\@localhost/mcp",
+        ] {
+            assert!(!is_loopback_http(url));
+        }
+        assert!(is_https("HtTpS://example.test/mcp"));
+        assert!(!is_https("https://"));
     }
 
     #[test]

@@ -280,13 +280,7 @@ fn validate_id(id: &str) -> Result<(), String> {
         .next()
         .unwrap_or_default()
         .trim_end_matches(['.', ' ']);
-    let reserved = ["CON", "PRN", "AUX", "NUL"]
-        .iter()
-        .any(|name| stem.eq_ignore_ascii_case(name))
-        || (stem.len() == 4
-            && (stem.as_bytes()[..3].eq_ignore_ascii_case(b"COM")
-                || stem.as_bytes()[..3].eq_ignore_ascii_case(b"LPT"))
-            && matches!(stem.as_bytes()[3], b'1'..=b'9'));
+    let reserved = orbit_core::path_safety::is_windows_reserved_device_stem(stem.as_bytes());
     if invalid || reserved {
         Err("invalid skill id".into())
     } else {
@@ -313,6 +307,31 @@ mod tests {
             claude_json: dir.path().join(".claude.json"),
         });
         (dir, harness)
+    }
+
+    #[test]
+    fn skill_ids_reject_windows_paths_streams_and_devices() {
+        for id in [
+            "",
+            ".",
+            "..",
+            r"a\b",
+            "a/b",
+            "name:stream",
+            "name.",
+            "name ",
+            "CON",
+            "nul.txt",
+            "COM1",
+            "lPt9 .txt",
+            "a\u{0080}",
+            "a?b",
+        ] {
+            assert!(validate_id(id).is_err(), "{id:?}");
+        }
+        for id in ["alpha", "extension.md", "com10", "日本語"] {
+            assert!(validate_id(id).is_ok(), "{id:?}");
+        }
     }
 
     #[test]

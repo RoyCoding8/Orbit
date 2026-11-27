@@ -395,27 +395,25 @@ pub fn resolve_operation_state(
 /// Resolve whether a reservation landed from the recorded target and backup.
 /// Applied rows remain historical receipts even after later mutations.
 pub fn operation_state(row: &LedgerRow) -> Result<OperationState, String> {
-    match row.status {
-        Some(LedgerStatus::Applied) | None => return Ok(OperationState::Applied),
-        Some(LedgerStatus::Pending) => {}
-    }
-    let Some(target_path) = row.target.as_deref() else {
-        return Ok(OperationState::Drift);
-    };
-    let observed_target = checksum_if_present(Path::new(target_path))?;
-    let observed_backup = if observed_target.as_deref() == row.after_checksum.as_deref() {
-        match (row.backup_path.as_deref(), row.before_checksum.as_deref()) {
-            (Some(path), Some(_)) => checksum_if_present(Path::new(path))?,
-            _ => None,
+    let (observed_target, observed_backup) = match (row.status, row.target.as_deref()) {
+        (Some(LedgerStatus::Pending), Some(target)) => {
+            let observed_target = checksum_if_present(Path::new(target))?;
+            let observed_backup = match (row.backup_path.as_deref(), row.before_checksum.as_deref())
+            {
+                (Some(path), Some(_)) if observed_target == row.after_checksum => {
+                    checksum_if_present(Path::new(path))?
+                }
+                _ => None,
+            };
+            (observed_target, observed_backup)
         }
-    } else {
-        None
+        _ => (None, None),
     };
     Ok(resolve_operation_state(
         row.status,
         row.before_checksum.as_deref(),
         row.after_checksum.as_deref(),
-        true,
+        row.target.is_some(),
         observed_target.as_deref(),
         row.backup_path.is_some(),
         observed_backup.as_deref(),
@@ -1152,6 +1150,32 @@ mod tests {
         )
         .unwrap()
         .is_none());
+    }
+
+    #[test]
+    fn backup_paths_stay_under_the_backup_root_for_hostile_ids() {
+        let (_dir, harness) = fixture();
+        for id in ["../escape", r"..\..\escape", "a/b", r"a\b", r"C:\evil", ""] {
+            let backup = backup_path(harness.config_root(), id, "edit");
+            assert_eq!(
+                backup.parent(),
+                Some(backup_root(harness.config_root()).as_path())
+            );
+        }
+    }
+
+    #[test]
+    fn backup_path_and_op_id_are_unique_across_rapid_consecutive_calls() {
+        let (_dir, harness) = fixture();
+        let config_root = harness.config_root();
+        assert_ne!(
+            backup_path(config_root, "id", "edit"),
+            backup_path(config_root, "id", "edit")
+        );
+        assert_ne!(
+            op_id("settings", "id", "edit"),
+            op_id("settings", "id", "edit")
+        );
     }
 
     #[cfg(unix)]

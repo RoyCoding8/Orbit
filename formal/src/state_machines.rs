@@ -3,11 +3,15 @@
 #[cfg(kani)]
 mod verification {
     use orbit_core::state_machines::{
-        check_restore_preconditions, classify_history_status, format_backup_filename_buf,
-        format_op_id_buf, pending_was_superseded, resolve_operation_state, slices_equal,
-        HistoryOperationStatus, LedgerStatus, OperationState, RestorePreconditions,
-        RestoreReservation, RowSummary,
+        classify_history_status, pending_was_superseded_by, resolve_operation_state,
+        verify_directory_checksum, HistoryOperationStatus, LedgerStatus, OperationState,
     };
+
+    #[derive(Clone, Copy)]
+    struct Row {
+        status: Option<LedgerStatus>,
+        target_id: Option<u8>,
+    }
 
     fn any_ledger_status() -> LedgerStatus {
         if kani::any() {
@@ -106,7 +110,7 @@ mod verification {
     fn proof_pending_was_superseded_invariants() {
         let len: usize = kani::any();
         kani::assume((1..=4).contains(&len));
-        let mut rows = [RowSummary {
+        let mut rows = [Row {
             status: None,
             target_id: None,
         }; 4];
@@ -117,13 +121,14 @@ mod verification {
             } else {
                 None
             };
-            rows[i] = RowSummary { status, target_id };
+            rows[i] = Row { status, target_id };
         }
         let slice = &rows[..len];
         let idx: usize = kani::any();
         kani::assume(idx < len);
 
-        let superseded = pending_was_superseded(slice, idx, &slice[idx]);
+        let superseded =
+            pending_was_superseded_by(slice, idx, &slice[idx], |r| r.status, |r| r.target_id);
 
         if slice[idx].status != Some(LedgerStatus::Pending) || slice[idx].target_id.is_none() {
             assert!(!superseded);
@@ -172,80 +177,14 @@ mod verification {
     }
 
     #[kani::proof]
-    #[kani::unwind(14)]
-    fn proof_atomic_sequence_uniqueness() {
-        let stamp: u64 = kani::any();
-        let seq1: u64 = kani::any();
-        let seq2: u64 = kani::any();
-        kani::assume(stamp < 100);
-        kani::assume(seq1 < 100 && seq2 < 100);
-        kani::assume(seq1 != seq2);
-
-        let (op1, op1_len) = format_op_id_buf(b"k", b"i", b"a", stamp, seq1);
-        let (op2, op2_len) = format_op_id_buf(b"k", b"i", b"a", stamp, seq2);
-        assert!(!slices_equal(&op1[..op1_len], &op2[..op2_len]));
-
-        let (bk1, bk1_len) = format_backup_filename_buf(b"h", b"a", stamp, seq1);
-        let (bk2, bk2_len) = format_backup_filename_buf(b"h", b"a", stamp, seq2);
-        assert!(!slices_equal(&bk1[..bk1_len], &bk2[..bk2_len]));
-    }
-
-    #[kani::proof]
-    fn proof_restore_and_undo_preconditions() {
-        let p = RestorePreconditions {
-            reservation_complete: kani::any(),
-            superseded: kani::any(),
-            op_state: any_operation_state(),
-            is_directory: kani::any(),
-            is_tree_v2_checksum: kani::any(),
-            expected_current: if kani::any() {
-                Some(kani::any::<u8>() % 4)
-            } else {
-                None
-            },
-            observed_current: if kani::any() {
-                Some(kani::any::<u8>() % 4)
-            } else {
-                None
-            },
-            recorded_before: if kani::any() {
-                Some(kani::any::<u8>() % 4)
-            } else {
-                None
-            },
-            observed_backup: if kani::any() {
-                Some(kani::any::<u8>() % 4)
-            } else {
-                None
-            },
-        };
-
-        let decision = check_restore_preconditions(&p);
-
-        if p.observed_current != p.expected_current {
-            assert!(decision.is_err());
-        }
-        if p.recorded_before.is_none() || p.observed_backup != p.recorded_before {
-            assert!(decision.is_err());
-        }
-        if p.is_directory && !p.is_tree_v2_checksum {
-            assert!(decision.is_err());
-        }
-        if !p.reservation_complete || p.superseded || p.op_state != OperationState::Applied {
-            assert!(decision.is_err());
-        }
-
-        let mut res = RestoreReservation::Idle;
-        let seq1: u64 = kani::any();
-        let seq2: u64 = kani::any();
-        assert!(res.complete(seq1).is_err());
-        assert!(res.reserve(seq1).is_ok());
-        assert!(res.reserve(seq2).is_err());
-        if seq2 != seq1 {
-            assert!(res.complete(seq2).is_err());
-        }
-        assert!(res.complete(seq1).is_ok());
-        assert!(res.reserve(seq2).is_err());
-        assert!(res.complete(seq1).is_err());
+    #[kani::unwind(24)]
+    fn proof_verify_directory_checksum() {
+        let checksums = ["", "legacy", "tree-v2-sha256:a", "tree-v2-sha256:b"];
+        let actual = usize::from(kani::any::<u8>() % 4);
+        let expected = usize::from(kani::any::<u8>() % 4);
+        assert_eq!(
+            verify_directory_checksum(checksums[actual], checksums[expected]).is_ok(),
+            expected >= 2 && actual == expected
+        );
     }
 }

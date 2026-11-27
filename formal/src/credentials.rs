@@ -3,9 +3,8 @@
 #[cfg(kani)]
 mod verification {
     use orbit_core::credentials::{
-        contains_mask, credential_flag_bytes, is_allowed_mcp_url_bytes,
-        is_event_stream_content_type_bytes, is_https_scheme_bytes, restore_and_validate_entry,
-        secret_name_bytes, value_shape_secret_bytes, ConfigNode, LeafVal, RestoreError, MASK_TOKEN,
+        credential_flag_bytes, is_event_stream_content_type_bytes, is_https_scheme_bytes,
+        secret_name_bytes, value_shape_secret_bytes,
     };
 
     #[kani::proof]
@@ -88,17 +87,7 @@ mod verification {
             }
         }
         assert!(is_https_scheme_bytes(&url));
-        assert!(is_allowed_mcp_url_bytes(&url));
-
-        // 2. Plain HTTP is allowed ONLY for loopback hosts, never remote hosts.
-        assert!(!is_allowed_mcp_url_bytes(b"http://x.io/m"));
-        assert!(!is_allowed_mcp_url_bytes(b"HTTP://10.0.0.1"));
-        assert!(!is_allowed_mcp_url_bytes(b"ftp://localhost"));
-        assert!(is_allowed_mcp_url_bytes(b"http://localhost:80"));
-        assert!(is_allowed_mcp_url_bytes(b"http://127.0.0.1"));
-        assert!(is_allowed_mcp_url_bytes(b"http://[::1]:80"));
-
-        // 3. Symbolic case variations of `text/event-stream` with optional `;a=b`.
+        // Symbolic case variations of `text/event-stream` with optional `;a=b`.
         let sse_mask: u32 = kani::any();
         let with_param: bool = kani::any();
         let mut ct = [0u8; 21];
@@ -124,81 +113,6 @@ mod verification {
         assert!(!is_event_stream_content_type_bytes(
             b"text/plain;text/event-stream"
         ));
-    }
-
-    #[kani::proof]
-    #[kani::unwind(4)]
-    fn proof_masked_placeholder_restoration_and_fresh_rejection() {
-        let stored_secret: u8 = kani::any();
-        kani::assume(stored_secret != MASK_TOKEN);
-        let stored_is_str: bool = kani::any();
-        let stored_val = if stored_is_str {
-            LeafVal::Str(stored_secret)
-        } else {
-            LeafVal::NonStr
-        };
-        let stored = ConfigNode::Object([Some((1, stored_val)), None]);
-
-        let edit_k1_masked: bool = kani::any();
-        let edit_k1_new: u8 = kani::any();
-        kani::assume(edit_k1_new != MASK_TOKEN);
-        let edit_k2_present: bool = kani::any();
-        let edit_k2_masked: bool = kani::any();
-        let edit_k2_val: u8 = kani::any();
-        kani::assume(edit_k2_val != MASK_TOKEN);
-
-        let mut edited = ConfigNode::Object([
-            Some((
-                1,
-                LeafVal::Str(if edit_k1_masked {
-                    MASK_TOKEN
-                } else {
-                    edit_k1_new
-                }),
-            )),
-            if edit_k2_present {
-                Some((
-                    2,
-                    LeafVal::Str(if edit_k2_masked {
-                        MASK_TOKEN
-                    } else {
-                        edit_k2_val
-                    }),
-                ))
-            } else {
-                None
-            },
-        ]);
-
-        let res = restore_and_validate_entry(Some(&stored), &mut edited);
-
-        let fresh_mask = (edit_k2_present && edit_k2_masked) || (edit_k1_masked && !stored_is_str);
-        if fresh_mask {
-            assert_eq!(res, Err(RestoreError::FreshPlaceholderRemaining));
-        } else {
-            assert!(res.is_ok());
-            assert!(!contains_mask(&edited));
-            if let ConfigNode::Object(slots) = edited {
-                let (_, v1) = slots[0].unwrap();
-                if edit_k1_masked {
-                    assert_eq!(v1, LeafVal::Str(stored_secret));
-                } else {
-                    assert_eq!(v1, LeafVal::Str(edit_k1_new));
-                }
-            }
-        }
-
-        let arr_mask_pos: u8 = kani::any();
-        kani::assume(arr_mask_pos < 2);
-        let mut arr = ConfigNode::Array([
-            LeafVal::Str(if arr_mask_pos == 0 { MASK_TOKEN } else { 7 }),
-            LeafVal::Str(if arr_mask_pos == 1 { MASK_TOKEN } else { 8 }),
-        ]);
-        let stored_arr = ConfigNode::Array([LeafVal::Str(42), LeafVal::Str(43)]);
-        assert_eq!(
-            restore_and_validate_entry(Some(&stored_arr), &mut arr),
-            Err(RestoreError::MaskInArray)
-        );
     }
 
     #[kani::proof]

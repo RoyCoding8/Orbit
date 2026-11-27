@@ -1,10 +1,4 @@
-//! Kani formal verification proof harnesses for Orbit.
-//!
-//! Every module directly imports and verifies the exact production functions
-//! exported by `orbit-core` (which `src-tauri` also depends on), eliminating
-//! model-to-code drift while keeping zero Tauri, SQLite, or OS FFI dependencies.
-
-pub use orbit_core;
+//! Bounded Kani safety checks for the production logic in `orbit-core`.
 
 pub mod credentials;
 pub mod path_safety;

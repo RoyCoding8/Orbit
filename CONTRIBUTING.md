@@ -1,6 +1,6 @@
 # Contributing to Orbit
 
-Orbit uses React 19 and TypeScript for its interface (`src/`), Rust with Tauri v2 for its desktop backend (`src-tauri/`), a pure-`std` shared crate (`orbit-core/`) for security and state invariants, and Kani 0.68.0 (`formal/`) for formal verification.
+Orbit uses React 19 and TypeScript for its interface (`src/`), Rust with Tauri v2 for its desktop backend (`src-tauri/`), and a standard-library-only crate (`orbit-core/`) for deterministic production rules.
 
 ## Development setup
 
@@ -19,7 +19,7 @@ The development server runs at `http://127.0.0.1:1420`. For release packages, se
 - `tests/frontend/`: Vitest + Testing Library suites and `test-setup.ts`
 - `src-tauri/`: Tauri v2 backend (`src/harness/`, `src/transcript/`, `src/transfer/`, `schemas/`)
 - `orbit-core/`: Dependency-free pure-Rust invariants shared by `src-tauri/` and `formal/`
-- `formal/`: Kani 0.68.0 proof harnesses (`formal/run.sh`, `formal/README.md`)
+- `formal/`: Kani safety harnesses and a TLA+ journal model ([verification guide](formal/README.md))
 
 ## Platform setup
 
@@ -62,18 +62,20 @@ cargo fmt --manifest-path orbit-core/Cargo.toml --check
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 cargo clippy --manifest-path orbit-core/Cargo.toml -- -D warnings
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path orbit-core/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-If you modify pure invariants in `orbit-core/` or `formal/`, also run the Kani formal verification suite (requires [Kani 0.68.0](https://model-checking.github.io/kani/)):
+Changes to core rules or journal lifecycle behavior should also pass the formal checks. Use the tool versions and TLC download command in the [verification guide](formal/README.md).
 
 ```sh
 cargo fmt --manifest-path formal/Cargo.toml --check
 cargo clippy --manifest-path formal/Cargo.toml -- -D warnings
-./formal/run.sh
+bash formal/run.sh
+bash formal/run-tlc.sh /path/to/tla2tools.jar
 ```
 
-GitHub Actions (`.github/workflows/ci.yml`) runs the frontend and Rust checks on Ubuntu, macOS, and Windows for pushes and pull requests.
+GitHub Actions (`.github/workflows/ci.yml`) runs frontend and Rust checks on Ubuntu, macOS, and Windows, plus Kani and TLC on Ubuntu.
 
 The manually dispatched Release workflow (`.github/workflows/release.yml`) builds packages for Windows (x64, arm64), Linux (x64, arm64), and macOS (arm64, x64) and creates a draft GitHub Release using the version in `src-tauri/tauri.conf.json`, with an optional `prerelease` input (defaults to `false`). When `TAURI_SIGNING_PRIVATE_KEY` (and optional `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) repository secrets are configured, it signs updater artifacts and generates `latest.json` for in-app updates alongside `SHA256SUMS.txt`.
 
